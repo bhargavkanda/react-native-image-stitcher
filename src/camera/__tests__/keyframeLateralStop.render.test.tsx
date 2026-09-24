@@ -25,7 +25,8 @@ g.__kf = {
   calls: [] as string[],
   startArgs: [] as any[],
 };
-g.__pm = { lateralExceeded: false };
+g.__pm = { lateralExceeded: false, opts: [] as any[] };
+g.__drift = { on: false };
 
 jest.mock('../../stitching/useIncrementalStitcher', () => {
   const obj: any = {
@@ -64,10 +65,30 @@ jest.mock('../usePanMotion', () => {
   const actual = jest.requireActual('../usePanMotion');
   return {
     ...actual,
-    usePanMotion: (o: any) => ({
-      ...actual.usePanMotion(o),
-      lateralExceeded: (globalThis as any).__pm.lateralExceeded,
-    }),
+    usePanMotion: (o: any) => {
+      (globalThis as any).__pm.opts.push(o);
+      return {
+        ...actual.usePanMotion(o),
+        lateralExceeded: (globalThis as any).__pm.lateralExceeded,
+      };
+    },
+  };
+});
+// Orientation drift on demand, only while the hook is active — as the real
+// hook reports it.
+jest.mock('../useOrientationDrift', () => {
+  const actual = jest.requireActual('../useOrientationDrift');
+  return {
+    ...actual,
+    useOrientationDrift: (active: boolean) => {
+      const r = actual.useOrientationDrift(active);
+      return (globalThis as any).__drift.on && active
+        ? {
+            ...r, drifted: true,
+            captureOrientation: 'landscape-left', currentOrientation: 'portrait',
+          }
+        : r;
+    },
   };
 });
 jest.mock('../../stitching/computeInscribedRect', () => ({
@@ -80,6 +101,8 @@ import { Camera } from '../Camera';
 import { RectCropPreview } from '../RectCropPreview';
 // eslint-disable-next-line import/first
 import { LateralMotionModal } from '../LateralMotionModal';
+// eslint-disable-next-line import/first
+import { OrientationDriftModal } from '../OrientationDriftModal';
 // eslint-disable-next-line import/first
 import { DEFAULT_GUIDANCE_COPY } from '../cameraGuidanceCopy';
 
@@ -124,6 +147,8 @@ beforeEach(() => {
   g.__kf.startArgs = [];
   g.__kf.finalizeImpl = async () => OK_RESULT;
   g.__pm.lateralExceeded = false;
+  g.__pm.opts = [];
+  g.__drift.on = false;
 });
 
 const vis = (t: ReactTestRenderer, T: any) => t.root.findByType(T).props.visible;
@@ -188,6 +213,7 @@ describe('keyframe lateral stop — never two modals at once', () => {
     expect(t.root.findByType(LateralMotionModal).props.title)
       .toBe(DEFAULT_GUIDANCE_COPY.lateralStopDiscardedTitle);
     expect(g.__kf.calls).not.toContain('finalize');
+    expect(g.__kf.calls).toContain('cancel');
     expect(ab).toEqual(['lateral-drift']);
     act(() => t.unmount());
   });
@@ -199,6 +225,7 @@ describe('keyframe lateral stop — never two modals at once', () => {
     await act(async () => { await sleep(120); });
     expect(vis(t, LateralMotionModal)).toBe(true);
     expect(g.__kf.calls).not.toContain('finalize');
+    expect(g.__kf.calls).toContain('cancel');
     expect(ab).toEqual(['lateral-drift']);
     act(() => t.unmount());
   });
@@ -221,6 +248,111 @@ describe('keyframe lateral stop — never two modals at once', () => {
     await act(async () => { await sleep(120); });
     expect(seen).toHaveLength(2);
     expect(seen[1].warnings.map((w: any) => w.code)).not.toContain('LATERAL_DRIFT_FINALIZE');
+    act(() => t.unmount());
+  });
+});
+
+describe('the keyframe engine arms the IMU lateral guard only once it has something to protect', () => {
+  const lastOpts = () => g.__pm.opts[g.__pm.opts.length - 1];
+  it('non-AR: the budget is 0 at 0-1 keyframes and the host value from 2', async () => {
+    const { t, rerender } = await setup({ lateralBudgetCm: 7 });
+    expect(lastOpts().active).toBe(true);
+    expect(lastOpts().lateralBudgetCm).toBe(0);
+    g.__kf.state = { acceptedCount: 1 };
+    await rerender();
+    expect(lastOpts().lateralBudgetCm).toBe(0);
+    g.__kf.state = { acceptedCount: 2 };
+    await rerender();
+    expect(lastOpts().lateralBudgetCm).toBe(7);
+    act(() => t.unmount());
+  });
+  it('is inactive, and unarmed, when no capture is recording', async () => {
+    const ref = React.createRef<any>();
+    let t!: ReactTestRenderer;
+    await act(async () => { t = create(el({ lateralBudgetCm: 7 }, ref)); });
+    expect(lastOpts().active).toBe(false);
+    act(() => t.unmount());
+  });
+});
+
+describe('orientation drift outranks the lateral stop, and its opt-out opts out', () => {
+  it('drift and lateral in the same render: the capture is ABANDONED for drift, never finalized', async () => {
+    const ab: string[] = [];
+    const { t, rerender } = await setup({ onCaptureAbandoned: (r: string) => ab.push(r) });
+    g.__kf.state = { acceptedCount: 5 };
+    await rerender();
+    g.__drift.on = true;
+    g.__pm.lateralExceeded = true;
+    await rerender();
+    await act(async () => { await sleep(120); });
+    expect(g.__kf.calls).not.toContain('finalize');
+    expect(ab).toEqual(['orientation-drift']);
+    expect(vis(t, OrientationDriftModal)).toBe(true);
+    expect(vis(t, LateralMotionModal)).toBe(false);
+    act(() => t.unmount());
+  });
+
+  it('orientationDriftAbandon={false}: no abandon, no explainer — and the lateral stop still works', async () => {
+    const ab: string[] = [];
+    const { t, rerender } = await setup({
+      rectCrop: false, orientationDriftAbandon: false,
+      onCaptureAbandoned: (r: string) => ab.push(r),
+    });
+    g.__kf.state = { acceptedCount: 5 };
+    await rerender();
+    g.__drift.on = true;
+    await rerender();
+    await act(async () => { await sleep(50); });
+    expect(ab).toEqual([]);
+    expect(vis(t, OrientationDriftModal)).toBe(false);
+    g.__pm.lateralExceeded = true;
+    await rerender();
+    await act(async () => { await sleep(120); });
+    expect(g.__kf.calls).toContain('finalize');
+    act(() => t.unmount());
+  });
+});
+
+describe('<Camera> holds the modal invariant: never two capture modals at once', () => {
+  it('a review pending from the last capture waits behind a drift explainer, then shows', async () => {
+    const { t, rerender, ref } = await setup({});
+    // Capture 1 finalizes into a review (rectCrop is on by default).
+    g.__kf.state = { acceptedCount: 3 };
+    await rerender();
+    await act(async () => { ref.current.stopPanorama(); });
+    await act(async () => { await sleep(120); });
+    expect(vis(t, RectCropPreview)).toBe(true);
+    // A host-driven capture 2 starts under it and trips orientation drift.
+    g.__kf.state = { acceptedCount: 0 };
+    await rerender();
+    await act(async () => {
+      ref.current.startPanorama(); await Promise.resolve(); await Promise.resolve();
+    });
+    g.__drift.on = true;
+    await rerender();
+    await act(async () => { await sleep(120); });
+    expect(vis(t, OrientationDriftModal)).toBe(true);
+    expect(vis(t, RectCropPreview)).toBe(false);
+    // Acknowledged: the review is back.
+    g.__drift.on = false;
+    await act(async () => { t.root.findByType(OrientationDriftModal).props.onAcknowledge(); });
+    expect(vis(t, OrientationDriftModal)).toBe(false);
+    expect(vis(t, RectCropPreview)).toBe(true);
+    act(() => t.unmount());
+  });
+
+  it('an unacknowledged drift explainer is cleared when the next capture starts', async () => {
+    const { t, rerender, ref } = await setup({ rectCrop: false });
+    g.__drift.on = true;
+    await rerender();
+    await act(async () => { await sleep(120); });
+    expect(vis(t, OrientationDriftModal)).toBe(true);
+    g.__drift.on = false;
+    await rerender();
+    await act(async () => {
+      ref.current.startPanorama(); await Promise.resolve(); await Promise.resolve();
+    });
+    expect(vis(t, OrientationDriftModal)).toBe(false);
     act(() => t.unmount());
   });
 });

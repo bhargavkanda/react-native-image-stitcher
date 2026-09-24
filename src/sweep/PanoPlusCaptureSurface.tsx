@@ -3097,6 +3097,10 @@ export const PanoPlusCaptureSurface = forwardRef<
         liveSessionRef.current = null;
         setRunningArm(null);
         setCameraLock(null);   // see finish() — it dies with its sweep
+        // The live status goes with the session, so `onPaintedChange` reports
+        // 0 on an abandon as it does after a finish. Safe against a late
+        // tick: `liveSessionRef` is already null, so `applyStatus` drops it.
+        setStatus(null);
         setPhase('idle');
         onFailure?.({
           code: 'panoplus-abandoned',

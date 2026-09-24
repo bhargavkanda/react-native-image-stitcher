@@ -111,11 +111,14 @@ describe('holdShouldDeferForCamera', () => {
           // 'stitching' is rejected outright by handleHoldStart before
           // this predicate is consulted, so it is excluded here.
           for (const phase of ['idle', 'recording'] as const) {
-            // The fourth term (`sweepHandoffPending`) is the sweep's own
-            // camera handoff, pinned false: no keyframe hold starts while a
-            // sweep is handing the camera over, and M6a deletes the term.
-            if (shouldUnmount(inFlight, probePending, phase, false)) {
-              expect(shouldDefer(inFlight, probePending)).toBe(true);
+            // The fourth term is the sweep→keyframe camera handoff. The
+            // call sites compose it into the first argument
+            // (`inFlightTransition || sweepHandoffPending`), so the invariant
+            // is checked against that composition, over both values.
+            for (const handoff of [true, false]) {
+              if (shouldUnmount(inFlight, probePending, phase, handoff)) {
+                expect(shouldDefer(inFlight || handoff, probePending)).toBe(true);
+              }
             }
           }
         }

@@ -25,10 +25,11 @@
 # `if(OpenCV_FOUND)` branch.  With no host OpenCV, CMake configures those out,
 # the build succeeds, and `ctest` prints
 #
-#     100% tests passed, 0 tests failed out of 115
+#     100% tests passed, 0 tests failed out of 138
 #
-# and exits 0 — versus 124 with OpenCV present.  Nine cases vanish behind a
-# green run, and nothing in the output says so.  The host OpenCV lives under
+# and exits 0 — versus 147 with OpenCV present.  Nine cases vanish behind a
+# green run, and nothing in the output says so.  (115/124 before 0.25 added
+# 23 OpenCV-free cases: stitcher_ladder_test 17, keyframe_timebudget_test 6.)  The host OpenCV lives under
 # `build/opencv-host/install`, and `/build/` is gitignored, so SKIPPING IS THE
 # DEFAULT STATE OF EVERY FRESH CLONE AND EVERY CI RUNNER.  The floors below
 # make that impossible to miss.  Raise a floor when you add cases; never lower
@@ -53,11 +54,11 @@ done
 #
 # ⚠ `panoplus` uses `find_package(OpenCV REQUIRED)` with no COMPONENTS list,
 # so with no host OpenCV it FAILS TO CONFIGURE rather than quietly dropping
-# 328 of its 523 cases. Its two floors are therefore equal: there is no
+# its OpenCV cases. Its two floors are therefore equal: there is no
 # reduced-coverage mode to have a lower number for.
 PROJECTS=(
-  "core|cpp/tests|124|115"
-  "panoplus|cpp/tests/panoplus|523|523"
+  "core|cpp/tests|147|138"
+  "panoplus|cpp/tests/panoplus|560|560"
 )
 
 # ── Host OpenCV ──────────────────────────────────────────────────────────

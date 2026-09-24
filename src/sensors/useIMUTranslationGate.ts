@@ -88,7 +88,7 @@ export interface UseIMUTranslationGateOptions {
    * Callers in `<Camera>` pass `panoramaSettings.flowMaxTranslationCm / 100.0`,
    * whose default is **50 cm** (`PanoramaSettings.ts` `maxTranslationCm: 50`).
    *
-   * DO NOT CONFUSE THIS WITH `lateralBudgetCm` (default 8 cm).  They measure
+   * DO NOT CONFUSE THIS WITH `lateralBudgetCm` (default 4 cm).  They measure
    * orthogonal axes and drive different actions:
    *   - this one  — ALONG-pan translation  -> forces a keyframe accept
    *   - lateral   — CROSS-pan drift        -> STOPS the capture

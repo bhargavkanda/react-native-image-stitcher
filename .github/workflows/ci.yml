@@ -124,7 +124,7 @@ jobs:
   # ⚠ libopencv-dev is NOT optional here, and the job must never be
   # "fixed" by dropping it.  Every OpenCV-dependent case lives inside an
   # `if(OpenCV_FOUND)` branch; with no host OpenCV the build succeeds,
-  # ctest prints "0 tests failed out of 115" and exits 0, and nine cases
+  # ctest prints "0 tests failed out of 138" and exits 0, and nine cases
   # have silently vanished.  scripts/run-cpp-tests.sh now refuses to run
   # in that state — that refusal is the point of this job.
   # ────────────────────────────────────────────────────────────────────

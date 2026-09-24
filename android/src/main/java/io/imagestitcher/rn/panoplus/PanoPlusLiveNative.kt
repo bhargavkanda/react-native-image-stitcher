@@ -35,7 +35,6 @@
 package io.imagestitcher.rn.panoplus
 
 import android.util.Log
-import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * One frame's outcome, decoded from the packed int [PanoPlusLiveNative.ingest]
@@ -383,7 +382,15 @@ internal object PanoPlusLiveNative {
 
     // ── Loader ──────────────────────────────────────────────────────────
 
-    private fun loaded(): Boolean = pluginsLoaded.get() && opencvLoaded.get()
+    // Read on the per-frame path, so the loader (synchronized) is asked only
+    // until it has said yes once; a load that succeeded cannot un-succeed.
+    @Volatile private var nativeOk = false
+
+    private fun loaded(): Boolean {
+        if (nativeOk) return true
+        nativeOk = ensureNativeOrNull() == null
+        return nativeOk
+    }
 
     private fun describe(t: Throwable): String =
         "${t.javaClass.simpleName}: ${t.message ?: "(no message)"}"
@@ -393,42 +400,10 @@ internal object PanoPlusLiveNative {
 
     /**
      * Load the JNI shim, returning null on success or the reason on failure.
-     *
-     * Its own flags rather than [PanoPlusNativeBasis]'s or
-     * `PanoPlusAndroidModule`'s, for the reason those two already state:
-     * `System.loadLibrary` is idempotent, so a third cache costs one extra
-     * no-op call and none of them can leave another believing a load that never
-     * happened.
-     *
-     * libopencv_java4 must load FIRST — the shim dynamically links against it.
+     * libopencv_java4 loads FIRST — the shim dynamically links against it.
      */
-    private fun ensureNativeOrNull(): String? {
-        if (!opencvLoaded.get()) {
-            try {
-                System.loadLibrary("opencv_java4")
-                opencvLoaded.set(true)
-            } catch (e: UnsatisfiedLinkError) {
-                return "OpenCV native library 'opencv_java4' failed to load — is " +
-                    "react-native-image-stitcher (which ships it) linked? " +
-                    "(${e.message ?: "no message"})"
-            }
-        }
-        if (!pluginsLoaded.get()) {
-            try {
-                System.loadLibrary("image_stitcher_panoplus")
-                pluginsLoaded.set(true)
-            } catch (e: UnsatisfiedLinkError) {
-                return "JNI shim 'image_stitcher_panoplus' failed to load. Check that " +
-                    "react-native-image-stitcher built its externalNativeBuild " +
-                    "(libimage_stitcher_panoplus.so). (${e.message ?: "no message"})"
-            }
-        }
-        return null
-    }
-
-    @JvmStatic
-    private val opencvLoaded = AtomicBoolean(false)
-
-    @JvmStatic
-    private val pluginsLoaded = AtomicBoolean(false)
+    private fun ensureNativeOrNull(): String? =
+        // One loader for the whole package: it remembers each outcome, never
+        // throws, and names the library, the running ABIs and the remedy.
+        io.imagestitcher.rn.NativeLibraryLoader.loadPanoPlusOrReason()
 }

@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed (BREAKING)
 
+- **`react-native-vision-camera` peer range narrowed to `>=4.7.0 <5`.** 5.x
+  removes the Frame Processor plugin interface the keyframe and sweep plugins
+  use. A host on 5.x now fails at install (`ERESOLVE`) rather than at run time.
 - **`rectCrop` now defaults to `true`** (it was `false` through 0.26.x). After
   every panorama — keyframe or sweep — `<Camera>` opens the draggable-quad
   crop editor, seeded on the largest rectangle the panorama's painted pixels
@@ -58,14 +61,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Keyframe lateral-drift stop no longer raises its popup under the review
-  screen.** The popup is now decided when the stitch lands and raised only
-  when no review screen will mount (the review banner already carries
-  `LATERAL_DRIFT_FINALIZE`), or when the stitch failed. Raising it at the stop
-  put the popup and the crop editor up at once — two RN `<Modal>`s, which on
-  iOS leaves an invisible window that swallows every touch: a dead shutter.
-  With `rectCrop` on by default every host could reach it. A capture no longer
-  inherits a stale lateral-drift tag from the one before it.
+- **The sweep engine's guard rails follow the keyframe engine's lateral-stop
+  policy.** A sideways-drift stop on `engine="sweep"` is judged by the same
+  `lateralStopFinalizeMinFrames` floor (default 5), counting the strips the
+  sweep has painted: at or above it the sweep finalizes and the result carries
+  `LATERAL_DRIFT_FINALIZE`; below it the sweep is abandoned
+  (`onCaptureAbandoned('lateral-drift')`) with the discard or wrong-direction
+  popup. The popup follows 0.25.1's `modalPresentation` rule on both engines,
+  decided up front: a finalized stop that opens a review shows no popup (the
+  review's banner carries the reason). `minPanoramaKeyframes` /
+  `CAPTURE_TOO_SHORT` now apply to a sweep too, counting the frames that
+  reached the canvas. A capture no longer inherits a stale lateral-drift tag,
+  or a stale AR pose-drift stop, from the one before it.
+- **`setCaptureSource` is refused while a sweep is running,** as the built-in
+  AR pill is: flipping it mid-sweep stopped the AR session under the sweep.
+- **A hold during the sweep→keyframe camera handoff waits for the camera**
+  instead of starting a capture against none.
 - **The crop editor's `?t=<ms>` uri is readable by the library's own helpers.**
   `copyFile`, `moveFile`, `cropQuad` and `runQualityCheck` strip that exact
   trailing cache-buster before calling native (which strips only `file://`).

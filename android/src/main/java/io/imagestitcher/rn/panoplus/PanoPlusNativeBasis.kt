@@ -26,7 +26,6 @@
 
 package io.imagestitcher.rn.panoplus
 
-import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * `RecorderRotation` (rnis_pano_android_basis.hpp), by ordinal.
@@ -200,35 +199,10 @@ internal object PanoPlusNativeBasis {
      *
      * The same shape and the same reasoning as
      * `PanoPlusAndroidModule.ensureNativeOrNull` — a missing .so is a RESULT
-     * the pack must carry, not an exception to propagate — and, like that one,
-     * it keeps its own flags. `System.loadLibrary` is idempotent, so a third
-     * cache costs one extra no-op call and no cache can leave another
-     * believing a load that never happened.
+     * the pack must carry, not an exception to propagate.
      */
-    private fun ensureNativeOrNull(): String? {
-        if (!opencvLoaded.get()) {
-            try {
-                System.loadLibrary("opencv_java4")
-                opencvLoaded.set(true)
-            } catch (e: UnsatisfiedLinkError) {
-                return "OpenCV native library 'opencv_java4' failed to load — is " +
-                    "react-native-image-stitcher (which ships it) linked? " +
-                    "(${e.message ?: "no message"})"
-            }
-        }
-        if (!pluginsLoaded.get()) {
-            try {
-                System.loadLibrary("image_stitcher_panoplus")
-                pluginsLoaded.set(true)
-            } catch (e: UnsatisfiedLinkError) {
-                return "JNI shim 'image_stitcher_panoplus' failed to load. Check that " +
-                    "react-native-image-stitcher built its externalNativeBuild " +
-                    "(libimage_stitcher_panoplus.so). (${e.message ?: "no message"})"
-            }
-        }
-        return null
-    }
-
-    private val opencvLoaded = AtomicBoolean(false)
-    private val pluginsLoaded = AtomicBoolean(false)
+    private fun ensureNativeOrNull(): String? =
+        // One loader for the whole package: it remembers each outcome, never
+        // throws, and names the library, the running ABIs and the remedy.
+        io.imagestitcher.rn.NativeLibraryLoader.loadPanoPlusOrReason()
 }

@@ -103,7 +103,48 @@ object NativeLibraryLoader {
         throw IllegalStateException(buildDiagnostic(failure), failure)
     }
 
-    private fun buildDiagnostic(cause: Throwable?): String {
+    // ── Named libraries (pano+) ─────────────────────────────────────────
+
+    /** OpenCV's Java-bundle library, which every native shim links against. */
+    const val LIB_OPENCV = "opencv_java4"
+
+    /** The pano+ sweep engine's JNI shim. */
+    const val LIB_PANOPLUS = "image_stitcher_panoplus"
+
+    /** Per-library outcome: absent = not attempted, null = loaded, else why not. */
+    private val namedOutcomes = HashMap<String, Throwable?>()
+
+    /**
+     * Load [name] once, remembering the outcome, and return null on success or
+     * a diagnostic naming the library, the running ABIs and the remedy.
+     * Never throws — the same contract as [tryLoad], for callers that report a
+     * missing library as a RESULT rather than an error.
+     */
+    @JvmStatic
+    @Synchronized
+    fun loadOrReason(name: String): String? {
+        if (!namedOutcomes.containsKey(name)) {
+            namedOutcomes[name] = try {
+                System.loadLibrary(name)
+                null
+            } catch (t: Throwable) {
+                Log.e(TAG, buildDiagnostic(t, name), t)
+                t
+            }
+        }
+        val failure = namedOutcomes[name] ?: return null
+        return buildDiagnostic(failure, name)
+    }
+
+    /**
+     * The pano+ shim and the OpenCV it links against, in that load order.
+     * Null when both are usable; otherwise the first failure's diagnostic.
+     */
+    @JvmStatic
+    fun loadPanoPlusOrReason(): String? =
+        loadOrReason(LIB_OPENCV) ?: loadOrReason(LIB_PANOPLUS)
+
+    private fun buildDiagnostic(cause: Throwable?, lib: String = LIB_IMAGE_STITCHER): String {
         val abis = try {
             android.os.Build.SUPPORTED_ABIS.joinToString(", ")
         } catch (_: Throwable) {
@@ -111,7 +152,7 @@ object NativeLibraryLoader {
         }
         return buildString {
             append("react-native-image-stitcher: native library '")
-            append(LIB_IMAGE_STITCHER)
+            append(lib)
             append("' could not be loaded. Panorama capture, keyframe ")
             append("gating and stitching are unavailable; the rest of the ")
             append("app is unaffected.\n")

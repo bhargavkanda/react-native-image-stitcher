@@ -582,3 +582,68 @@ describe('the wall-clock cap', () => {
     act(() => { tree.unmount(); });
   });
 });
+
+
+describe('CAPTURE_TOO_SHORT counts the frames that reached a sweep\'s canvas', () => {
+  /** A sweep whose canvas is one seed frame: latched, no strip, no lead-out. */
+  const ONE_FRAME = panoPlusResultOf(
+    coercePanoPlusSummary({
+      canvasPath: '/d/pp_2/canvas.jpg',
+      sessionDir: '/d/pp_2',
+      width: 1440,
+      height: 1080,
+      counts: { seen: 40, painted: 0 },
+      latch: { latched: true },
+      tailFlushed: false,
+    }),
+    { rectify: true, gainMatch: true, packFrames: 'all', poseSource: 'ar' },
+    '2026-09-21T00:00:00.000Z',
+  );
+  /** The seed, one strip and the lead-out: three frames, one of them a strip. */
+  const THREE_FRAMES = panoPlusResultOf(
+    coercePanoPlusSummary({
+      canvasPath: '/d/pp_3/canvas.jpg',
+      sessionDir: '/d/pp_3',
+      width: 2400,
+      height: 1080,
+      counts: { seen: 60, painted: 1 },
+      latch: { latched: true },
+      tailFlushed: true,
+    }),
+    { rectify: true, gainMatch: true, packFrames: 'all', poseSource: 'ar' },
+    '2026-09-21T00:00:00.000Z',
+  );
+
+  async function complete(
+    props: Record<string, unknown>, result: unknown,
+  ): Promise<string[]> {
+    const seen: Array<Record<string, unknown>> = [];
+    const tree = render({
+      rectCrop: false, showPreview: false, ...props,
+      onCapture: (r: Record<string, unknown>) => { seen.push(r); },
+    });
+    await settle();
+    await startSweep(1);
+    await act(async () => {
+      (surfaceProps.onComplete as (r: unknown) => void)(result);
+    });
+    act(() => { tree.unmount(); });
+    return ((seen[0]?.warnings as Array<{ code: string }> | undefined) ?? [])
+      .map((w) => w.code);
+  }
+
+  it('⚑ one frame under minPanoramaKeyframes={2} is flagged', async () => {
+    expect(await complete({ minPanoramaKeyframes: 2 }, ONE_FRAME))
+      .toContain('CAPTURE_TOO_SHORT');
+  });
+
+  it('⚑ …but the seed and the lead-out count: one strip is still three frames', async () => {
+    // `counts.painted` alone reads 1 here and would call it too short.
+    expect(await complete({ minPanoramaKeyframes: 2 }, THREE_FRAMES))
+      .not.toContain('CAPTURE_TOO_SHORT');
+  });
+
+  it('⚑ NEGATIVE CONTROL — the default of 1 never warns', async () => {
+    expect(await complete({}, ONE_FRAME)).not.toContain('CAPTURE_TOO_SHORT');
+  });
+});

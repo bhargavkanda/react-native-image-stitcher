@@ -14,6 +14,7 @@
     "ios/PanoPlus",
     "ios/Package.swift",
     "android/build.gradle",
+    "android/consumer-rules.pro",
     "android/src/main/java",
     "android/src/main/cpp",
     "android/src/main/AndroidManifest.xml",

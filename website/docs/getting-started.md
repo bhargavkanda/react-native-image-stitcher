@@ -30,7 +30,7 @@ The host app provides these:
 {
   "react": ">=18.0.0",
   "react-native": ">=0.72.0",
-  "react-native-vision-camera": ">=4.7.0",
+  "react-native-vision-camera": ">=4.7.0 <5",
   "react-native-worklets-core": ">=1.3.0",
   "react-native-sensors": ">=7.0.0",
   "react-native-safe-area-context": ">=4.0.0"

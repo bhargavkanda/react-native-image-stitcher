@@ -302,14 +302,14 @@ export function useStitcherWorklet(
     let warned = false;
     const remediation =
       Platform.OS === 'android'
-        ? '  1. react-native-vision-camera >= 4.7 is installed;\n'
+        ? '  1. react-native-vision-camera 4.x (>= 4.7, < 5) is installed;\n'
           + '  2. react-native-worklets-core is installed (vision-camera '
           + 'compiles its frame-processor subsystem only when Gradle can '
           + 'resolve worklets-core at build time);\n'
           + '  3. after fixing either, run a CLEAN rebuild '
           + '(`cd android && ./gradlew clean`) — the frame-processor '
           + 'decision is baked into the built AAR.'
-        : '  1. react-native-vision-camera >= 4.7 is installed;\n'
+        : '  1. react-native-vision-camera 4.x (>= 4.7, < 5) is installed;\n'
           + '  2. react-native-worklets-core was present in node_modules '
           + 'BEFORE `pod install` ran (vision-camera compiles its frame-'
           + 'processor subsystem only when it can see worklets-core);\n'

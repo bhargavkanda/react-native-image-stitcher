@@ -183,6 +183,9 @@ android {
     ndkVersion safeExtGet('ndkVersion', '27.1.12297006')
 
     defaultConfig {
+        // Keep rules for the reflective lookups this package makes — see the
+        // file. Consumer rules travel with the AAR to every host that minifies.
+        consumerProguardFiles 'consumer-rules.pro'
         minSdkVersion safeExtGet('minSdkVersion', 24)
         targetSdkVersion safeExtGet('targetSdkVersion', 34)
         versionCode 1

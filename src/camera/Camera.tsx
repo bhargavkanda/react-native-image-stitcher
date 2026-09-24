@@ -1276,6 +1276,12 @@ export interface CameraProps {
    * inside the natural arc of pivoting on the spot — so it tripped on
    * captures the operator considered fine.  The detector itself is
    * unchanged; only the budget it is measured against moved.
+   *
+   * 0.26.0 returned the default to `4` (3511aad): the IMU channel reads
+   * anti-correlated with ground truth (r = −0.28) and peaked at 4.84 cm
+   * across a device session, so the value is not load-bearing either way —
+   * and the guard now arms only once the capture has 2 frames, and is off
+   * in AR, where the pose-derived `arLateralBudgetCm` (default 10) applies.
    */
   lateralBudgetCm?: number;
 
@@ -1481,6 +1487,10 @@ export interface CameraProps {
    * "too short" from it would misfire constantly.  An earlier draft of
    * this feature did exactly that and would have destroyed valid
    * captures; adversarial review caught it.
+   *
+   * On `engine="sweep"` the count is the frames that reached the canvas —
+   * the seed, every painted strip, and the lead-out frame — from the sweep's
+   * own result summary.
    */
   minPanoramaKeyframes?: number;
 
@@ -2816,8 +2826,9 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       handleHoldEndRef.current?.();
       return Promise.resolve();
     },
-    // Same state the built-in AR pill flips — see the interface docs.
-    setCaptureSource: (source) => setArPreference(source === 'ar'),
+    // Same state the built-in AR pill flips, through the pill's own guard —
+    // see the interface docs.
+    setCaptureSource: (source) => setCaptureSourceRef.current?.(source === 'ar'),
   }), []);
 
   // Effect that does the async transition work whenever the settled
@@ -3726,7 +3737,12 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     // render gate already unmounts the camera for `inFlightTransition`;
     // starting a capture here anyway is what produced the resumed-into-
     // a-dead-window failure described on `holdShouldDeferForCamera`.
-    if (holdShouldDeferForCamera(inFlightTransition, arSupportPending)) {
+    // …and during the sweep→keyframe camera handoff, which unmounts the
+    // camera as surely as a transition does (`cameraShouldUnmount`'s
+    // `sweepHandoffPending` term): a hold there would start against no camera.
+    if (holdShouldDeferForCamera(
+      inFlightTransition || sweepHandoffPending, arSupportPending,
+    )) {
       setPendingPanStart(true);
       return;
     }
@@ -3741,6 +3757,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     // v0.25 — read by holdShouldDeferForCamera above; without it this
     // callback closes over a stale `false` and the new gate never fires.
     inFlightTransition,
+    sweepHandoffPending,
     deviceOrientation,
     startCapture,
   ]);
@@ -3757,7 +3774,9 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       // v0.24.3 — also the "camera still initialising" defer (above).
       // v0.25 — and the in-flight transition, without which this effect
       // resumed the capture at the exact moment the camera unmounted.
-      && !holdShouldDeferForCamera(inFlightTransition, arSupportPending)
+      && !holdShouldDeferForCamera(
+        inFlightTransition || sweepHandoffPending, arSupportPending,
+      )
     ) {
       setPendingPanStart(false);
       startCaptureRef.current?.();
@@ -3768,6 +3787,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     panMode,
     arSupportPending,
     inFlightTransition,
+    sweepHandoffPending,
   ]);
 
   const handleHoldEnd = useCallback(async () => {
@@ -4024,7 +4044,9 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // its ref.  Gated off when the budget is disabled (`<= 0`).
   useEffect(() => {
     if (
-      !(panMotion.lateralExceeded || arDriftExceeded)
+      // The pose term only where the pose guard actually runs: on the sweep
+      // no AR frame reaches `handleArFrame`, so its latch can only be stale.
+      !(panMotion.lateralExceeded || (poseGuardOwnsLateral && arDriftExceeded))
       || !captureRecording
       || lateralBudgetCm <= 0
       // v0.24.6 port — orientation-drift auto-cancel wins.  A physical ~90°
@@ -4115,7 +4137,8 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     // current values of both; listing them would instead let a mid-capture
     // prop/count change re-enter this stop and abandon twice.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [panMotion.lateralExceeded, arDriftExceeded, captureRecording, lateralBudgetCm,
+  }, [panMotion.lateralExceeded, arDriftExceeded, poseGuardOwnsLateral,
+      captureRecording, lateralBudgetCm,
       drift.drifted, orientationDriftAbandon]);
 
   // ── Item 7 — auto-finalize when the configured keyframe count is hit ─
@@ -4276,7 +4299,17 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     onLensChange?.(next);
   }, [onLensChange, sweepRunning]);
 
-  const handleARToggle = useCallback(() => {
+  /**
+   * Apply an AR preference — the one guarded path for the built-in pill AND
+   * the imperative `setCaptureSource`.
+   *
+   * ⚠ REFUSED WHILE A SWEEP RUNS. Flipping the preference mid-sweep stops the
+   * shared AR session under the sweep's own AR view and moves its pose source
+   * mid-capture; the pill refused that, and the handle (added on main as a
+   * way for host chrome to drive the same control) must refuse it too, or
+   * host chrome and the built-in pill are not interchangeable after all.
+   */
+  const applyArPreference = useCallback((next: boolean | 'toggle') => {
     if (sweepRunning) return;
     // ⚠ WHEN THE PILL IS THE ESCAPE HATCH IT MUST ALSO COMMIT THE LENS, or
     // showing it there just moves the dead control from the chip to the
@@ -4293,8 +4326,14 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       setLens('1x');
       onLensChange?.('1x');
     }
-    setArPreference((prev) => !prev);
+    setArPreference((prev) => (next === 'toggle' ? !prev : next));
   }, [sweepRunning, lens, has0_5x, onLensChange]);
+  const handleARToggle = useCallback(
+    () => applyArPreference('toggle'),
+    [applyArPreference],
+  );
+  const setCaptureSourceRef = useRef<((ar: boolean) => void) | null>(null);
+  setCaptureSourceRef.current = applyArPreference;
 
   // ── v0.13.0 — Flash control ─────────────────────────────────────
   //
@@ -5330,7 +5369,20 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               sweepDriver.setActive(sweeping);
               // A new sweep starts from zero progress; the surface's own
               // report follows as its status arrives.
-              if (sweeping) onSweepPainted(0);
+              //
+              // ⚠ AND FROM A CLEAN AR POSE-DRIFT LATCH, synchronously, as
+              // `startCapture` clears it for the keyframe engine. The latch
+              // outlives the capture that set it, and the effect that clears
+              // it runs in the SAME commit as the lateral stop — one render
+              // too late — and not at all with AR off. Left alone, an AR
+              // keyframe capture stopped for pose drift killed the next sweep
+              // the moment it started ("follow the arrow", 0 strips), and with
+              // AR off every sweep after it.
+              if (sweeping) {
+                onSweepPainted(0);
+                _resetArDriftState(arDriftRef.current);
+                setArDriftExceeded(false);
+              }
               sweep?.onSweepingChange?.(sweeping);
             }}
             onPaintedChange={onSweepPainted}
@@ -5372,8 +5424,23 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               lateralFinalizeRef.current = false;
               const wasFastPan = fastPanRef.current;
               fastPanRef.current = false;
+              // CAPTURE_TOO_SHORT on this engine too, counted in the frames
+              // that actually reached the canvas: the seed (painted whole at
+              // latch), every steady-state strip, and the lead-out frame.
+              // `counts.painted` alone omits the seed and the lead-out and
+              // reads 0 on most sweeps that still deliver a real canvas, which
+              // would make "Only {included} frame(s)" false. Passed as both
+              // requested and included, so no utilization ratio is implied.
+              const sweepFramesUsed =
+                result.summary.counts.painted
+                + (result.summary.latch.latched ? 1 : 0)
+                + (result.summary.tailFlushed ? 1 : 0);
+              const sweepHasCanvas = result.width > 0 && result.height > 0;
               const sweepWarnings = [
                 ...buildCaptureWarnings({
+                  framesRequested: sweepHasCanvas ? sweepFramesUsed : undefined,
+                  framesIncluded: sweepHasCanvas ? sweepFramesUsed : undefined,
+                  minPanoramaKeyframes,
                   lateralFinalize: wasLateral,
                   highPanSpeed: wasFastPan,
                   copy: captureWarningCopyFrom(guidanceCopyResolved),
@@ -6588,6 +6655,13 @@ const SWEEP_CAMERA_RELEASE_SETTLE_MS = 600;
  * `statusPhase === 'stitching'` is intentionally NOT included:
  * `handleHoldStart` already rejects that phase outright rather than
  * queueing a deferred start.
+ *
+ * ⚠ THE CALL SITES PASS `inFlightTransition || sweepHandoffPending`. The
+ * sweep→keyframe camera handoff is `cameraShouldUnmount`'s fourth term and
+ * unmounts the camera just as surely, so the rule this predicate exists for —
+ * every camera-absence term of the render gate except 'stitching' — needs it
+ * too. It is composed at the call site rather than added here so this
+ * predicate stays main's, and the handoff term goes with the handoff (M6a).
  */
 function holdShouldDeferForCamera(
   inFlightTransition: boolean,

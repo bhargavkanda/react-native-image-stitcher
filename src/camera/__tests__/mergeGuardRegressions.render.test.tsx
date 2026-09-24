@@ -1,0 +1,264 @@
+// SPDX-License-Identifier: Apache-2.0
+/**
+ * Regressions found by the adversarial review of the main→unify-camera merge,
+ * each driven through the real `<Camera>` with the sweep surface stubbed at
+ * its imperative handle (the same contract `sweepGuardRails` uses).
+ *
+ * 1. A stale AR pose-drift latch. Main's pose guard (`arDriftExceeded`)
+ *    outlives the capture that set it, and its clearing effect runs in the
+ *    same commit as the lateral stop — one render too late — and not at all
+ *    with AR off. After an AR keyframe capture stopped for pose drift, the
+ *    next SWEEP was abandoned the moment it started ("follow the arrow", 0
+ *    strips), and with AR off every sweep after it.
+ * 2. `setCaptureSource` mid-sweep. Main added the handle as a way for host
+ *    chrome to drive the built-in AR pill's preference, but it skipped the
+ *    pill's "not while a sweep runs" guard, so a host could stop the shared AR
+ *    session under a live AR sweep.
+ * 3. A hold inside the sweep→keyframe camera handoff. The render gate
+ *    unmounts the camera for 600 ms (`sweepHandoffPending`); the hold gate
+ *    did not know, so a hold there started a keyframe capture against no
+ *    camera.
+ */
+import React from 'react';
+import { act, create, type ReactTestRenderer } from 'react-test-renderer';
+import { NativeModules } from 'react-native';
+
+const g = globalThis as any;
+g.__kf = { state: { acceptedCount: 0 }, calls: [] as string[] };
+g.__sw = { calls: [] as string[], props: {} as any };
+g.__ar = { props: {} as any, exceed: false };
+
+jest.mock('../../stitching/useIncrementalStitcher', () => {
+  const obj: any = {
+    isAvailable: true, isRunning: false, hint: null, confidenceLevel: null,
+    keyframeThumbnails: [],
+    start: async () => { (globalThis as any).__kf.calls.push('start'); return { ok: true }; },
+    finalize: async () => {
+      (globalThis as any).__kf.calls.push('finalize');
+      return {
+        panoramaPath: '/d/p.jpg', width: 400, height: 100,
+        framesRequested: 3, framesIncluded: 3,
+      };
+    },
+    cancel: () => { (globalThis as any).__kf.calls.push('cancel'); return Promise.resolve(); },
+  };
+  return {
+    useIncrementalStitcher: () => { obj.state = (globalThis as any).__kf.state; return obj; },
+  };
+});
+jest.mock('../../stitching/incremental', () => ({
+  ...jest.requireActual('../../stitching/incremental'),
+  incrementalStitcherIsAvailable: () => true,
+  incrementalMissingMethods: () => null,
+}));
+// The pose guard latches on the first armed frame whenever `__ar.exceed` is set.
+jest.mock('../arLateralDrift', () => {
+  const actual = jest.requireActual('../arLateralDrift');
+  return {
+    ...actual,
+    _advanceArDrift: (...a: unknown[]) => ((globalThis as any).__ar.exceed
+      ? {
+          exceeded: true, driftM: 0.2, peakM: 0.2, longM: 0, allowanceM: 0.08,
+          rotRad: 0, peakRotRad: 0, latchedBy: 'distance', untrackedCount: 0,
+          degenerateCount: 0,
+        }
+      : (actual._advanceArDrift as (...x: unknown[]) => unknown)(...a)),
+  };
+});
+jest.mock('../ARCameraView', () => {
+  const R = require('react');
+  const ARCameraView = R.forwardRef((props: any, _ref: any) => {
+    (globalThis as any).__ar.props = props;
+    return R.createElement('ARCameraViewStub', null);
+  });
+  return { __esModule: true, ARCameraView };
+});
+jest.mock('../../sweep/PanoPlusCaptureSurface', () => {
+  const R = require('react');
+  const actual = jest.requireActual('../../sweep/PanoPlusCaptureSurface');
+  const Stub = R.forwardRef((props: any, ref: any) => {
+    (globalThis as any).__sw.props = props;
+    R.useImperativeHandle(ref, () => ({
+      capture: () => undefined,
+      finalize: () => undefined,
+      holdStart: () => {
+        (globalThis as any).__sw.calls.push('holdStart');
+        props.onSweepingChange?.(true);
+      },
+      holdEnd: () => {
+        (globalThis as any).__sw.calls.push('holdEnd');
+        props.onControlsState?.({ canCapture: true, canFinalize: false, busy: true });
+      },
+      // Faithful to the real surface: an abandon ends the sweep (phase idle)
+      // and its live status, so progress reads 0 again.
+      abandon: (reason: string) => {
+        (globalThis as any).__sw.calls.push(`abandon:${reason}`);
+        props.onPaintedChange?.(0);
+        props.onSweepingChange?.(false);
+      },
+    }), [props]);
+    return null;
+  });
+  return { __esModule: true, ...actual, PanoPlusCaptureSurface: Stub };
+});
+
+// eslint-disable-next-line import/first
+import { Camera } from '../Camera';
+// eslint-disable-next-line import/first
+import { LateralMotionModal } from '../LateralMotionModal';
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+function el(props: any, ref: any) {
+  return (
+    <Camera
+      ref={ref} enablePanoramaMode panMode="both" outputDir="/tmp/out"
+      captureSources="both" {...props}
+    />
+  );
+}
+
+beforeEach(() => {
+  g.__kf.state = { acceptedCount: 0 };
+  g.__kf.calls = [];
+  g.__sw.calls = [];
+  g.__sw.props = {};
+  g.__ar.props = {};
+  g.__ar.exceed = false;
+});
+
+async function arKeyframeCaptureStoppedByPoseDrift(abandoned: string[]) {
+  const ref = React.createRef<any>();
+  let t!: ReactTestRenderer;
+  let props: any = {
+    engine: 'keyframe', defaultCaptureSource: 'ar',
+    onCaptureAbandoned: (r: string) => abandoned.push(r),
+  };
+  await act(async () => { t = create(el(props, ref)); });
+  await act(async () => { await sleep(400); }); // AR probe + 250 ms transition settle
+  expect(typeof g.__ar.props.onArFrame).toBe('function');
+  await act(async () => {
+    ref.current.startPanorama(); await Promise.resolve(); await Promise.resolve();
+  });
+  expect(g.__kf.calls).toContain('start');
+  g.__kf.state = { acceptedCount: 1 };
+  await act(async () => { t.update(el(props, ref)); });
+  g.__ar.exceed = true;
+  await act(async () => {
+    g.__ar.props.onArFrame({
+      pose: { rotation: [0, 0, 0, 1], translation: [0, 0, 0] }, trackingState: 'normal',
+    });
+  });
+  await act(async () => { await sleep(50); });
+  const rerender = async (p: any) => {
+    props = { ...props, ...p };
+    await act(async () => { t.update(el(props, ref)); });
+  };
+  return { t, ref, rerender };
+}
+
+describe('a stale AR pose-drift latch never reaches the next sweep', () => {
+  it('control: the keyframe capture WAS stopped by the AR pose guard', async () => {
+    const abandoned: string[] = [];
+    const { t } = await arKeyframeCaptureStoppedByPoseDrift(abandoned);
+    expect(g.__kf.calls).toContain('cancel');
+    expect(abandoned).toEqual(['lateral-drift']);
+    act(() => t.unmount());
+  });
+
+  it('AR on: the first sweep after the engine switch is not killed on arrival', async () => {
+    const abandoned: string[] = [];
+    const { t, rerender } = await arKeyframeCaptureStoppedByPoseDrift(abandoned);
+    abandoned.length = 0;
+    await act(async () => { t.root.findByType(LateralMotionModal).props.onDismiss(); });
+    await rerender({ engine: 'sweep' });
+    await act(async () => { await sleep(50); });
+    await act(async () => { g.__sw.props.onSweepingChange(true); });
+    await act(async () => { await sleep(20); });
+    expect(g.__sw.calls).not.toContain('abandon:lateral-drift');
+    expect(abandoned).toEqual([]);
+    expect(t.root.findByType(LateralMotionModal).props.visible).toBe(false);
+    act(() => t.unmount());
+  });
+
+  it('AR off: no sweep after the switch is killed — three holds in a row', async () => {
+    const abandoned: string[] = [];
+    const { t, ref, rerender } = await arKeyframeCaptureStoppedByPoseDrift(abandoned);
+    abandoned.length = 0;
+    await act(async () => { t.root.findByType(LateralMotionModal).props.onDismiss(); });
+    await act(async () => { ref.current.setCaptureSource('non-ar'); });
+    await act(async () => { await sleep(400); });
+    await rerender({ engine: 'sweep' });
+    await act(async () => { await sleep(50); });
+    for (let i = 0; i < 3; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await act(async () => { g.__sw.props.onSweepingChange(true); });
+      // eslint-disable-next-line no-await-in-loop
+      await act(async () => { await sleep(20); });
+      // eslint-disable-next-line no-await-in-loop
+      await act(async () => { g.__sw.props.onSweepingChange(false); });
+    }
+    expect(g.__sw.calls.filter((c: string) => c === 'abandon:lateral-drift')).toHaveLength(0);
+    expect(abandoned).toEqual([]);
+    act(() => t.unmount());
+  });
+});
+
+describe('setCaptureSource follows the built-in pill, including its guard', () => {
+  it('is refused while an AR sweep runs — no AR session stop, pose source unchanged', async () => {
+    const mod = (NativeModules as any).RNSARSession;
+    const orig = mod.stop;
+    let stops = 0;
+    mod.stop = () => { stops += 1; return Promise.resolve(); };
+    try {
+      const ref = React.createRef<any>();
+      let t!: ReactTestRenderer;
+      await act(async () => {
+        t = create(el({ engine: 'sweep', defaultCaptureSource: 'ar' }, ref));
+      });
+      await act(async () => { await sleep(400); });
+      const poseBefore = g.__sw.props.poseSource;
+      const stopsBefore = stops;
+      await act(async () => { g.__sw.props.onSweepingChange(true); });
+      await act(async () => { await sleep(20); });
+      await act(async () => { ref.current.setCaptureSource('non-ar'); });
+      await act(async () => { await sleep(400); });
+      expect(stops - stopsBefore).toBe(0);
+      expect(g.__sw.props.poseSource).toBe(poseBefore);
+      // …and honoured once the sweep has ended.
+      await act(async () => { g.__sw.props.onSweepingChange(false); });
+      await act(async () => { ref.current.setCaptureSource('non-ar'); });
+      await act(async () => { await sleep(400); });
+      expect(g.__sw.props.poseSource).not.toBe(poseBefore);
+      act(() => t.unmount());
+    } finally {
+      mod.stop = orig;
+    }
+  });
+});
+
+describe('a hold during the sweep→keyframe camera handoff waits for the camera', () => {
+  for (const src of ['ar', 'non-ar'] as const) {
+    it(`${src}: deferred while the camera is unmounted, then resumed`, async () => {
+      const ref = React.createRef<any>();
+      let t!: ReactTestRenderer;
+      const base: any = { defaultCaptureSource: src, rectCrop: false };
+      await act(async () => { t = create(el({ ...base, engine: 'sweep' }, ref)); });
+      await act(async () => { await sleep(400); });
+      await act(async () => { t.update(el({ ...base, engine: 'keyframe' }, ref)); });
+      await act(async () => { await Promise.resolve(); });
+      const placeholder = () => t.root.findAll(
+        (n: any) => n.props && n.props.children === 'Switching camera…',
+      ).length > 0;
+      expect(placeholder()).toBe(true);   // the handoff window is real
+      await act(async () => {
+        ref.current.startPanorama(); await Promise.resolve(); await Promise.resolve();
+      });
+      expect(g.__kf.calls).not.toContain('start');
+      await act(async () => { await sleep(900); });
+      expect(placeholder()).toBe(false);
+      expect(g.__kf.calls).toContain('start');
+      act(() => t.unmount());
+    });
+  }
+});

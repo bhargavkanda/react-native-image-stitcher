@@ -56,7 +56,6 @@ import com.facebook.react.bridge.WritableNativeMap
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import java.util.concurrent.atomic.AtomicBoolean
 
 class PanoPlusAndroidModule(
     reactContext: ReactApplicationContext,
@@ -531,40 +530,9 @@ class PanoPlusAndroidModule(
      * Loading an already-loaded library is a no-op, so this is safe alongside
      * StitchPluginsModule's own ensureNative and the stitcher's.
      */
-    private fun ensureNativeOrNull(): String? {
-        if (!opencvLoaded.get()) {
-            try {
-                System.loadLibrary("opencv_java4")
-                opencvLoaded.set(true)
-            } catch (e: UnsatisfiedLinkError) {
-                return "OpenCV native library 'opencv_java4' failed to load — is " +
-                    "react-native-image-stitcher (which ships it) linked? " +
-                    "(${e.message ?: "no message"})"
-            }
-        }
-        if (!pluginsLoaded.get()) {
-            try {
-                System.loadLibrary("image_stitcher_panoplus")
-                pluginsLoaded.set(true)
-            } catch (e: UnsatisfiedLinkError) {
-                return "JNI shim 'image_stitcher_panoplus' failed to load. Check that " +
-                    "react-native-image-stitcher built its externalNativeBuild " +
-                    "(libimage_stitcher_panoplus.so) and that the stitcher's OpenCV vendor " +
-                    "dir was found at configure time. (${e.message ?: "no message"})"
-            }
-        }
-        return null
-    }
+    private fun ensureNativeOrNull(): String? =
+        // One loader for the whole package: it remembers each outcome, never
+        // throws, and names the library, the running ABIs and the remedy.
+        io.imagestitcher.rn.NativeLibraryLoader.loadPanoPlusOrReason()
 
-    companion object {
-        // Separate from StitchPluginsModule's flags on purpose: these are
-        // per-class caches of "did loadLibrary succeed", and System.loadLibrary
-        // is idempotent, so two caches cost one extra no-op call and neither
-        // can leave the other believing a load that never happened.
-        @JvmStatic
-        private val opencvLoaded = AtomicBoolean(false)
-
-        @JvmStatic
-        private val pluginsLoaded = AtomicBoolean(false)
-    }
 }

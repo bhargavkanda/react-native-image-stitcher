@@ -51,15 +51,24 @@ Run: Metro on **8082** (`npx react-native start --port 8082 --reset-cache`;
       second finalize afterwards (watch for a double `onCapture`).
 - [ ] `maxPanDurationMs={0}` → countdown hidden, no auto-stop.
 
-**Item 6 — Lateral drift → finalize + popup**  ⚠️ needs threshold tuning
+**Item 6 — Lateral drift → stop, then finalize or discard**  ⚠️ needs threshold tuning
 - [ ] Deliberately slide the phone SIDEWAYS (cross-axis to the pan) → capture
-      STOPS, **finalizes what was captured** (you get a panorama), and the
-      "Keep the pan straight" popup shows.
+      STOPS. What shows depends on how much it had captured
+      (`lateralStopFinalizeMinFrames`, default 5 — keyframes, or painted
+      strips on a sweep) and on whether a review follows:
+  - at or above the floor, with `rectCrop` or `showPreview` on (the default
+    and the example app): the review opens with the `LATERAL_DRIFT_FINALIZE`
+    banner and **no popup**;
+  - at or above the floor with both off (`rectCrop={false}`): the "Keep the
+    pan straight" popup only;
+  - 2 up to the floor: the "Capture discarded" popup, no output;
+  - 0–1: the wrong-direction ("Follow the arrow") popup, no output.
+- [ ] After a lateral stop and its review, the shutter is live (the
+      dead-shutter RCA: never two modals at once).
 - [ ] A normal straight pan (with natural wobble) does NOT false-trigger. This
-      is the critical tuning gate — adjust `lateralBudgetCm` (default 8
-      as of v0.25.3; was 4, and this doc previously said 5, which was never
-      the shipped value). Field reports of false triggering at 4 are what
-      prompted the raise.
+      is the critical tuning gate — adjust `lateralBudgetCm` (default 4;
+      0.25.3 raised it to 8, 0.26.0 returned it to 4). In AR the pose-derived
+      `arLateralBudgetCm` (default 10) applies instead.
 - [ ] **Assumption to confirm (`usePanMotion.ts`):** the cross-pan axis is
       assumed to be device-**Y**. If sideways motion does NOT trip it but
       forward/back does, swap the integrated accelerometer axis `y`→`x` in
@@ -69,7 +78,7 @@ Run: Metro on **8082** (`npx react-native start --port 8082 --reset-cache`;
 
 **Item 7 — Draggable-quad crop + perspective rectify**
 - [ ] With `rectCrop` (on by default since the unreleased change after
-      0.24.2 — no prop needed), after a stitch the crop editor shows the result
+      0.26.x — no prop needed), after a stitch the crop editor shows the result
       with 4 draggable corners. Corners don't jump on first touch.
 - [ ] Drag into a skewed (non-rectangular) quad → Crop → output is a
       perspective-rectified upright rectangle (native `cropToQuad`).

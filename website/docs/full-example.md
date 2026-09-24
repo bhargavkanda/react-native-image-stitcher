@@ -85,7 +85,7 @@ export function FullyLoadedCamera() {
       panGuidance={true}
       maxPanDurationMs={0}
       panTooFastThreshold={0.6}
-      lateralBudgetCm={8}
+      lateralBudgetCm={4}
       lateralStopFinalizeMinFrames={5}
       rectCrop={true}
       showPreview={false}

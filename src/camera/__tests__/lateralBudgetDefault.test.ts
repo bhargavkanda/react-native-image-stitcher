@@ -35,7 +35,7 @@ jest.mock('react-native-sensors', () => ({
 import { DEFAULT_LATERAL_BUDGET_CM } from '../usePanMotion';
 
 describe('DEFAULT_LATERAL_BUDGET_CM', () => {
-  it('is 8 cm (v0.25.3 — raised from 4)', () => {
+  it('is 4 cm (0.25.3 raised it to 8; 0.26.0 returned it to 4)', () => {
     expect(DEFAULT_LATERAL_BUDGET_CM).toBe(4);
   });
 

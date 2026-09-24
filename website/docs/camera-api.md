@@ -203,7 +203,7 @@ The prop JSDoc claims a default of `1.0 rad/s`. The real fallback literal is
 
 ### `lateralBudgetCm`
 
-`number`, default **`8`** (v0.25.3 — was `4`).
+`number`, default **`4`** (0.25.3 raised it to `8`; 0.26.0 returned it to `4`).
 
 Cross-pan (lateral / sideways) drift budget in cm. Once integrated sideways
 translation exceeds this for the grace window, the capture is **stopped**. Set
@@ -218,8 +218,11 @@ being thrown away, lower that one.
 
 v0.25.3 raised the default after field reports of the stop firing on minor
 drift. **v0.26.0 fixed the underlying detector** — see
-[`lateralMotionModel`](#lateralmotionmodel). The budget stays at 8 so the
-detector change and the threshold do not move in the same release.
+[`lateralMotionModel`](#lateralmotionmodel) — and returned the default to 4:
+the IMU channel reads anti-correlated with ground truth (r = −0.28), so the
+value is not load-bearing either way. The IMU guard now arms only once the
+capture has 2 frames, and is off in AR, where the pose-derived
+[`arLateralBudgetCm`](#arlateralbudgetcm) (default 10) applies.
 
 :::warning `lateralBudgetCm` is not the only lateral trigger
 The capture is also stopped by an independent **cross-pan rotation** trigger,
@@ -441,7 +444,7 @@ for the full key list and defaults.
 <Camera
   panMode="vertical"
   panGuidance
-  lateralBudgetCm={8}
+  lateralBudgetCm={4}
   rectCrop
   guidanceCopy={{
     rotateToLandscape: 'Turn your phone sideways',
