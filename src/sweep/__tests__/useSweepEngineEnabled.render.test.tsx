@@ -88,7 +88,7 @@ describe('useSweepEngine — enabled: false touches nothing native', () => {
       t = create(<Probe enabled={false} handle={handle} surface={{ frameSource: 'own', poseSource: 'imu' }} />);
     });
     await flush(2000);
-    act(() => { handle.current?.holdStart(); });
+    act(() => { handle.current?.holdStart?.(); });
     await flush(1500);
     expect(calls).toEqual([]);
     act(() => { t.unmount(); });
@@ -117,7 +117,7 @@ describe('useSweepEngine — enabled falling mid-sweep is an unmount, without th
     let t!: ReactTestRenderer;
     act(() => { t = create(<Probe enabled handle={handle} surface={surface} />); });
     await flush();
-    act(() => { handle.current?.holdStart(); });
+    act(() => { handle.current?.holdStart?.(); });
     await flush(1500);
     expect(startedWith).not.toBeNull();
     calls.length = 0;
