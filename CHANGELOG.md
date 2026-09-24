@@ -17,6 +17,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed (BREAKING)
+- **`<Camera engine="sweep">` is one screen with the keyframe engine (M8).**
+  The sweep no longer swaps in a screen of its own. It runs on `<Camera>`'s
+  own camera, shutter and chrome: the vision-camera preview for non-AR, and
+  `<Camera>`'s own `<ARCameraView>` for AR (the sweep mounts no AR view of its
+  own). `engine` changes only what the HOLD runs:
+  - the built-in shutter's hold and `startPanorama`/`stopPanorama` go through
+    one dispatch, so a press on the sweep engine runs the sweep;
+  - switching the engine at idle no longer unmounts the camera;
+  - the camera stays mounted behind the review on both engines (the sweep
+    engine itself is deselected there);
+  - AR sweeps are pose-guarded against sideways drift, like AR keyframe
+    captures; the IMU guard no longer stands in for them;
+  - at idle the sweep draws nothing of its own over the viewfinder; its
+    growing panorama, headline, hard faults and τ chip appear during a sweep;
+  - the settings gear and modal show on both engines.
+  The AR view's session config is the same for both engines (D15):
+  `keyframeQualityCapture` defaults to `enablePanoramaMode`, the new
+  `arSourceMaxLongEdge` sets its CPU-image cap, `arFrameMetaInterval` is at
+  most 100 ms while panorama capture is on, and all three are held while a
+  capture records. New `topChromeInset` moves the top-right pills clear of a
+  host's docked banner on both engines. The internal
+  `sweep.frameSourceOverride: 'own'` (device round DR-1a only) still shows the
+  old sweep screen, on pano+'s old own camera.
 
 - **`<Camera engine="sweep">` runs on `<Camera>`'s own camera on iOS too.** A
   non-AR iPhone sweep used to open pano+'s own `AVCaptureSession` behind the

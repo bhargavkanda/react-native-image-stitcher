@@ -842,13 +842,19 @@ export function useSweepEngine(
     return () => { live = false; };
   }, [armContract, enabled]);
 
+  // M8 — ON `'host-ar'` THE HOST'S AR VIEW IS THE ANSWER. `<Camera>` mounts
+  // it only once its own `RNSARSession.isSupported()` said yes, and this
+  // probe only starts when the engine is selected — so a hold in the first
+  // commits after an engine switch would otherwise resolve the arm against
+  // an unanswered probe while the AR session is already on screen.
+  const arcoreAnswer = frameSource === 'host-ar' ? true : arcoreAvailable;
   const armNotice = useMemo(
     () => (armContract === 'android-sensor'
       ? panoPlusAndroidArmNotice({
           poseSource,
           liveModule: nativeReady,
           basis: basisResolution,
-          arcoreAvailable,
+          arcoreAvailable: arcoreAnswer,
         })
       : vcHostArm
         ? panoPlusIosVcHostArmNotice(poseSource)
@@ -868,7 +874,7 @@ export function useSweepEngine(
         )),
     [
       armContract,
-      arcoreAvailable,
+      arcoreAnswer,
       basisResolution,
       calib,
       lens,
@@ -1213,7 +1219,7 @@ export function useSweepEngine(
     ? (runningArm != null
       ? runningArm.poseSource !== 'imu'
       // …and only once ARCore has said it can run (M2).
-      : armNotice.effectivePoseSource !== 'imu' && arcoreAvailable === true)
+      : armNotice.effectivePoseSource !== 'imu' && arcoreAnswer === true)
     : runningArm != null
       ? runningArm.poseSource !== 'imu'
       : poseSource !== 'imu'
@@ -1869,6 +1875,25 @@ export function useSweepEngine(
       && typeof vcCameraId === 'string'
       && vcCameraId.length > 0
       && wantPoseSource === 'imu';
+    // ⚠ M8 — THE HOST'S AR SESSION IS THE CAMERA, SO ONLY THE AR ARM MAY RUN.
+    // `<Camera>` sends the pose arm from the same `isAR` that mounted its AR
+    // view, so this is unreachable from `<Camera>`; it is what a host that
+    // says `'host-ar'` and asks for IMU gets instead of a second camera.
+    if (frameSource === 'host-ar' && wantPoseSource !== 'ar') {
+      busyRef.current = false;
+      const message = 'This sweep cannot start: the camera on screen is the AR '
+        + 'session, and the sweep resolved to the non-AR arm, which needs the '
+        + 'non-AR camera. Turn AR back on, or turn it off on the screen.';
+      setError(message);
+      onFailure?.({
+        code: 'panoplus-refused-wrong-arm',
+        message,
+        sessionDir: null,
+        counts: null,
+        abort: null,
+      } as PanoPlusFailure);
+      return;
+    }
     if (frameSource === 'host' && !willSendArm) {
       busyRef.current = false;
       // ⚠ THE COPY IS SELECTED BY THE SAME SHAPE THE CONDITION USES. The
@@ -2132,7 +2157,12 @@ export function useSweepEngine(
         // one that ignored `vcPluginArm` and opened its own AVCaptureSession
         // behind the preview — stopped at once and refused by name, never
         // left running as a second camera.
-        if (vcHostArm && started.frameSource !== 'vc-plugin') {
+        // ⚠ M8 — AND ON THE HOST'S AR SESSION, NATIVE MUST HAVE RUN THE AR ARM.
+        // Any other arm under `'host-ar'` is one that opened a camera of its
+        // own behind `<Camera>`'s AR view.
+        const wrongHostArm = frameSource === 'host-ar'
+          && started.poseSource != null && started.poseSource !== 'ar';
+        if ((vcHostArm && started.frameSource !== 'vc-plugin') || wrongHostArm) {
           void cancelPanoPlus().catch(() => undefined);
           stopOnStartRef.current = false;
           abandonOnStartRef.current = null;
@@ -2144,7 +2174,8 @@ export function useSweepEngine(
           const info = {
             code: 'panoplus-vc-arm-unavailable',
             message: 'native did not confirm the sweep ran on the camera on screen '
-              + `(frameSource: ${String(started.frameSource ?? 'absent')}); it was `
+              + `(frameSource: ${String(started.frameSource ?? 'absent')}, `
+              + `poseSource: ${String(started.poseSource ?? 'absent')}); it was `
               + 'cancelled rather than left running on a camera of its own.',
             sessionDir: null,
             counts: null,
@@ -2936,7 +2967,8 @@ export function useSweepEngine(
    * camera in this phase and prefers native's own reason to any prose written
    * here — and, being pure, is walked by a test rather than by a field trip.
    */
-  const cameraOffNotice = panoPlusCameraOffNotice({
+  // M8 — nothing to explain on `'host-ar'`: the host's AR view is on screen.
+  const cameraOffNotice = frameSource === 'host-ar' ? null : panoPlusCameraOffNotice({
     armContract,
     arArmed,
     arReady,

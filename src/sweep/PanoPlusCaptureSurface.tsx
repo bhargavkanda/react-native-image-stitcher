@@ -208,8 +208,14 @@ export interface PanoPlusCaptureSurfaceProps {
    * It is a separate prop from {@link vcPluginArm} because ownership is a
    * fact about the SCREEN and the arm is a fact about the SWEEP: the
    * viewfinder question is settled at mount, the arm question at start.
+   *
+   * M8 — `'host-ar'`: the host owns the AR SESSION (its own `<ARCameraView>`
+   * on `RNSARSession.shared`, which is where the AR arm's frames come from).
+   * The engine mounts no camera view of its own, never asks native for a
+   * camera of its own, and refuses a sweep that resolves to anything but the
+   * AR arm. `<Camera>` passes it whenever its AR view is the camera.
    */
-  frameSource?: 'own' | 'host';
+  frameSource?: 'own' | 'host' | 'host-ar';
   /**
    * S7 — is the host's preview actually mounted right now? Only meaningful
    * with `frameSource="host"`, where it distinguishes "vision-camera is

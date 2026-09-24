@@ -17,7 +17,9 @@
  * 3. A hold inside the sweep→keyframe camera handoff. The render gate
  *    unmounts the camera for 600 ms (`sweepHandoffPending`); the hold gate
  *    did not know, so a hold there started a keyframe capture against no
- *    camera.
+ *    camera. (M8: the handoff now exists only for the DR-1a hatch; on every
+ *    other cell the sweep runs on `<Camera>`'s own camera and an engine
+ *    switch unmounts nothing.)
  */
 import React from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
@@ -108,7 +110,8 @@ jest.mock('../../sweep/useSweepEngine', () => {
       wasEnabled.current = enabled;
       if (was && !enabled) props.onSweepingChange?.(false);
     }, [enabled]);
-    return {};
+    // The fields `<Camera>`'s own tree reads off the engine.
+    return { phase: 'idle', setSurfaceBox: () => undefined, handleArFrame: () => undefined };
   }
   return { __esModule: true, useSweepEngine };
 });
@@ -253,8 +256,34 @@ describe('setCaptureSource follows the built-in pill, including its guard', () =
 });
 
 describe('a hold during the sweep→keyframe camera handoff waits for the camera', () => {
+  const placeholder = (t: ReactTestRenderer) => t.root.findAll(
+    (n: any) => n.props && n.props.children === 'Switching camera…',
+  ).length > 0;
+
+  // M8 — the handoff exists only where the sweep had a camera of its OWN to
+  // hand back: the DR-1a reference hatch (non-AR).
+  it('the DR-1a hatch: deferred while the camera is unmounted, then resumed', async () => {
+    const ref = React.createRef<any>();
+    let t!: ReactTestRenderer;
+    const base: any = { defaultCaptureSource: 'non-ar', rectCrop: false };
+    const hatch = { frameSourceOverride: 'own' };
+    await act(async () => { t = create(el({ ...base, engine: 'sweep', sweep: hatch }, ref)); });
+    await act(async () => { await sleep(900); });
+    await act(async () => { t.update(el({ ...base, engine: 'keyframe', sweep: hatch }, ref)); });
+    await act(async () => { await Promise.resolve(); });
+    expect(placeholder(t)).toBe(true);   // the handoff window is real
+    await act(async () => {
+      ref.current.startPanorama(); await Promise.resolve(); await Promise.resolve();
+    });
+    expect(g.__kf.calls).not.toContain('start');
+    await act(async () => { await sleep(900); });
+    expect(placeholder(t)).toBe(false);
+    expect(g.__kf.calls).toContain('start');
+    act(() => t.unmount());
+  });
+
   for (const src of ['ar', 'non-ar'] as const) {
-    it(`${src}: deferred while the camera is unmounted, then resumed`, async () => {
+    it(`⚑ M8, ${src}: no hatch, no handoff — the camera stays up and the hold starts at once`, async () => {
       const ref = React.createRef<any>();
       let t!: ReactTestRenderer;
       const base: any = { defaultCaptureSource: src, rectCrop: false };
@@ -262,18 +291,66 @@ describe('a hold during the sweep→keyframe camera handoff waits for the camera
       await act(async () => { await sleep(400); });
       await act(async () => { t.update(el({ ...base, engine: 'keyframe' }, ref)); });
       await act(async () => { await Promise.resolve(); });
-      const placeholder = () => t.root.findAll(
-        (n: any) => n.props && n.props.children === 'Switching camera…',
-      ).length > 0;
-      expect(placeholder()).toBe(true);   // the handoff window is real
+      expect(placeholder(t)).toBe(false);   // an engine switch is not a camera switch
       await act(async () => {
         ref.current.startPanorama(); await Promise.resolve(); await Promise.resolve();
       });
-      expect(g.__kf.calls).not.toContain('start');
-      await act(async () => { await sleep(900); });
-      expect(placeholder()).toBe(false);
       expect(g.__kf.calls).toContain('start');
       act(() => t.unmount());
     });
   }
+});
+
+describe('M8 — an AR SWEEP is pose-guarded through <Camera>\'s own AR view', () => {
+  it('pose drift on a sweep that has painted finalizes it through its handle', async () => {
+    const ref = React.createRef<any>();
+    let t!: ReactTestRenderer;
+    const abandoned: string[] = [];
+    await act(async () => {
+      t = create(el({
+        engine: 'sweep', defaultCaptureSource: 'ar', rectCrop: false,
+        onCaptureAbandoned: (r: string) => abandoned.push(r),
+      }, ref));
+    });
+    await act(async () => { await sleep(400); });
+    // `<Camera>`'s AR view is the sweep's camera, and it is fed its frames.
+    expect(typeof g.__ar.props.onArFrame).toBe('function');
+    expect(g.__sw.props.frameSource).toBe('host-ar');
+    await act(async () => {
+      ref.current.startPanorama(); await Promise.resolve(); await Promise.resolve();
+    });
+    expect(g.__sw.calls).toContain('holdStart');
+    await act(async () => { g.__sw.props.onPaintedChange(30); });
+    g.__ar.exceed = true;
+    await act(async () => {
+      g.__ar.props.onArFrame({
+        pose: { rotation: [0, 0, 0, 1], translation: [0, 0, 0] }, trackingState: 'normal',
+      });
+    });
+    await act(async () => { await sleep(50); });
+    expect(g.__sw.calls).toContain('holdEnd');           // finalized: 30 strips ≥ 5
+    expect(abandoned).toEqual([]);
+    act(() => t.unmount());
+  });
+
+  it('⚑ NEGATIVE CONTROL: no drift, no stop', async () => {
+    const ref = React.createRef<any>();
+    let t!: ReactTestRenderer;
+    await act(async () => {
+      t = create(el({ engine: 'sweep', defaultCaptureSource: 'ar', rectCrop: false }, ref));
+    });
+    await act(async () => { await sleep(400); });
+    await act(async () => {
+      ref.current.startPanorama(); await Promise.resolve(); await Promise.resolve();
+    });
+    await act(async () => { g.__sw.props.onPaintedChange(30); });
+    await act(async () => {
+      g.__ar.props.onArFrame({
+        pose: { rotation: [0, 0, 0, 1], translation: [0, 0, 0] }, trackingState: 'normal',
+      });
+    });
+    await act(async () => { await sleep(50); });
+    expect(g.__sw.calls).not.toContain('holdEnd');
+    act(() => t.unmount());
+  });
 });

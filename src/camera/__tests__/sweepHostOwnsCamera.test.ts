@@ -104,10 +104,13 @@ describe('sweepHostOwnsCamera — the camera state alone decides', () => {
     expect(hostOwns(OK)).toBe(true);
   });
 
-  it('the full truth table — true exactly when non-AR and no hatch', () => {
+  it('the full truth table — false ONLY for the DR-1a hatch on a non-AR sweep (M8)', () => {
+    // M8: the AR sweep runs on `<Camera>`'s own AR view too, so ownership is
+    // `<Camera>`'s on every cell but the reference hatch — and the hatch is
+    // inert with AR on.
     for (const isAR of [true, false]) {
       for (const frameSourceOverride of [undefined, 'own' as const]) {
-        const want = !isAR && frameSourceOverride !== 'own';
+        const want = !(frameSourceOverride === 'own' && !isAR);
         expect({ isAR, frameSourceOverride, owns: hostOwns({ isAR, frameSourceOverride }) })
           .toEqual({ isAR, frameSourceOverride, owns: want });
       }
@@ -115,13 +118,16 @@ describe('sweepHostOwnsCamera — the camera state alone decides', () => {
   });
 
   it('⚑ every input key has a value that flips the answer, on its own', () => {
+    // From the hatch state (non-AR + 'own' → false), each key alone flips it.
+    const HATCH: SweepHostOwnsCameraInput = { isAR: false, frameSourceOverride: 'own' };
     const flip: { [K in keyof SweepHostOwnsCameraInput]: SweepHostOwnsCameraInput[K] } = {
       isAR: true,
-      frameSourceOverride: 'own',
+      frameSourceOverride: undefined,
     };
+    expect(hostOwns(HATCH)).toBe(false);
     for (const key of SWEEP_HOST_OWNS_INPUT_KEYS) {
-      expect({ key, owns: hostOwns({ ...OK, [key]: flip[key] }) })
-        .toEqual({ key, owns: false });
+      expect({ key, owns: hostOwns({ ...HATCH, [key]: flip[key] }) })
+        .toEqual({ key, owns: true });
     }
   });
 });
@@ -243,26 +249,26 @@ describe('sweepFailureCameraCode — only a missing plugin is a BUILD failure', 
 
 describe('sweepCameraHandoff — the loser releases first, the winner waits', () => {
   it('steady state, host owns: mounts the preview and says so', () => {
-    expect(handoff({ live: true, latch: null, settling: false }))
+    expect(handoff({ live: true, latch: null, settling: false, isAR: false }))
       .toEqual({ mountHostPreview: true, surfaceFrameSource: 'host' });
   });
 
   it('steady state, surface owns: no preview, and the surface is told', () => {
-    expect(handoff({ live: false, latch: null, settling: false }))
+    expect(handoff({ live: false, latch: null, settling: false, isAR: false }))
       .toEqual({ mountHostPreview: false, surfaceFrameSource: 'own' });
   });
 
   it('⚑ own → host, mid-handoff: the surface lets go BEFORE we mount', () => {
     // It is told 'host' immediately (so it closes its idle preview) while
     // the preview waits. The reverse order is two clients on one device.
-    expect(handoff({ live: true, latch: null, settling: true }))
+    expect(handoff({ live: true, latch: null, settling: true, isAR: false }))
       .toEqual({ mountHostPreview: false, surfaceFrameSource: 'host' });
   });
 
   it('⚑ host → own, mid-handoff: we unmount BEFORE the surface opens', () => {
     // Still told 'host', which is what keeps it from opening anything while
     // vision-camera's session is still going down.
-    expect(handoff({ live: false, latch: null, settling: true }))
+    expect(handoff({ live: false, latch: null, settling: true, isAR: false }))
       .toEqual({ mountHostPreview: false, surfaceFrameSource: 'host' });
   });
 
@@ -270,17 +276,30 @@ describe('sweepCameraHandoff — the loser releases first, the winner waits', ()
     // The property that makes the window safe, asserted as a property
     // rather than inferred from the two rows above.
     for (const live of [true, false]) {
-      expect(handoff({ live, latch: null, settling: true }).mountHostPreview)
+      expect(handoff({ live, latch: null, settling: true, isAR: false }).mountHostPreview)
         .toBe(false);
     }
   });
 
   it('⚑ the LATCH outranks the live value while a sweep runs', () => {
     // Native latched the arm at start and never re-reads it.
-    expect(handoff({ live: false, latch: true, settling: false }))
+    expect(handoff({ live: false, latch: true, settling: false, isAR: false }))
       .toEqual({ mountHostPreview: true, surfaceFrameSource: 'host' });
-    expect(handoff({ live: true, latch: false, settling: false }))
+    expect(handoff({ live: true, latch: false, settling: false, isAR: false }))
       .toEqual({ mountHostPreview: false, surfaceFrameSource: 'own' });
+  });
+});
+
+describe('sweepCameraHandoff — M8: the AR kind is <Camera>\'s AR view', () => {
+  it('owned + AR: the engine is told host-ar (it mounts no AR view of its own)', () => {
+    expect(handoff({ live: true, latch: null, settling: false, isAR: true }).surfaceFrameSource)
+      .toBe('host-ar');
+  });
+  it('the hatch and the settle window never say host-ar', () => {
+    expect(handoff({ live: false, latch: null, settling: false, isAR: true }).surfaceFrameSource)
+      .toBe('own');
+    expect(handoff({ live: false, latch: null, settling: true, isAR: true }).surfaceFrameSource)
+      .toBe('host');
   });
 });
 
@@ -308,9 +327,9 @@ describe('sweepShouldSettle — and never under a running sweep', () => {
   it('⚑ …and the state it refuses really would drop the preview', () => {
     // Pins WHY the guard above matters, so deleting it cannot be argued as
     // harmless: with a sweep latched to `host`, a settle turns the mount off.
-    expect(handoff({ live: false, latch: true, settling: true }).mountHostPreview)
+    expect(handoff({ live: false, latch: true, settling: true, isAR: false }).mountHostPreview)
       .toBe(false);
-    expect(handoff({ live: false, latch: true, settling: false }).mountHostPreview)
+    expect(handoff({ live: false, latch: true, settling: false, isAR: false }).mountHostPreview)
       .toBe(true);
   });
 });

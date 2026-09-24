@@ -109,7 +109,8 @@ jest.mock('../useSweepEngine', () => {
       wasEnabled.current = enabled;
       if (was && !enabled) props.onSweepingChange?.(false);
     }, [enabled]);
-    return {};
+    // The fields `<Camera>`'s own tree reads off the engine.
+    return { phase: 'idle', setSurfaceBox: () => undefined, handleArFrame: () => undefined };
   }
   return { __esModule: true, useSweepEngine };
 });
@@ -292,6 +293,22 @@ describe('the rotation guard STOPS THE SWEEP, not just the host callback', () =>
   });
 });
 
+describe('M8 — the built-in shutter\'s hold runs the SELECTED engine', () => {
+  it('a press-and-hold on <Camera>\'s own shutter reaches the sweep, and its release ends it', async () => {
+    // One shutter for both engines: its hold goes through the same dispatch
+    // as `startPanorama`, so on the sweep engine it is the sweep's hold.
+    const { CameraShutter } = require('../../camera/CameraShutter');
+    const tree = render({});
+    await settle();
+    const shutter = tree.root.findByType(CameraShutter);
+    await act(async () => { shutter.props.onHoldStart(); });
+    expect(calls).toContain('holdStart');
+    await act(async () => { shutter.props.onHoldComplete(); });
+    expect(calls).toContain('holdEnd');
+    act(() => { tree.unmount(); });
+  });
+});
+
 describe('the sideways-drift guard is ARMED, and armed on EVERY arm', () => {
   /**
    * Let the ORIENTATION guard see a steady phone first.
@@ -321,15 +338,15 @@ describe('the sideways-drift guard is ARMED, and armed on EVERY arm', () => {
     }
   }
 
-  it('⚑ ON THE AR ARM — the configuration the product actually ships', async () => {
-    // ⚠ THE OPERATOR'S FIRST NAMED GUARD, ON HIS OWN PLATFORM. `usePanMotion`
-    // was gated `active: captureRecording && isNonAR`, a term carried over
-    // from `useIMUTranslationGate` — where it is CORRECT, because in AR the
-    // native side really does use pose-derived translation. This hook has no
-    // such substitute: nothing in this library consumes ARKit translation for
-    // a lateral budget and no ARKit pose stream reaches JS. So on the AR arm
-    // the sideways-drift guard was not "owned by the session"; it was absent,
-    // and the iOS sweep runs ARKit.
+  it('⚑ ON THE AR ARM the IMU guard STANDS DOWN — the pose guard owns lateral drift (M8)', async () => {
+    // ⚠ INVERTED BY M8, and on purpose. This case used to prove the IMU guard
+    // fired on an AR sweep, because the sweep drew its OWN AR view and no pose
+    // reached `<Camera>`: the accelerometer was the only lateral guard it had
+    // (M0's stand-in). The sweep now runs on `<Camera>`'s AR view, its poses
+    // reach `handleArFrame`, and AR is pose-guarded on both engines — exactly
+    // as the keyframe engine has always been. The pose guard firing on an AR
+    // sweep is pinned in `mergeGuardRegressions` ("an AR SWEEP is
+    // pose-guarded"), where the drift latch is controllable.
     const tree = render({
       captureSources: 'both', defaultCaptureSource: 'ar', lateralBudgetCm: 1,
     });
@@ -338,9 +355,7 @@ describe('the sideways-drift guard is ARMED, and armed on EVERY arm', () => {
     await settleUpright();
     await startSweep();
     await slideSideways();
-    // The cap on a sideways drift is a FINALIZE, not a discard: what was
-    // painted is the deliverable. So the handle sees `holdEnd`.
-    expect(calls).toContain('holdEnd');
+    expect(calls).not.toContain('holdEnd');
     expect(calls.some((c) => c.startsWith('abandon:'))).toBe(false);
     act(() => { tree.unmount(); });
   });

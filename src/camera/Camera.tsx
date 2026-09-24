@@ -164,7 +164,7 @@ export type SweepOptions = Omit<
   frameSourceOverride?: 'own';
 };
 import { CameraShutter } from './CameraShutter';
-import { CameraView, type CameraViewProps } from './CameraView';
+import { CameraView, type CameraViewProps, useLatchedWhile } from './CameraView';
 import { CaptureHeader, type CaptureHeaderProps } from './CaptureHeader';
 import { CapturePreview, type CapturePreviewAction } from './CapturePreview';
 import {
@@ -260,6 +260,7 @@ import {
 import { useFrameProcessorDriver } from '../stitching/useFrameProcessorDriver';
 import { useSweepWorklet } from '../sweep/useSweepWorklet';
 import { useSweepEngine } from '../sweep/useSweepEngine';
+import { SweepHoldOverlay } from '../sweep/SweepHoldOverlay';
 import { panoPlusVcArmSupported } from '../sweep/panoPlusNative';
 import { useIncrementalStitcher } from '../stitching/useIncrementalStitcher';
 import { useIMUTranslationGate } from '../sensors/useIMUTranslationGate';
@@ -1101,8 +1102,23 @@ export interface CameraProps {
    * (e.g. Galaxy A35).  Costs stitch memory (~4× pixels per keyframe).
    * Default `false`.  No-op on iOS (native-res keyframes already) and on
    * older binaries.
+   *
+   * M8 (D15) — the AR view is ONE session config for both engines: unset, it
+   * follows `enablePanoramaMode` (a panorama needs the larger CPU image on
+   * either engine), and it is held while a capture records.
    */
   keyframeQualityCapture?: boolean;
+  /**
+   * M8 (D15) — the AR CPU image's long-edge cap under `keyframeQualityCapture`
+   * (`ARCameraView.keyframeQualitySourceMaxLongEdge`). The same value on both
+   * engines. Unset: the view's own default.
+   */
+  arSourceMaxLongEdge?: number;
+  /**
+   * M8 — points of the HOST's own chrome docked over `<Camera>`'s top edge (a
+   * banner). The top-right pill stack clears it, on both engines.
+   */
+  topChromeInset?: number;
   /**
    * Native-camera 0.5× fallback (Android; default OFF).  A list of device
    * MODEL identifiers (matched case-insensitively as a PREFIX of
@@ -2082,6 +2098,8 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     enableDepth,
     highResCapture,
     keyframeQualityCapture,
+    arSourceMaxLongEdge,
+    topChromeInset,
     nativeUltraWideModels,
     onRequestNativeUltraWide,
     captureDepthData,
@@ -2209,6 +2227,15 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // nothing: the recorder already retries into a camera vision-camera is
   // still releasing.
   const [sweepHandoffPending, setSweepHandoffPending] = useState(false);
+  // M8 — the OWNERSHIP settle (the DR-1a hatch toggled; see
+  // `sweepCameraHandoff`) holds `<Camera>`'s camera slot unmounted exactly as
+  // the engine-switch settle does, so the two are ONE term wherever a camera
+  // may mount or a hold may start.
+  const [ownershipSettling, setOwnershipSettling] = useState(false);
+  const cameraHandoffPending = sweepHandoffPending || ownershipSettling;
+  // Was the last sweep on pano+'s OWN camera (the DR-1a hatch)? Only then does
+  // leaving the sweep engine hand a camera back — see the effect below.
+  const sweepOnOwnCameraRef = useRef(false);
   // ── OWNERSHIP IS LATCHED FOR THE LIFE OF A SWEEP ────────────────────
   // `hostOwnsSweepCamera` is computed from live state — the plugin handle
   // can still resolve, AR support can still settle. Recomputing it under a
@@ -2225,6 +2252,10 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     const was = prevEngineRef.current;
     prevEngineRef.current = engine;
     if (was !== 'sweep' || engine === 'sweep') return undefined;
+    // M8 — on every other cell the sweep ran on `<Camera>`'s OWN camera, so
+    // leaving it hands nothing back: the camera stays mounted, and an idle
+    // engine switch is not a camera switch (DR-2 I3/A7).
+    if (!sweepOnOwnCameraRef.current) return undefined;
     setSweepHandoffPending(true);
     const t = setTimeout(
       () => { setSweepHandoffPending(false); },
@@ -2669,16 +2700,17 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   //
   // ⚠ BOTH GATES READ THE ENGINE'S OWN PROGRESS: accepted keyframes, or the
   // strips a sweep has painted (`sweepProgress`, clamped — only the arming
-  // thresholds read it). And the IMU guard stays on for an AR SWEEP: the
-  // sweep still draws its own AR view, so no pose reaches `handleArFrame`
-  // below and the pose guard sees nothing on that engine. When the collapse
-  // (M8) routes the sweep's AR frames through `<Camera>`'s view, this term
-  // goes and AR is pose-guarded on both engines.
+  // thresholds read it).
+  //
+  // M8: AND AR IS POSE-GUARDED ON BOTH ENGINES. The sweep used to draw its
+  // own AR view, so no pose reached `handleArFrame` below and the IMU guard
+  // stood in for an AR sweep (M0). The sweep's AR frames now come through
+  // `<Camera>`'s own view, so the stand-in goes.
   const captureProgress = engine === 'sweep'
     ? sweepProgress
     : (incremental.state?.acceptedCount ?? 0);
   const imuGuardArmed = captureProgress >= MIN_STITCHABLE_KEYFRAMES;
-  const poseGuardOwnsLateral = isAR && engine !== 'sweep';
+  const poseGuardOwnsLateral = isAR;
   const effectiveLateralBudgetCm =
     poseGuardOwnsLateral || !imuGuardArmed ? 0 : lateralBudgetCm;
   const panMotion = usePanMotion({
@@ -2822,6 +2854,22 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // can reach it (handleHoldStart is defined below the handle). Mirrors
   // handleTapRef; handleHoldEndRef (the stop side) already exists further down.
   const handleHoldStartRef = useRef<(() => void) | null>(null);
+  // ── M8: ONE HOLD DISPATCH, FOR THE SHUTTER AND THE HANDLE ALIKE ───────────
+  // The built-in shutter and `startPanorama`/`stopPanorama` reach the same two
+  // functions, so a host that hides the shutter and drives holds itself runs
+  // exactly what a press runs, on either engine.
+  const holdStartDispatchRef = useRef<() => void>(() => undefined);
+  holdStartDispatchRef.current = () => {
+    if (engineRef.current === 'sweep') { sweepRef.current?.holdStart?.(); return; }
+    handleHoldStartRef.current?.();
+  };
+  const holdEndDispatchRef = useRef<() => void>(() => undefined);
+  holdEndDispatchRef.current = () => {
+    if (engineRef.current === 'sweep') { sweepRef.current?.holdEnd?.(); return; }
+    handleHoldEndRef.current?.();
+  };
+  const holdStartDispatch = useCallback(() => { holdStartDispatchRef.current(); }, []);
+  const holdEndDispatch = useCallback(() => { holdEndDispatchRef.current(); }, []);
   /** The sweep surface's shutter handle, when `engine="sweep"`. */
   const sweepRef = useRef<SweepSurfaceHandle | null>(null);
   /** `engine` read from inside the imperative handle, whose deps are `[]` so
@@ -2850,16 +2898,9 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     // engine's hold against a surface that is not mounted, and nothing would
     // report it — `handleHoldStartRef.current` is simply null in sweep mode,
     // so the press would be silently inert.
-    startPanorama: () => {
-      if (engineRef.current === 'sweep') { sweepRef.current?.holdStart?.(); return; }
-      handleHoldStartRef.current?.();
-    },
+    startPanorama: () => { holdStartDispatchRef.current(); },
     stopPanorama: () => {
-      if (engineRef.current === 'sweep') {
-        sweepRef.current?.holdEnd?.();
-        return Promise.resolve();
-      }
-      handleHoldEndRef.current?.();
+      holdEndDispatchRef.current();
       return Promise.resolve();
     },
     // Same state the built-in AR pill flips, through the pill's own guard —
@@ -3880,11 +3921,12 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     // render gate already unmounts the camera for `inFlightTransition`;
     // starting a capture here anyway is what produced the resumed-into-
     // a-dead-window failure described on `holdShouldDeferForCamera`.
-    // …and during the sweep→keyframe camera handoff, which unmounts the
-    // camera as surely as a transition does (`cameraShouldUnmount`'s
-    // `sweepHandoffPending` term): a hold there would start against no camera.
+    // …and during a camera handoff (leaving the DR-1a hatch's own camera, or
+    // the hatch toggled), which unmounts the camera as surely as a transition
+    // does (`cameraShouldUnmount`'s handoff term): a hold there would start
+    // against no camera.
     if (holdShouldDeferForCamera(
-      inFlightTransition || sweepHandoffPending, arSupportPending,
+      inFlightTransition || cameraHandoffPending, arSupportPending,
     )) {
       setPendingPanStart(true);
       return;
@@ -3900,7 +3942,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     // v0.25 — read by holdShouldDeferForCamera above; without it this
     // callback closes over a stale `false` and the new gate never fires.
     inFlightTransition,
-    sweepHandoffPending,
+    cameraHandoffPending,
     deviceOrientation,
     startCapture,
   ]);
@@ -3918,7 +3960,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       // v0.25 — and the in-flight transition, without which this effect
       // resumed the capture at the exact moment the camera unmounted.
       && !holdShouldDeferForCamera(
-        inFlightTransition || sweepHandoffPending, arSupportPending,
+        inFlightTransition || cameraHandoffPending, arSupportPending,
       )
     ) {
       setPendingPanStart(false);
@@ -3930,7 +3972,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     panMode,
     arSupportPending,
     inFlightTransition,
-    sweepHandoffPending,
+    cameraHandoffPending,
   ]);
 
   const handleHoldEnd = useCallback(async () => {
@@ -4522,22 +4564,22 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // ── JSX ─────────────────────────────────────────────────────────
 
   // ══════════════════════════════════════════════════════════════════
-  //  engine="sweep" — the sweep surface OWNS the screen
+  //  engine="sweep" — M8: ONE TREE. The engine decides what the HOLD runs.
   // ══════════════════════════════════════════════════════════════════
   //
-  // ⚠ A DELEGATION, NOT A BRANCH INSIDE THE NORMAL RENDER, AND THE REASON IS
-  // THE AR SESSION. `<Camera>` mounts an `<ARCameraView>` and so does the
-  // sweep surface; two mounts mean two `RNSARSession.shared.start()` calls
-  // against one camera, which produces no compile error, no link error, and
-  // a black preview or a frozen session on a phone. Returning early is the
-  // only shape in which exactly one of them is alive.
+  // Until M8 the sweep was a DELEGATION: an early return into the sweep
+  // surface's own screen, because the surface mounted its own AR view and two
+  // `<ARCameraView>`s mean two `RNSARSession.shared.start()` calls against one
+  // camera. The engine now mounts no camera of its own on any cell (`'host'` /
+  // `'host-ar'`), so the sweep runs in THIS tree, on `<Camera>`'s own camera,
+  // shutter and chrome. The early return is left for the DR-1a reference
+  // hatch alone — see `sweepLegacyTree`.
   //
-  // ⚠ AND THE SWEEP DOES NOT GO THROUGH `incremental.start()` AT ALL. It is
-  // not a mode of the keyframe engine: it is its own native module family
-  // (`RNSSweepSession` and siblings) with its own start/stop/cancel
-  // lifecycle. Both natives still answer `engine-unavailable` for the string
-  // 'sweep' — deliberately, because nothing should reach them with it. The
-  // engine selector is resolved HERE, in JS, before any bridge call.
+  // ⚠ THE SWEEP STILL DOES NOT GO THROUGH `incremental.start()`. It is its
+  // own native module family (`RNSSweepSession` and siblings) with its own
+  // start/stop/cancel lifecycle; both keyframe natives still answer
+  // `engine-unavailable` for the string 'sweep'. The hold dispatch below picks
+  // the engine in JS, before any bridge call.
   //
   // What the host sees is unchanged: completion arrives on `onCapture` and
   // failure on `onError`, exactly as for a photo or a panorama.
@@ -4551,24 +4593,20 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // and a copy would be a second place to fix the next Samsung reclaim bug.
   // ⚠ A FUNCTION, NOT A VALUE, AND THE PARAMETER IS THE WHOLE POINT.
   //
-  // This element is rendered from TWO places — the sweep cell and the main
-  // keyframe tree — and it used to carry the sweep's `onPreviewStarted`
-  // handler in both. That handler writes a `<Camera>`-scoped flag meaning
-  // "the SWEEP's host preview is drawing", so the KEYFRAME preview set it
-  // too, and on sweep → keyframe → sweep the flag arrived already true for
-  // a brand-new, session-less element: transparent root, explainer
-  // suppressed, black underneath. Five rounds of this rung's history is
-  // that flag being written by something that does not own it.
-  //
-  // Now the lifecycle callbacks are passed IN by the call site that owns
-  // them, so the keyframe cell structurally cannot write the sweep's flag.
-  // One definition still, for the ~25 props and the background-release
-  // contract that must not drift between the two.
+  // History: this element was once rendered from TWO places — the sweep
+  // cell and the main keyframe tree — and a flag meaning "the SWEEP's host
+  // preview is drawing" was written by the keyframe copy too, so a brand-new,
+  // session-less element could arrive reported as live. M8 made it ONE
+  // element in one tree, rendered once on both engines, with the lifecycle
+  // callbacks passed in at that one call site: it is the same preview whether
+  // the hold runs a keyframe capture or a sweep, so its "drawing" is simply
+  // true of both.
   // ── THE CHROME THAT BELONGS TO `<Camera>`, NOT TO AN ENGINE ─────────
   //
   // ⚠ THIS EXISTS BECAUSE `engine` WAS CHANGING THE WHOLE SCREEN. The
-  // `engine === 'sweep'` branch below returns a different tree, and every
-  // control lived AFTER it — so on a sweep the operator got the sweep
+  // `engine === 'sweep'` branch below USED TO return a different tree (since
+  // M8 only the DR-1a hatch does), and every control lived AFTER it — so on a
+  // sweep the operator got the sweep
   // surface's own CLONES of these pills instead (`src/sweep/chrome.tsx`),
   // fed from the pano+ arm/calibration ladder rather than from the camera.
   // Four field defects came out of that one substitution:
@@ -4798,7 +4836,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
    * and the host's history strip must not care which one produced it.
    */
   const renderThumbnailStrip = (): React.JSX.Element | null => (
-    thumbnails != null && statusPhase !== 'recording' ? (
+    thumbnails != null && !captureRecording ? (
       <CaptureThumbnailStrip
         items={thumbnails}
         minPhotos={thumbnailsMin}
@@ -5157,7 +5195,6 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // while Camera2 is still releasing the first — ERROR_CAMERA_IN_USE on a
   // phone where nothing is wrong but the ordering. So the loser releases
   // first and the winner waits; see `sweepCameraHandoff`.
-  const [ownershipSettling, setOwnershipSettling] = useState(false);
 
   // Who owns the camera on the sweep arm — ONE boolean, so the preview and
   // the native start options cannot disagree.
@@ -5193,8 +5230,17 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   });
   // …and when the host camera cannot serve a hold right now, the hold is
   // REFUSED BY NAME rather than handed to another camera.
-  const sweepHostRefusal = hostOwnsSweepCameraLive
-    ? sweepHostArmRefusal({
+  const sweepHostRefusal = !hostOwnsSweepCameraLive ? null
+    // M8 — on the AR kind the camera is `<Camera>`'s AR view; the only thing
+    // that can be wrong is that it is not up yet.
+    : isAR
+      ? (cameraShouldUnmount(
+          inFlightTransition,
+          arSupportPending,
+          statusPhase,
+          cameraHandoffPending,
+        ) ? SWEEP_CAMERA_NOT_READY : null)
+    : sweepHostArmRefusal({
       hostProcessorDrawable: hostFrameProcessor?.type === 'drawable-skia',
       captureMode: capture.captureMode,
       lens,
@@ -5205,15 +5251,14 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         inFlightTransition,
         arSupportPending,
         statusPhase,
-        sweepHandoffPending,
+        cameraHandoffPending,
       ),
       deviceId: capture.device?.id ?? '',
       colourLensTypes: Platform.OS === 'ios'
         ? colourLensTypeCount(capture.device?.physicalDevices)
         : null,
       depthMount: Platform.OS === 'ios' && captureDepthData === true,
-    })
-    : null;
+    });
 
   // ── PANORAMA OFF REFUSES THE SWEEP HOLD TOO, ON EITHER ARM (M3 review) ──
   // `enablePanoramaMode={false}` used to leave the sweep's shutter live while
@@ -5251,7 +5296,17 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     live: hostOwnsSweepCameraLive,
     latch: sweepOwnershipLatch,
     settling: ownershipSettling,
+    isAR,
   });
+  // ── M8: ONE TREE, EXCEPT FOR THE DR-1a HATCH ─────────────────────────────
+  // Every sweep runs on `<Camera>`'s own camera and in `<Camera>`'s own tree —
+  // the same viewfinder, shutter and chrome as the keyframe engine. The one
+  // exception is the reference hatch (`frameSourceOverride: 'own'`, non-AR),
+  // which hands the sweep pano+'s OLD own camera and so still needs the old
+  // screen that draws it. It goes with that arm (M6a/M6b).
+  const sweepLegacyTree = engine === 'sweep'
+    && !(sweepOwnershipLatch ?? hostOwnsSweepCameraLive);
+  if (engine === 'sweep') sweepOnOwnCameraRef.current = sweepLegacyTree;
 
   // ⚠ ONE EXPRESSION FOR "IS THE HOST'S PREVIEW IN THE TREE", used by the
   // mount, by `hostPreviewLive` and by the clearing effect below.
@@ -5278,15 +5333,18 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   //
   // The latch outranks it: under a RUNNING sweep the preview is the engine's
   // feed and must never be unmounted (the pills are disabled then anyway).
+  // M8 — it is the MAIN tree's camera slot now, on both engines: mounted
+  // exactly when that slot renders `<CameraView>`. It stays mounted behind the
+  // review, as the keyframe engine's always has (the engine itself is
+  // deselected there — see `useSweepEngine`'s `enabled`). The old sweep
+  // screen (the DR-1a hatch) never mounts it: that tree's camera is pano+'s.
   const hostPreviewMounted =
-    engine === 'sweep' && mountHostPreview && cropPending == null
-    && (sweepOwnershipLatch != null
-      || !cameraShouldUnmount(
-        inFlightTransition,
-        arSupportPending,
-        statusPhase,
-        sweepHandoffPending,
-      ));
+    !sweepLegacyTree && !isAR && !cameraShouldUnmount(
+      inFlightTransition,
+      arSupportPending,
+      statusPhase,
+      cameraHandoffPending,
+    );
   // ⚠ NO DEPENDENCY ARRAY, DELIBERATELY — which normally reads as a
   // mistake, so: the edge-triggered form missed the case where the flag is
   // set WHILE `hostPreviewMounted` is already false (the keyframe tree's
@@ -5305,31 +5363,6 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     }
   });
 
-  // ⚠ THIS EARLY RETURN TAKES **BOTH** SWEEP ARMS TODAY — read the
-  // condition, not this comment's history.
-  //
-  // It used to say "the AR cell ONLY" and that the non-AR sweep "falls
-  // through to the main tree". That is step 6's END STATE written in the
-  // present tense, and the guard below is `engine === 'sweep'`, unqualified.
-  // A reader who trusted the old wording would conclude step 6 was done.
-  // It is not. Corrected 2026-09-22; the restructure itself is unapproved
-  // and needs a phone on both platforms.
-  //
-  // WHY THE AR CELL MUST KEEP ITS EARLY RETURN, whatever step 6 does with
-  // the rest: on the AR arm the sweep surface mounts its own
-  // `<ARCameraView>` and `<Camera>` would mount a second one — two
-  // `RNSARSession.shared.start()` calls against one camera, no compile
-  // error, black preview on a phone. Returning early is the only shape in
-  // which exactly one is alive.
-  //
-  // WHY THE NON-AR ARM IS THE OPPOSITE PROBLEM, and why collapsing it is
-  // the actual goal: there the host's own `<CameraView>` IS the camera and
-  // the sweep is fed from it by the `panoplus_sweep_ingest` frame
-  // processor, so the viewfinder, shutter and chrome in the main tree would
-  // serve it directly. Substituting a second tree for it is what produced
-  // four device defects at once. The fix is to split this block by
-  // RESPONSIBILITY rather than by engine — make the furniture
-  // engine-conditional in the main tree — NOT to keep two trees.
   // ── M8: THE SWEEP ENGINE IS MOUNTED BY `<Camera>`, ON EVERY ENGINE ──────
   // The hook used to live inside the sweep surface, so it existed only while
   // that surface was on screen. It is called here unconditionally (hooks
@@ -5443,12 +5476,12 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       started: hostPreviewStarted,
     }),
     hostPreviewError: hostPreviewError,
-    vcPluginArm: mountHostPreview,
-    vcCameraId: mountHostPreview ? (capture.device?.id ?? '') : '',
+    vcPluginArm: mountHostPreview && !isAR,
+    vcCameraId: mountHostPreview && !isAR ? (capture.device?.id ?? '') : '',
     // M4 — the CameraView's tag, for the AE/AWB lock on vision-
     // camera's own camera (Android). Read at render; the start bag
     // carries whatever the mounted preview's tag is at the hold.
-    vcViewTag: mountHostPreview
+    vcViewTag: mountHostPreview && !isAR
       ? (findNodeHandle(visionCameraRef.current) ?? undefined)
       : undefined,
     // The NAMED reason a hold on the host camera cannot start now —
@@ -5489,7 +5522,8 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       // pills need the PHASE.
       setSweepRunning(sweeping);
       if (!sweeping) setSweepFinalizing(false);
-      sweepDriver.setActive(sweeping);
+      // The vision-camera ingest runs only when the sweep is on that camera.
+      sweepDriver.setActive(sweeping && !isAR);
       // A new sweep starts from zero progress; the surface's own
       // report follows as its status arrives.
       //
@@ -5739,7 +5773,47 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     enabled: engine === 'sweep' && cropPending == null,
   });
 
-  if (engine === 'sweep') {
+  // ── M8 (D15): ONE AR VIEW, ONE SESSION CONFIG, BOTH ENGINES ───────────────
+  // Any change to these props pauses ARCore, re-selects its camera config and
+  // resumes (RNSARSession.kt), and the Android AR tap photo IS the CPU image
+  // from that config — so they must not depend on the engine, and they are
+  // held while a capture records. The sweep's AR arm reads frames from this
+  // same session through the plugin registry, and its status rides
+  // `onArFrame`, composed below.
+  const arViewConfig = useLatchedWhile(captureRecording, {
+    keyframeQualityCapture: keyframeQualityCapture ?? enablePanoramaMode,
+    keyframeQualitySourceMaxLongEdge: arSourceMaxLongEdge,
+    arFrameMetaInterval: enablePanoramaMode
+      ? Math.min(arFrameMetaInterval ?? SWEEP_AR_META_INTERVAL_MS, SWEEP_AR_META_INTERVAL_MS)
+      : arFrameMetaInterval,
+  });
+  const sweepArFrameRef = useRef(sweepEngine.handleArFrame);
+  sweepArFrameRef.current = sweepEngine.handleArFrame;
+  const handleArFrameComposed = useCallback((meta: ARFrameMeta) => {
+    handleArFrame(meta);
+    if (engineRef.current === 'sweep') sweepArFrameRef.current(meta);
+  }, [handleArFrame]);
+  // The preview's lifecycle, reported on both engines: one tree, one preview.
+  const hostPreviewLifecycle: NonNullable<CameraViewProps['cameraProps']> = {
+    // `onPreviewStarted`, NOT `onStarted`: vision-camera documents the latter
+    // as the SESSION event ("might not have received any [frames] yet").
+    onPreviewStarted: () => {
+      setHostPreviewStarted(true);
+      setHostPreviewError('');
+    },
+    onPreviewStopped: () => { setHostPreviewStarted(false); },
+    onStopped: () => { setHostPreviewStarted(false); },
+  };
+  // EVERY error, including the transient lifecycle codes `onError` swallows.
+  const onHostPreviewAnyError = (err: unknown): void => {
+    const e = err as { code?: string; message?: string };
+    setHostPreviewError(`${e?.code ?? 'unknown'}: ${e?.message ?? String(err)}`);
+  };
+
+  // ── THE DR-1a HATCH'S OLD SCREEN ─────────────────────────────────────────
+  // Only here does the sweep run on pano+'s OWN camera, so only here does it
+  // need the screen that draws that camera. Deleted with the arm (M6a/M6b).
+  if (sweepLegacyTree) {
     return (
       <HostJsLandscapeContext.Provider value={jsLandscape}>
         <View style={[styles.container, style]}>
@@ -5762,38 +5836,8 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               main tree would bring the settings modal, the thumbnail strip
               and the band overlay with it — keyframe furniture over a
               sweep. The sweep's own HUD is the surface's. */}
-          {hostPreviewMounted && renderHostPreview({
-            // ⚠ ONLY THE SWEEP CELL PASSES THESE. They write state that
-            // means "the SWEEP's host preview is drawing", so the keyframe
-            // tree's copy of this element must not have them.
-            //
-            // `onPreviewStarted`, NOT `onStarted`: vision-camera documents
-            // the latter as the SESSION event — "outputs can start
-            // receiving frames … but might not have received any yet" — so
-            // gating on it narrows the transparent-over-black window rather
-            // than closing it. `onStopped` is kept as a belt for the
-            // `isActive={false}` teardown, which `onPreviewStopped` alone
-            // does not cover.
-            onPreviewStarted: () => {
-              setHostPreviewStarted(true);
-              setHostPreviewError('');
-            },
-            onPreviewStopped: () => { setHostPreviewStarted(false); },
-            onStopped: () => { setHostPreviewStarted(false); },
-            // EVERY error, including the three transient lifecycle codes
-            // `onError` deliberately swallows — which are exactly the ones
-            // that leave this preview dark with nothing else to say.
-            // Without them the handoff caption sits over a permission
-            // denial for ever. Passed as `onAnyError` (the second argument)
-            // rather than through `cameraProps.onError`, which would
-            // REPLACE `CameraView`'s own filter for the inner camera and
-            // change what the host sees.
-          }, (err: unknown) => {
-            const e = err as { code?: string; message?: string };
-            setHostPreviewError(
-              `${e?.code ?? 'unknown'}: ${e?.message ?? String(err)}`,
-            );
-          })}
+          {/* M8 — NO HOST PREVIEW HERE. This tree is the DR-1a hatch's, whose
+              camera is pano+'s own; `<Camera>`'s preview is the main tree's. */}
           {cropPending == null && (
           // ⚠ THE SURFACE UNMOUNTS BEHIND THE REVIEW, and must keep doing
           // so. It owns a camera; leaving it mounted behind the review
@@ -5947,6 +5991,12 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             ? prev
             : { width, height },
         );
+        // M8 — the sweep's hold overlay lays itself out in THIS box.
+        sweepEngine.setSurfaceBox((prev) => (
+          prev != null && prev.width === width && prev.height === height
+            ? prev
+            : { width, height }
+        ));
       }}
     >
       {/* Preview — AR or non-AR (or the brief "switching…" placeholder
@@ -5958,7 +6008,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         inFlightTransition,
         arSupportPending,
         statusPhase,
-        sweepHandoffPending,
+        cameraHandoffPending,
       ) ? (
         // statusPhase==='stitching' UNMOUNTS the camera so vision-camera
         // frees the AVCaptureSession + preview buffers during the stitch
@@ -5977,7 +6027,8 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           arFrameProcessor={arFrameProcessor}
           enableDepth={enableDepth}
           highResCapture={highResCapture}
-          keyframeQualityCapture={keyframeQualityCapture}
+          keyframeQualityCapture={arViewConfig.keyframeQualityCapture}
+          keyframeQualitySourceMaxLongEdge={arViewConfig.keyframeQualitySourceMaxLongEdge}
           enableAnchors={enableAnchors}
           enableMesh={enableMesh}
           enableFeaturePoints={enableFeaturePoints}
@@ -5986,13 +6037,49 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           // host.  Native emission is gated on this prop being set, so the
           // guard would never receive a frame if we only passed the host's
           // callback through.
-          onArFrame={isAR ? handleArFrame : onArFrame}
-          arFrameMetaInterval={arFrameMetaInterval}
+          onArFrame={isAR ? handleArFrameComposed : onArFrame}
+          arFrameMetaInterval={arViewConfig.arFrameMetaInterval}
           onArPluginResult={onArPluginResult}
           overlays={overlays}
         />
       ) : (
-        renderHostPreview()
+        renderHostPreview(hostPreviewLifecycle, onHostPreviewAnyError)
+      )}
+
+      {/* ── M8: THE SWEEP'S HOLD-TIME DRAWING, OVER <Camera>'S CAMERA ──────
+          The growing panorama, its headline, hard faults and the τ chip —
+          while a sweep is live only. At idle the sweep engine draws NOTHING
+          over the viewfinder, so the idle screen is the keyframe engine's
+          (DR-2 U2); the idle bench reads it used to print are in the pack. */}
+      {engine === 'sweep' && cropPending == null && sweepEngine.phase !== 'idle' && (
+        <View style={StyleSheet.absoluteFill} pointerEvents="box-none">
+          <SweepHoldOverlay
+            armContract={sweepEngine.armContract}
+            armDetailOpen={sweepEngine.armDetailOpen}
+            armNotice={sweepEngine.armNotice}
+            basisWriteDisagreement={sweepEngine.basisWriteDisagreement}
+            drops={sweepEngine.drops}
+            error={sweepEngine.error}
+            guidance={sweepEngine.guidance}
+            hud={sweepEngine.hud}
+            lockWarning={sweepEngine.lockWarning}
+            onPreviewSlotLoad={sweepEngine.onPreviewSlotLoad}
+            phase={sweepEngine.phase}
+            preview={sweepEngine.preview}
+            previewLayout={sweepEngine.previewLayout}
+            previewLoadFailed={sweepEngine.previewLoadFailed}
+            previewPinNotice={sweepEngine.previewPinNotice}
+            previewPlaceholder={sweepEngine.previewPlaceholder}
+            previewSlots={sweepEngine.previewSlots}
+            previewStale={sweepEngine.previewStale}
+            runningUncorrected={sweepEngine.runningUncorrected}
+            setArmDetailOpen={sweepEngine.setArmDetailOpen}
+            setPreviewLoadFailed={sweepEngine.setPreviewLoadFailed}
+            sweepFaults={sweepEngine.sweepFaults}
+            sweeping={sweepEngine.sweeping}
+            viewfinderNotice={sweepEngine.viewfinderNotice}
+          />
+        </View>
       )}
 
       {/* REC banner + record border (during recording / stitching).  v0.16
@@ -6000,7 +6087,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           too-fast copy) when the pan is too fast: the single speed cue that
           replaced the always-red border + separate amber pill. */}
       <CaptureStatusOverlay
-        phase={statusPhase}
+        phase={engine === 'sweep' && sweepRunning ? 'recording' : statusPhase}
         topInset={insets.top}
         recordingStartedAt={recordingStartedAt ?? undefined}
         tooFast={recordingTooFast}
@@ -6033,7 +6120,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       {/* Item 5 — optional blinking time countdown (top corner), shown only
           when the host opts into a wall-clock cap via maxPanDurationMs. */}
       <CaptureCountdownOverlay
-        visible={statusPhase === 'recording' && panGuidance && maxPanDurationMs > 0}
+        visible={captureRecording && panGuidance && maxPanDurationMs > 0}
         secondsRemaining={countdownSeconds}
         orientation={deviceOrientation}
       />
@@ -6190,13 +6277,15 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             <View style={styles.shutterWrap}>
               <CameraShutter
                 onTap={handleTap}
-                onHoldStart={enablePanoramaMode ? handleHoldStart : noop}
-                onHoldComplete={enablePanoramaMode ? handleHoldEnd : noop}
+                // M8 — the same dispatch the handle's startPanorama uses, so a
+                // press runs whichever engine is selected.
+                onHoldStart={enablePanoramaMode ? holdStartDispatch : noop}
+                onHoldComplete={enablePanoramaMode ? holdEndDispatch : noop}
                 // Tap-only when panorama is off — no dead "recording" ring on a
                 // hold that does nothing (the split-Photo-mode case).
                 holdEnabled={enablePanoramaMode}
-                isProcessing={statusPhase === 'stitching'}
-                disabled={statusPhase === 'stitching' || shutterDisabled}
+                isProcessing={statusPhase === 'stitching' || sweepFinalizing}
+                disabled={statusPhase === 'stitching' || sweepFinalizing || shutterDisabled}
               />
             </View>
           )}
@@ -6214,7 +6303,10 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           when the lens is 1× (ARKit/ARCore don't expose the ultra-wide)
           and the device supports AR. */}
       <View
-        style={[styles.pillStack, { top: pillStackTop }]}
+        style={[styles.pillStack, {
+          // M8 — clear the host's docked top chrome, on both engines.
+          top: Math.max(pillStackTop, topChromeInset ?? sweep?.hostChromeTopPt ?? 0),
+        }]}
         pointerEvents="box-none"
       >
         {/* v0.13.2 — AR toggle only when BOTH sources are allowed
@@ -6396,8 +6488,20 @@ export const _extractPanoramaOverridesForTests = extractPanoramaOverrides;
 export const _stitcherForNativeForTests = stitcherForNative;
 
 /**
- * sweepHostOwnsCamera — on `engine="sweep"`, is `<Camera>`'s own
- * `<CameraView>` the camera the sweep runs on?
+ * sweepHostOwnsCamera — on `engine="sweep"`, is the camera the sweep runs on
+ * `<Camera>`'s own?
+ *
+ * ── M8: YES, ON EVERY CELL BUT ONE ─────────────────────────────────────
+ *
+ *   · AR     → `<Camera>`'s own `<ARCameraView>` — the stitcher's AR session,
+ *     the same view the keyframe engine uses. The engine is told `'host-ar'`
+ *     and mounts no AR view of its own (until M8 it mounted a second one,
+ *     which is why the sweep had to be a separate tree).
+ *   · non-AR → `<Camera>`'s `<CameraView>`; the engine is told `'host'`.
+ *
+ * The ONE `false`: the DR-1a reference hatch (`frameSourceOverride: 'own'`)
+ * on a NON-AR sweep, which hands it pano+'s old own camera and renders the old
+ * sweep screen. It is inert with AR on, and it goes with that arm (M6a/M6b).
  *
  * ── M3 (2026-09-24) / M5: NON-AR, ALWAYS, ON BOTH PLATFORMS ─────────────
  *
@@ -6445,7 +6549,7 @@ const _sweepOwnsKeysAreExhaustive: _SweepOwnsKeysAreExhaustive = true;
 void _sweepOwnsKeysAreExhaustive;
 
 function sweepHostOwnsCamera(input: SweepHostOwnsCameraInput): boolean {
-  return !input.isAR && input.frameSourceOverride !== 'own';
+  return !(input.frameSourceOverride === 'own' && !input.isAR);
 }
 
 /** @internal test-only — see `sweepHostOwnsCamera`. */
@@ -6677,15 +6781,16 @@ export function sweepHostArmRefusal(
         + 'in a moment.',
     };
   }
-  if (i.cameraUnmounting || i.deviceId === '') {
-    return {
-      code: 'panoplus-camera-not-ready',
-      message: 'This sweep cannot start yet: the camera is still opening. '
-        + 'Try again in a moment.',
-    };
-  }
+  if (i.cameraUnmounting || i.deviceId === '') return SWEEP_CAMERA_NOT_READY;
   return null;
 }
+
+/** The hold refusal while `<Camera>`'s camera is still opening, either kind. */
+export const SWEEP_CAMERA_NOT_READY: SweepHostArmRefusal = {
+  code: 'panoplus-camera-not-ready',
+  message: 'This sweep cannot start yet: the camera is still opening. '
+    + 'Try again in a moment.',
+};
 
 /**
  * sweepCameraHandoff — resolve the live ownership answer, the in-flight sweep
@@ -6727,11 +6832,15 @@ function sweepCameraHandoff(input: {
   latch: boolean | null;
   /** A handoff is in flight. */
   settling: boolean;
-}): { mountHostPreview: boolean; surfaceFrameSource: 'own' | 'host' } {
+  /** M8 — `<Camera>`'s camera is its AR view (the engine is told 'host-ar'). */
+  isAR: boolean;
+}): { mountHostPreview: boolean; surfaceFrameSource: 'own' | 'host' | 'host-ar' } {
   const owns = input.latch ?? input.live;
   return {
     mountHostPreview: owns && !input.settling,
-    surfaceFrameSource: (owns || input.settling) ? 'host' : 'own',
+    surfaceFrameSource: owns
+      ? (input.isAR ? 'host-ar' : 'host')
+      : input.settling ? 'host' : 'own',
   };
 }
 
@@ -6799,6 +6908,11 @@ export const _sweepShouldSettleForTests = sweepShouldSettle;
  * operator watches a placeholder for no reason.
  */
 const SWEEP_CAMERA_RELEASE_SETTLE_MS = 600;
+
+/** The sweep's AR status cadence (ms) — the rate its own AR view used to ask
+ *  for. D15: `<Camera>`'s AR view delivers at least this fast whenever
+ *  panorama capture is on, on both engines. */
+const SWEEP_AR_META_INTERVAL_MS = 100;
 
 
 /**
