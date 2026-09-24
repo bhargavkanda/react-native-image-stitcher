@@ -5,7 +5,7 @@
  * ── WHY THIS FILE EXISTS AND `cameraSweepEngine.render.test.tsx` IS NOT
  *    ENOUGH ────────────────────────────────────────────────────────────
  *
- * That suite drives a REAL `PanoPlusCaptureSurface`, which is the right rig
+ * That suite drives the REAL sweep engine through `<Camera>`, which is the right rig
  * for the questions it asks (which arm, which props, which chrome). But it
  * installs no native fakes, so the surface never leaves `'idle'` — and every
  * imperative call `<Camera>` makes into it (`holdEnd`, `abandon`) is
@@ -51,8 +51,8 @@ let surfaceProps: Record<string, any> = {};
 
 // ⚠ M8: THE ENGINE IS A HOOK `<Camera>` CALLS, SO THE STUB IS THE HOOK. The
 // surface component this used to replace is no longer in `<Camera>`'s tree:
-// `<Camera>` calls `useSweepEngine` on every engine and renders
-// `SweepScreenView` from it. The stub keeps the contract the real hook keeps:
+// `<Camera>` calls `useSweepEngine` on every engine and draws
+// `SweepHoldOverlay` from it (M10: the sweep's own screen is gone). The stub keeps the contract the real hook keeps:
 //   · not SELECTED (`enabled: false`) → the handle is inert and nothing is
 //     recorded, as the unmounted surface was;
 //   · deselected → `onSweepingChange(false)`, which the real hook reports on
@@ -114,11 +114,9 @@ jest.mock('../useSweepEngine', () => {
   }
   return { __esModule: true, useSweepEngine };
 });
-jest.mock('../PanoPlusCaptureSurface', () => {
-  const actual = jest.requireActual('../PanoPlusCaptureSurface');
-  const SweepScreenView = () => null;
-  return { __esModule: true, ...actual, SweepScreenView };
-});
+// The DR-1a hatch's view (the only one that reads the engine's viewfinder
+// fields) draws nothing here: the stub engine has none of them.
+jest.mock('../SweepHatchScreen', () => ({ __esModule: true, SweepHatchScreen: () => null }));
 
 // eslint-disable-next-line import/first
 import { Camera } from '../../camera/Camera';

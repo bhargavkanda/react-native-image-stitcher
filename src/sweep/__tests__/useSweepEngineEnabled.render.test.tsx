@@ -321,7 +321,6 @@ describe('useSweepEngine — the host hears from the SELECTED engine only (M8)',
       frameSource: 'own', poseSource: 'imu',
       onSweepingChange: (v: boolean) => { log.push(`sweeping:${v}`); },
       onPaintedChange: (n: number) => { log.push(`painted:${n}`); },
-      onEffectiveArmChange: () => { log.push('arm'); },
       onControlsState: () => { log.push('controls'); },
     };
   }
@@ -348,7 +347,7 @@ describe('useSweepEngine — the host hears from the SELECTED engine only (M8)',
     await flush(500);
     act(() => { t.update(<Probe enabled handle={handle} surface={surfaceWith(log)} />); });
     await flush(500);
-    expect(log).toEqual(expect.arrayContaining(['sweeping:false', 'painted:0', 'arm', 'controls']));
+    expect(log).toEqual(expect.arrayContaining(['sweeping:false', 'painted:0', 'controls']));
     log.length = 0;
     act(() => { t.update(<Probe enabled handle={handle} surface={surfaceWith(log)} />); });
     await flush(500);

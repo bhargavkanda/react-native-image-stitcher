@@ -82,11 +82,9 @@ import { ARCameraView, type ARCameraViewHandle } from './ARCameraView';
 // bundle; that is the same trade `default_subspecs` makes on the native side,
 // and for the same reason — a silently-missing engine is worse than a larger
 // bundle.
-import {
-  SweepScreenView,
-  panoLensChipBottomPt,
-  type PanoPlusCaptureSurfaceProps,
-} from '../sweep/PanoPlusCaptureSurface';
+import { SweepHatchScreen } from '../sweep/SweepHatchScreen';
+import type { SweepEngineProps } from '../sweep/sweepEngineProps';
+import { PANO_BOTTOM_BAR_INSET, panoLensChipBottomPt } from '../sweep/sweepLayout';
 import type {
   PanoPlusCaptureResult,
   PanoPlusFailure,
@@ -135,7 +133,7 @@ import {
  * disagree. See `sweepHostOwnsCamera`.
  */
 export type SweepOptions = Pick<
-  PanoPlusCaptureSurfaceProps,
+  SweepEngineProps,
   // ── M8: AN ALLOW-LIST, NOT A SUBTRACTION ─────────────────────────────────
   // This used to be the surface's props MINUS the keys `<Camera>` owned, so
   // every prop added to the surface leaked into the public bag by default —
@@ -159,7 +157,6 @@ export type SweepOptions = Pick<
   //     (starting, sweeping, finishing);
   //   · `arSourceMaxLongEdge` — `<Camera arSourceMaxLongEdge>`, one AR session
   //     config for both engines (D15);
-  //   · `onEffectiveArmChange` — internal wiring.
   | 'rectify' | 'gainMatch' | 'packFrames' | 'packOptions' | 'engineOptions'
   | 'attitudeMagFree' | 'lockCamera' | 'pinPreviewFps' | 'meteringSettleMs'
   | 'lurchAccelMps2' | 'tauUncorrected' | 'jogGuard' | 'imuSidecar'
@@ -762,10 +759,13 @@ export interface CameraProps {
    *
    *  - `'keyframe'` (default) — collects accepted keyframe JPEGs during the
    *    hold-pan-release capture and runs the stitch once at finalize.
-   *  - `'sweep'` — the slit-scan engine. NOT in this package yet: native
-   *    refuses it with `engine-unavailable`, surfaced as `ENGINE_UNAVAILABLE`.
-   *    It is a named value rather than an omission so that asking for it gets
-   *    you a clear refusal instead of "no such engine".
+   *  - `'sweep'` — the slit-scan engine (pano+): per-frame attitude-rectified
+   *    strips painted DURING the hold, on `<Camera>`'s own camera — vision-
+   *    camera for non-AR, `<Camera>`'s AR view for AR. It changes ONLY what
+   *    the hold runs: the tap photo, the controls, the review and the result
+   *    shape (`type: 'panorama'`, `engine: 'sweep'`) are the keyframe
+   *    engine's. Configure it through {@link CameraProps.sweep}. A build
+   *    without its native module refuses the hold as `ENGINE_UNAVAILABLE`.
    *  - `'batch-keyframe'` — DEPRECATED synonym for `'keyframe'`, kept because
    *    it is what shipped. Identical behaviour; prefer `'keyframe'`.
    *
@@ -4753,10 +4753,8 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     // 0.5× `deriveEffectiveCaptureSource` answers 'non-ar' from the RAW
     // lens, so toggling `arPreference` alone moves nothing.
     //
-    // Committing 1× here is the same move the surface's own `onArToggle`
-    // makes when it leaves AR: "the value already under the operator's
-    // finger being made real" — the chip is already painting `1×` in this
-    // state, because `sweepEffectiveLens` masked it.
+    // Committing 1× here makes the chip's one static label real: with no
+    // enumerable ultra-wide the chip can only show `1×`.
     if (lens !== '1x' && !has0_5x) {
       setLens('1x');
       onLensChange?.('1x');
@@ -4877,77 +4875,15 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // what produced the stuck pill.
   //
   // So these render ONCE, from `<Camera>`'s own state, on every engine.
-  // ── THE LENS THE RUNNING ARM WILL ACTUALLY OPEN ─────────────────────────
-  //
-  // ⚠ THE PILL SHOWS THE SETTING; THE CHIP SHOWS WHAT IS LIVE. They are not
-  // the same rule, and collapsing them to one is how this control has now
-  // failed in BOTH directions:
-  //
-  //   * the sweep surface's own clone painted `effectivePoseSource` on the AR
-  //     PILL — what will RUN — so on an uncalibrated phone the pill was pinned
-  //     ON and could not be deselected. Fixed by painting the preference,
-  //     because AR *is* a preference the operator owns and the arm notice is
-  //     what says which arm will really run.
-  //
-  //   * unifying the chrome then pointed the LENS CHIP at `<Camera>`'s raw
-  //     `lens`, which reintroduced the mirror defect the surface had already
-  //     solved (`PanoPlusCaptureSurface`'s `effectiveLens`, and its stated
-  //     property: "no reachable state where the chip claims a lens the running
-  //     arm cannot deliver"). A lens is NOT a deferred preference — it is the
-  //     glass the operator is looking through. On the AR arm that glass is
-  //     structurally the wide camera (ARKit publishes no ultra-wide format —
-  //     0 of 22 on iPhone17,1; ARCore forces camera 0 on the A35), and `start`
-  //     DELETES the `lens` key there. Painting `0.5×` over an ARKit viewfinder
-  //     tells the operator he is on a camera he is not on.
-  //
-  // Reported UP from the surface, because the fallback is decided down there
-  // from the calibration plan `<Camera>` does not have. `onEffectiveArmChange`
-  // already existed on the surface and nothing consumed it.
-  //
-  // ⚠ THE REQUEST STAYS RAW. `effectiveCaptureSource` — which moves the arm —
-  // must keep reading `lens`, or a 0.5× tap would never leave AR, the fallback
-  // would never be evaluated, and this mask would have nothing to report.
-  // Request with the setting, paint with what came back.
-  const [sweepEffectiveArm, setSweepEffectiveArm] =
-    useState<{
-      poseSource: 'ar' | 'imu';
-      resolving: boolean;
-      fallbackToAr: boolean;
-      chromeSuppressed: boolean;
-    } | null>(null);
-  const handleSweepEffectiveArm = useCallback((arm: {
-    poseSource: 'ar' | 'imu';
-    resolving: boolean;
-    fallbackToAr: boolean;
-    chromeSuppressed: boolean;
-  }) => {
-    // Bails on an equal answer: this is called from an effect in the child
-    // whose deps include this callback, so an unconditional `setState` would
-    // re-render on every one of the surface's own renders.
-    setSweepEffectiveArm((prev) => (
-      prev != null
-        && prev.poseSource === arm.poseSource
-        && prev.resolving === arm.resolving
-        && prev.fallbackToAr === arm.fallbackToAr
-        && prev.chromeSuppressed === arm.chromeSuppressed
-        ? prev
-        : {
-            poseSource: arm.poseSource,
-            resolving: arm.resolving,
-            fallbackToAr: arm.fallbackToAr,
-            chromeSuppressed: arm.chromeSuppressed,
-          }
-    ));
-  }, []);
-  // ⚠ CLEARED WHEN THE SWEEP LEAVES, OR THE LAST SWEEP'S ARM PAINTS THE FIRST
-  // FRAME OF THE NEXT ONE. The read below is per-render
-  // (`engine === 'sweep' ? … : null`), which makes the mask inert on the
-  // keyframe engine — but the STATE survives, so sweep → keyframe → tap 0.5×
-  // → sweep re-applied a stale `'ar'` and masked a lens the operator had
-  // legitimately chosen, for the commit before the surface re-reported.
-  useEffect(() => {
-    if (engine !== 'sweep') setSweepEffectiveArm(null);
-  }, [engine]);
+  // ── THE LENS CHIP PAINTS `lens` (M10) ───────────────────────────────────
+  // It used to paint a MASK (`sweepEffectiveLens`) fed up from the sweep
+  // screen: an iOS IMU arm with no stored basis fell back to ARKit, which is
+  // wide-only, so a 0.5× request was painted 1×. On `<Camera>`'s own camera
+  // that state cannot arise — the vision-camera arm has no ARKit fallback
+  // (M5), and the AR arm runs only when AR is on, which 0.5× already turns
+  // off (`deriveEffectiveCaptureSource`). The mask, the feed that carried it
+  // and the screen that computed it are gone. The one place the fallback
+  // survives is the DR-1a reference hatch on a phone with no stored basis.
   // ⚠ AND THE HOLD FLAG WITH IT, OR BOTH PILLS FREEZE ON THE OTHER ENGINE.
   // `sweepRunning` gates `handleARToggle` and `handleLensChange`, and those
   // are the SHARED handlers — the keyframe tree renders the same pills. Its
@@ -4958,13 +4894,6 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   useEffect(() => {
     if (engine !== 'sweep') setSweepRunning(false);
   }, [engine]);
-  // Derived, never stored per engine: a keyframe capture has no sweep arm, so
-  // reading the state directly would let a stale answer from the last sweep
-  // mask the chip after the engine flipped back.
-  const effectiveLens = sweepEffectiveLens(
-    lens,
-    engine === 'sweep' ? sweepEffectiveArm : null,
-  );
 
   /** The AR pill, or null. The CONTAINER belongs to each tree — the
    *  keyframe tree stacks the flash pill under it, the sweep cell does not. */
@@ -4982,11 +4911,8 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     // is still being asked for. A pill that lights up and changes nothing is
     // field defect #1, rebuilt one layer up.
     //
-    // So Pano's rule is restored verbatim. The CHIP still paints
-    // `effectiveLens`, because a chip names the GLASS and must not claim a
-    // camera nothing opened; the PILL names a SETTING and must only be on
-    // screen where that setting can actually move. Different questions —
-    // which is the whole point of keeping the two rules apart.
+    // So Pano's rule is restored verbatim: the PILL names a SETTING and must
+    // only be on screen where that setting can actually move.
     // ⚠ `hideBuiltInShutter` HIDES THE SHUTTER, NOT THE ARM CONTROL — and on
     // a sweep it is not even our shutter being hidden. The surface draws its
     // own, and pano+'s documented host config is exactly
@@ -5023,7 +4949,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   const renderSharedLensChip = (): React.JSX.Element | null => (
     !arOnly ? (
       <LensChip
-        lens={effectiveLens}
+        lens={lens}
         onChange={handleLensChange}
         has0_5x={has0_5x}
         contentRotation={contentRotation}
@@ -5617,25 +5543,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // `enabled` carries the review gate the surface's mount used to carry —
   // `cropPending == null` — so a sweep engine behind the review holds no
   // camera, exactly as the unmounted surface held none.
-  const sweepSurfaceProps: PanoPlusCaptureSurfaceProps = {
-
-    // ── THE CONTROLS ARE `<Camera>`'S, NOT A SECOND SET ──────────
-    //
-    // The sweep surface draws its OWN AR and lens pills, and it
-    // gates each one on being given somewhere to write:
-    // `onPoseSourceChange != null` and `onLensChange != null` are
-    // the literal conditions. A host that does not pass them gets NO
-    // pill rather than a dead one — which is the right default, and
-    // is exactly what happened here: switching to the sweep made
-    // both controls vanish, because this delegation passed neither.
-    //
-    // They are wired to `<Camera>`'s OWN `arPreference` and `lens`,
-    // the same state the keyframe path's controls use. So the pills
-    // are in the same place before and after an engine switch, they
-    // start at the value the operator last chose, and a change made
-    // on one engine is still in force on the other. Two surfaces
-    // with two independent copies of "AR on" is how an operator ends
-    // up reading one and getting the other.
+  const sweepSurfaceProps: SweepEngineProps = {
 
     // ── S5: ASK FOR THE VISION-CAMERA ARM ───────────────────────
     // Same boolean that chose the preview above, deliberately: the
@@ -5643,26 +5551,10 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     // not open one" have to be the same fact, or the surface draws
     // no viewfinder while native takes the device. See
     // `hostOwnsSweepCamera` for what each of its terms prevents.
-    // ⚠ WITHHELD UNCONDITIONALLY — `<Camera>` DRAWS THESE NOW.
-    //
-    // The surface gates each of its own pills on the matching
-    // callback being non-null: "a host that does not pass them gets
-    // NO pill rather than a dead one" is its own doctrine
-    // (`arPillVisible`, `lensChipVisible`). Passing null is
-    // therefore the supported way to say "the host owns this
-    // control", and it deletes the clones that produced two of the
-    // four field defects.
-    //
-    // They are not merely duplicates — they answer a DIFFERENT
-    // question. The clone paints `armNotice.effectivePoseSource`
-    // (which arm will run) and its `has0_5x` is `ultraWideOfferable`
-    // (whether the pano+ ladder will allow 0.5× on that arm). On an
-    // uncalibrated phone both collapse: the pill pins ON and cannot
-    // be tapped off, and the chip becomes a static `1×` with no
-    // `Pressable`. `<Camera>`'s pills show the SETTING and always
-    // move; what will actually run stays the arm notice's job, and
-    // the surface still prints it.
-    // (assigned AFTER `{...sweep}` — see below.)
+    // M10 — the sweep has no AR pill, lens chip or shutter of its own; the
+    // writers it used to be handed (`onPoseSourceChange`, `onLensChange`) are
+    // gone from its props. `<Camera>`'s controls are the controls on both
+    // engines, wired to its own `arPreference` and `lens`.
     // ⚠ DEFAULTS BEFORE THE SPREAD, SO THE HOST ALWAYS WINS.
     // The surface's own prop defaults were never a configuration
     // anyone ran — its one host passed everything off a flag store,
@@ -5671,13 +5563,6 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     // the ARCore pose arm in a dim room and the sweep painted nothing
     // (see `sweepDefaults.ts` for the measurement).
     ...sweep,
-    // ⚠ THESE WERE ABOVE THE SPREAD AND THE COMMENT SAID
-    // "WITHHELD UNCONDITIONALLY", which was false: a bag carrying
-    // either writer overwrote the `undefined` and the surface drew
-    // its clone again. Moved down to the position the four props
-    // below already occupy, for the identical reason.
-    onPoseSourceChange: undefined,
-    onLensChange: undefined,
     // ⚠ `guidanceCopy` IS A MERGE, NOT AN OVERRIDE, and it is after
     // the spread because the merge has to see the bag's value.
     //
@@ -5734,11 +5619,6 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     hostArmRefusal: sweepHoldRefusal,
     poseSource: sweepPoseSource,
     lens: sweepLens,
-    // ⚠ THE ARM THAT WILL REALLY RUN, COMING BACK UP. The fallback is
-    // decided inside the surface from a calibration plan `<Camera>`
-    // cannot see, and the shared lens chip has to know about it or it
-    // paints a lens ARKit cannot deliver. See `sweepEffectiveLens`.
-    onEffectiveArmChange: handleSweepEffectiveArm,
     // M8 — THE CHROME IS `<Camera>`'S, so the engine lays its hold overlay out
     // against `<Camera>`'s own top inset and bottom bar, not a bag copy.
     hostChromeTopPt: topChromeInset ?? 0,
@@ -6254,7 +6134,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           // `RectCropPreview` is a `<Modal>`, i.e. an overlay rather than a
           // replacement, so this gate is what releases the device — keyed
           // on `cropPending` now that the review is the shared one.
-          <SweepScreenView surfaceProps={sweepSurfaceProps} engine={sweepEngine} />
+          <SweepHatchScreen surfaceProps={sweepSurfaceProps} engine={sweepEngine} />
           )}
 
           {/* ── `<Camera>`'S OWN CHROME, ON THE SWEEP TOO ──────────────
@@ -6263,28 +6143,11 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
               hold runs. Same elements as the keyframe tree, from the same
               state, via the same helpers — so they cannot drift.
 
-              Rendered AFTER the surface so they sit above its HUD, and
-              `pointerEvents="box-none"` so the surface's own shutter and
-              gestures still receive touches through the container.
-
-              ⚠ AND THAT IS EXACTLY WHY `chromeSuppressed` IS IN THIS GATE.
-              "After the surface" means ON TOP OF IT, including on top of a
-              full-screen overlay the surface puts up. The surface removes
-              BOTH of its own pills while the first-run basis-acquisition
-              card is showing, and the note beside that term names the
-              hazard precisely: "the suppression would summon the more
-              damaging of the two controls."
-
-              That term did not travel when the pills moved here. Measured:
-              `<Camera engine="sweep" />` with default props on an
-              uncalibrated phone rendered the AR pill live on top of the
-              calibration card, and ONE tap moved the arm to ARKit, which
-              made `armWantsBasis` false and unmounted the overlay — the
-              one-time basis measurement cancelled by a control the surface
-              had deliberately taken off that screen. `hostChromeTopPt` was
-              the same class of miss, found one round earlier. */}
-          {cropPending == null
-            && !(sweepEffectiveArm?.chromeSuppressed ?? false) && (
+              Rendered AFTER the hatch screen so they sit above its HUD.
+              M10: the hatch screen draws no chrome of its own any more —
+              no pills, no chip, no shutter — so everything here, the
+              shutter included, is `<Camera>`'s. */}
+          {cropPending == null && (
             <>
               <View
                 // ⚠ CLEARS THE HOST'S OWN TOP CHROME TOO. The surface takes
@@ -6355,6 +6218,30 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
                 pointerEvents="box-none">
                 {renderSharedLensChip()}
               </View>
+              {/* M10 — `<Camera>`'S SHUTTER ON THE HATCH. The old sweep
+                  screen drew its own here: the bar's bottom inset plus
+                  `bottomBarOffset`, with the lens chip docked on top of it
+                  (`panoLensChipBottomPt`). That screen is gone, so the
+                  shutter is `<Camera>`'s, on the one dispatcher. A TAP is
+                  inert on the hatch, as it was on the old screen: the camera
+                  is pano+'s own and has no photo path. */}
+              {!hideBuiltInShutter && (
+                <View
+                  style={[styles.sweepLensChipDock, {
+                    bottom: insets.bottom + PANO_BOTTOM_BAR_INSET + bottomBarOffset,
+                  }]}
+                  pointerEvents="box-none"
+                  testID="camera-hatch-shutter">
+                  <CameraShutter
+                    onTap={noop}
+                    onHoldStart={enablePanoramaMode ? holdStartDispatch : noop}
+                    onHoldComplete={enablePanoramaMode ? holdEndDispatch : noop}
+                    holdEnabled={enablePanoramaMode}
+                    isProcessing={sweepFinalizing || sweepOutputPending}
+                    disabled={sweepFinalizing || sweepOutputPending || shutterDisabled}
+                  />
+                </View>
+              )}
             </>
           )}
 
@@ -6461,7 +6348,6 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             armContract={sweepEngine.armContract}
             armDetailOpen={sweepEngine.armDetailOpen}
             armNotice={sweepEngine.armNotice}
-            basisWriteDisagreement={sweepEngine.basisWriteDisagreement}
             drops={sweepEngine.drops}
             error={sweepEngine.error}
             guidance={sweepEngine.guidance}
@@ -6983,43 +6869,6 @@ function sweepHostOwnsCamera(input: SweepHostOwnsCameraInput): boolean {
 
 /** @internal test-only — see `sweepHostOwnsCamera`. */
 export const _sweepHostOwnsCameraForTests = sweepHostOwnsCamera;
-
-/**
- * The lens the RUNNING arm will actually open — the value the chip paints.
- *
- * ── WHY A MASK AND NOT JUST THE STATE ───────────────────────────────────
- *
- * `lens` is the operator's REQUEST and must stay raw everywhere that acts on
- * it: it is what moves the sweep off the AR arm in the first place (Pano's
- * rule, `deriveEffectiveCaptureSource`). But the arm is allowed to REFUSE —
- * on iOS the IMU arm falls back to ARKit whenever τ/basis are missing for
- * `model | lens | W×H | fps` (`panoPlusArmNotice`) — and ARKit is
- * structurally wide-only. The request survives; the glass does not change.
- *
- * Field report that named this, 2026-09-19: *"0.5x lens does not go to that
- * camera — shows the same view as 1x."* Everything downstream was correct;
- * the chip simply went on claiming a lens the arm had already declined.
- *
- *   arm                      │ lens='0.5x' │ lens='1x'
- *   ─────────────────────────┼─────────────┼──────────
- *   null (keyframe / no      │    0.5x     │    1x     ← untouched
- *     answer yet)            │             │
- *   resolving (read in       │    0.5x     │    1x     ← follows the REQUEST
- *     flight)                │             │
- *   imu  (decoupled arm)     │    0.5x     │    1x     ← honoured
- *   ar   (ARKit / ARCore)    │     1x      │    1x     ← MASKED
- *
- * The `resolving` row is the same courtesy the surface's start button and AR
- * pill already give: a label that may be taken back one frame later is not
- * offered. It follows the request until the arm answers.
- */
-export function sweepEffectiveLens(
-  lens: CameraLens,
-  arm: { poseSource: 'ar' | 'imu'; resolving: boolean } | null,
-): CameraLens {
-  if (arm == null || arm.resolving) return lens;
-  return arm.poseSource === 'ar' ? '1x' : lens;
-}
 
 /**
  * ONE `uri` CONVENTION AT THE EMIT BOUNDARY.

@@ -16,6 +16,11 @@
 //
 // The property under test throughout: WHAT IS ON SCREEN MATCHES WHAT NATIVE
 // SAID, and the Android arm pays a bounded, declared amount of memory for it.
+//
+// M10: the sweep's own screen is gone. This mounts the real engine hook
+// through `SweepEngineHarness` (the hatch view + `SweepHoldOverlay`, which is
+// where the preview is drawn) and presses the shutter through the handle's
+// `holdStart` / `holdEnd`, the way `<Camera>`'s shutter reaches the engine.
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -41,8 +46,8 @@ jest.mock(
   { virtual: true },
 );
 
-import { PanoPlusCaptureSurface } from '../PanoPlusCaptureSurface';
-import { holdShutter, releaseShutter, shutterState } from './shutterGestures';
+import { SweepEngineHarness } from './sweepEngineHarness';
+import type { SweepSurfaceHandle } from '../panoPlusTypes';
 import {
   PANO_PLUS_STATUS_POLL_MS,
   PANO_PLUS_SWAP_GRACE_MS,
@@ -106,21 +111,21 @@ interface Rig {
   /** Fire the surface root's `onLayout` with a measured box. */
   layout: (width: number, height: number) => void;
   propsOf: (testID: string) => Record<string, unknown> | null;
-  tap: (testID: string) => void;
-  /** Pano's shutter held past the threshold — the sweep starts (2026-09-03). */
+  /** The shutter held past the threshold — the sweep starts. Through the
+   *  engine's handle (`holdStart`), which is what `<Camera>`'s shutter calls. */
   hold: () => void;
-  /** …and released — the sweep finishes, pack kept. */
+  /** …and released (`holdEnd`) — the sweep finishes, pack kept. */
   release: () => void;
-  /** What Pano's shutter would paint. */
-  shutter: () => { disabled: boolean; busy: boolean };
   unmount: () => void;
 }
 
 function mount(): Rig {
   let renderer!: ReactTestRenderer;
+  const ref = React.createRef<SweepSurfaceHandle>();
   act(() => {
     renderer = TestRenderer.create(
-      <PanoPlusCaptureSurface
+      <SweepEngineHarness
+        ref={ref}
         onComplete={() => undefined}
         onCancel={() => undefined}
       />,
@@ -148,15 +153,8 @@ function mount(): Rig {
     has: (testID) => find(testID) != null,
     propsOf: (testID) =>
       (find(testID)?.props as Record<string, unknown> | undefined) ?? null,
-    tap: (testID) => {
-      const node = find(testID);
-      const onPress = node?.props?.onPress as (() => void) | undefined;
-      if (onPress == null) throw new Error(`no onPress on ${testID}`);
-      act(() => { onPress(); });
-    },
-    hold: () => holdShutter(renderer.root),
-    release: () => releaseShutter(renderer.root),
-    shutter: () => shutterState(renderer.root),
+    hold: () => { act(() => { ref.current!.holdStart!(); }); },
+    release: () => { act(() => { ref.current!.holdEnd!(); }); },
     unmount: () => { act(() => { renderer.unmount(); }); },
   };
 }

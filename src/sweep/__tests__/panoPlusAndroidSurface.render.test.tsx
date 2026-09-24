@@ -24,6 +24,12 @@
 // native module answers, whether Camera2 hands the recorder a surface, whether
 // a frame reaches the engine and a pixel reaches the screen — none of that is
 // reachable from this machine and none of it is claimed below.
+//
+// M10 — the sweep's own screen (`PanoPlusCaptureSurface`, its unavailable
+// card, its clone AR pill / lens chip / shutter) is deleted. This suite now
+// mounts the ENGINE (`useSweepEngine`) through `SweepEngineHarness`, presses
+// the shutter through the engine's handle (`holdStart` / `holdEnd`), and
+// reads what the host's shutter would paint from `onControlsState`.
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -63,8 +69,8 @@ jest.mock(
   { virtual: true },
 );
 
-import { PanoPlusCaptureSurface } from '../PanoPlusCaptureSurface';
-import { holdShutter, releaseShutter, shutterState } from './shutterGestures';
+import { SweepEngineHarness } from './sweepEngineHarness';
+import { ARCameraView } from '../../camera/ARCameraView';
 import {
   PANO_PLUS_IDLE_HEARTBEAT_MS,
   PANO_PLUS_SWAP_GRACE_MS,
@@ -74,12 +80,21 @@ import {
   PANO_PLUS_ANDROID_PREVIEW_MAX_ALONG,
   PANO_PLUS_ANDROID_PREVIEW_MAX_CROSS,
 } from '../panoPlusAndroidArm';
-import type { PanoPlusPoseSource } from '../panoPlusTypes';
+import type {
+  PanoPlusFailure,
+  PanoPlusPoseSource,
+  SweepSurfaceHandle,
+  SweepSurfaceState,
+} from '../panoPlusTypes';
 
 const NM = NativeModules as Record<string, unknown>;
 
 /** The options bag the last `start()` received — the thing that matters. */
 let startedWith: Record<string, unknown> | null = null;
+/** Forget the last start bag, so a SECOND hold's bag is what gets read. (A
+ *  function rather than an inline `= null`, which would narrow the variable
+ *  to `null` for the rest of the case.) */
+const clearStart = (): void => { startedWith = null; };
 /** Calls to the iOS CALIBRATION module, so "Android asks it nothing" is a
  *  CHECKED fact rather than an inspection of the source. Registering it here at
  *  all is deliberate: the strong form of the property is that the surface does
@@ -88,9 +103,10 @@ let calibCalls: string[] = [];
 /** Every `setIdlePreview` the surface issued, in order — the re-arm is only
  *  provable as a SECOND `{on:true}` after the feed was reported down. */
 let idleCalls: Array<{ on: boolean; options: Record<string, unknown> }> = [];
-/** Every lens Pano's switcher asked the host for — the host owns the flag. */
-let lensChanges: string[] = [];
-let poseChanges: string[] = [];
+/** Every `onFailure` the engine reported — a declined hold is named here. */
+let failures: PanoPlusFailure[] = [];
+/** Every `onControlsState` report — what the HOST's shutter paints. */
+let controls: SweepSurfaceState[] = [];
 /** What native answers a `setIdlePreview(true)` with. */
 let idleAnswersOn = true;
 let idleReason = 'idle viewfinder LIVE on camera 2 at 1440x1080';
@@ -118,8 +134,8 @@ function installNative(withLiveModule = true): void {
   if (withLiveModule) {
     // The interface the Android live module must answer, verbatim from
     // `panoPlusNative.ts`: the availability probe is
-    // `typeof start/stop/cancel === 'function'` and all three must exist or the
-    // whole surface renders the unavailable card.
+    // `typeof start/stop/cancel === 'function'` and all three must exist or a
+    // hold is refused `panoplus-unavailable`.
     NM.RNISPanoPlus = {
       start: (o: Record<string, unknown>) => {
         startedWith = o;
@@ -163,13 +179,16 @@ interface Rig {
   texts: () => string[];
   shows: (needle: string) => boolean;
   tap: (testID: string) => void;
-  /** Pano's shutter held past the threshold — the sweep starts (2026-09-03). */
+  /** The shutter held past the threshold — the engine's `holdStart`. */
   hold: () => void;
-  /** …and released — the sweep finishes, pack kept. */
+  /** …and released — the engine's `holdEnd`. */
   release: () => void;
-  /** What Pano's shutter would paint. */
+  /** What the host's shutter would paint — the last `onControlsState`. */
   shutter: () => { disabled: boolean; busy: boolean };
   has: (testID: string) => boolean;
+  /** Is the stitcher's `<ARCameraView>` mounted? (The harness draws the real
+   *  component, so this finds it by TYPE rather than by the seam's testID.) */
+  hasArView: () => boolean;
   /**
    * Every `pointerEvents` value on the ANCESTOR CHAIN of `testID`, root-first.
    *
@@ -184,43 +203,36 @@ interface Rig {
    * and `pointerEvents` is not an accessibility property.
    */
   blockers: (testID: string) => string[];
-  /** `props` of the first node carrying `testID`. */
-  propsOf: (testID: string) => Record<string, unknown>;
+  /** Re-render with a new `lens` — what the host does when ITS chip writes. */
+  setLens: (lens: 'ultraWide' | 'wide') => void;
   unmount: () => void;
 }
 
-/**
- * ⚠ `withArm` DECIDES WHETHER THE 0.5× PILL IS EVEN OFFERED ON THE AR ARM, and
- * this rig's DEFAULT is the host that cannot move the arm. Since 2026-09-03 a
- * `0.5×` tap writes `poseSource: 'imu'` as well as the lens, because 0.5× is
- * unreachable on the AR arm; a host that wired `onLensChange` and not
- * `onPoseSourceChange` has given the surface no way to do that, so the pill is
- * WITHHELD rather than offered as a control that would move a flag and not a
- * lens. On the decoupled arm the term is inert and both pills stand either way.
- *
- * Kept as the default so the pre-existing assertions in this file keep testing
- * what they were written to test; the tests that care about the AR arm's chip
- * pass `true` and check both shapes.
- */
 function mount(
   poseSource?: PanoPlusPoseSource,
-  withArm = false,
-  pinPreviewFps?: boolean,
+  opts: {
+    pinPreviewFps?: boolean;
+    imuSidecar?: boolean;
+    lens?: 'ultraWide' | 'wide';
+  } = {},
 ): Rig {
   let renderer!: ReactTestRenderer;
+  const handle = React.createRef<SweepSurfaceHandle>();
+  const element = (lens: 'ultraWide' | 'wide' | undefined): React.JSX.Element => (
+    <SweepEngineHarness
+      ref={handle}
+      onComplete={() => undefined}
+      onCancel={() => undefined}
+      onFailure={(f) => { failures.push(f); }}
+      onControlsState={(c) => { controls.push(c); }}
+      poseSource={poseSource}
+      pinPreviewFps={opts.pinPreviewFps}
+      imuSidecar={opts.imuSidecar}
+      lens={lens}
+    />
+  );
   act(() => {
-    renderer = TestRenderer.create(
-      <PanoPlusCaptureSurface
-        onComplete={() => undefined}
-        onCancel={() => undefined}
-        poseSource={poseSource}
-        pinPreviewFps={pinPreviewFps}
-        onLensChange={(l) => { lensChanges.push(l); }}
-        onPoseSourceChange={
-          withArm ? (p) => { poseChanges.push(p); } : undefined
-        }
-      />,
-    );
+    renderer = TestRenderer.create(element(opts.lens));
   });
   act(() => {
     jest.advanceTimersByTime(PANO_PLUS_SWAP_GRACE_MS + 1);
@@ -235,10 +247,16 @@ function mount(
     walk(renderer.root as unknown as ReactTestInstance);
     return out;
   };
+  const press = (which: 'holdStart' | 'holdEnd'): void => {
+    const fn = handle.current?.[which];
+    if (fn == null) throw new Error(`the engine handle has no ${which}`);
+    act(() => { fn(); });
+  };
   return {
     texts: collect,
     shows: (needle) => collect().some((t) => t.includes(needle)),
     has: (testID) => renderer.root.findAllByProps({ testID }).length > 0,
+    hasArView: () => renderer.root.findAllByType(ARCameraView).length > 0,
     blockers: (testID) => {
       const node = renderer.root.findAllByProps({ testID })[0];
       if (node == null) throw new Error(`no node with testID ${testID}`);
@@ -261,14 +279,14 @@ function mount(
       if (onPress == null) throw new Error(`no onPress on ${testID}`);
       act(() => { onPress(); });
     },
-    hold: () => holdShutter(renderer.root),
-    release: () => releaseShutter(renderer.root),
-    shutter: () => shutterState(renderer.root),
-    propsOf: (testID) => {
-      const node = renderer.root.findAllByProps({ testID })[0];
-      if (node == null) throw new Error(`no node with testID ${testID}`);
-      return node.props as Record<string, unknown>;
+    hold: () => press('holdStart'),
+    release: () => press('holdEnd'),
+    shutter: () => {
+      const last = controls[controls.length - 1];
+      if (last == null) throw new Error('the engine never reported its controls');
+      return { disabled: !last.canCapture, busy: last.busy };
     },
+    setLens: (lens) => { act(() => { renderer.update(element(lens)); }); },
     unmount: () => { act(() => { renderer.unmount(); }); },
   };
 }
@@ -284,8 +302,8 @@ async function settle(): Promise<void> {
 
 beforeEach(() => {
   jest.useFakeTimers();
-  lensChanges = [];
-  poseChanges = [];
+  failures = [];
+  controls = [];
   // The surface asks `Platform.OS` ONCE, at render, through
   // `panoPlusArmContract` — so flipping the shared mock before mounting is
   // enough, and no module has to be re-required.
@@ -304,24 +322,39 @@ afterEach(() => {
 //  1.  THE SENTENCE THE OPERATOR READ
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe('the unavailable card', () => {
-  it('is GONE on Android once the live module is registered', async () => {
+// M10 — THE CARD IS DELETED, THE SENTENCE IS NOT. The standalone screen drew
+// "pano+ is not available" over everything; inside `<Camera>` there is no
+// such card, so the engine refuses a declined hold BY NAME through
+// `onFailure` (`panoplus-unavailable`) carrying the same per-platform copy
+// (`panoPlusUnavailableDetail`). These three cases were the card's; they now
+// pin the refusal that replaced it.
+describe('a hold on a build without the live module is refused by name', () => {
+  it('is NOT refused on Android once the live module is registered', async () => {
     const r = mount();
     await settle();
-    expect(r.has('panoplus-unavailable')).toBe(false);
-    expect(r.shows('pano+ is not available')).toBe(false);
+    expect(r.shutter().disabled).toBe(false);
+    r.hold();
+    await settle();
+    expect(failures.map((f) => f.code)).not.toContain('panoplus-unavailable');
+    expect(startedWith).not.toBeNull();
     r.unmount();
   });
 
-  it('still appears, TRUTHFULLY, when the module is absent', async () => {
+  it('IS refused, TRUTHFULLY, when the module is absent', async () => {
     // The whole point of correcting the copy was that it keeps working as a
-    // refusal. A card that stopped appearing would trade one wrong screen for
-    // another — an Android build with no live arm looking like a working one.
+    // refusal. A hold that stopped being refused would trade one wrong screen
+    // for another — an Android build with no live arm looking like a working
+    // one, whose shutter does nothing and says nothing.
     delete NM.RNISPanoPlus;
     const r = mount();
     await settle();
-    expect(r.has('panoplus-unavailable')).toBe(true);
-    expect(r.shows('not registered')).toBe(true);
+    // The host's shutter greys…
+    expect(r.shutter().disabled).toBe(true);
+    // …and a hold anyway is refused, once, by name.
+    r.hold();
+    await settle();
+    expect(failures.map((f) => f.code)).toEqual(['panoplus-unavailable']);
+    expect(failures[0]!.message).toContain('not registered');
     r.unmount();
   });
 
@@ -329,8 +362,11 @@ describe('the unavailable card', () => {
     delete NM.RNISPanoPlus;
     const r = mount();
     await settle();
-    expect(r.texts().some((t) => /iOS-only/i.test(t))).toBe(false);
-    expect(r.shows('Gradle module')).toBe(true);
+    r.hold();
+    await settle();
+    expect(failures).toHaveLength(1);
+    expect(failures[0]!.message).not.toMatch(/iOS-only/i);
+    expect(failures[0]!.message).toContain('Gradle module');
     r.unmount();
   });
 });
@@ -352,14 +388,18 @@ describe('the IMU arm on Android', () => {
     r.unmount();
   });
 
-  it('resolves to the IMU arm with no gesture and no fallback', async () => {
+  it('resolves to the IMU arm with no fallback, and the shutter is live', async () => {
+    // (The basis-overlay and lens-chip assertions that were here went with
+    // those mechanisms — deleted in M10.) What is left is the engine's own
+    // answer: the arm settles synchronously on Android, so the shutter the
+    // host draws is live, not greyed on a read that was never going to run.
     const r = mount('imu');
     await settle();
-    expect(r.has('panoplus-basis-overlay')).toBe(false);
-    // No Start button since 2026-09-03 — Pano's shutter, live, and Pano's lens
-    // switcher, which shows exactly because AR is off.
     expect(r.shutter()).toEqual({ disabled: false, busy: false });
-    expect(r.has('panoplus-lens-chip')).toBe(true);
+    r.hold();
+    await settle();
+    expect(failures).toEqual([]);
+    expect(startedWith?.poseSource).toBe('imu');
     r.unmount();
   });
 
@@ -378,7 +418,11 @@ describe('the IMU arm on Android', () => {
   it('does NOT mount the AR view — ARCore and Camera2 cannot share the body', async () => {
     const r = mount('imu');
     await settle();
-    expect(r.has('ar-camera')).toBe(false);
+    // PAST the Android swap grace (600 ms, the measured Camera2 release) —
+    // the rig only advances iOS's 250 ms, and inside the grace no arm mounts
+    // the view, so a check there cannot fail.
+    act(() => { jest.advanceTimersByTime(700); });
+    expect(r.hasArView()).toBe(false);
     r.unmount();
   });
 
@@ -408,7 +452,7 @@ describe('the IMU arm on Android', () => {
 // through `C`, and its only ARCore code is the optional reference LOG channel).
 // Mounting `<ARCameraView>` for that request was not merely cosmetic: ARCore
 // then owns the back camera, and `PanoPlusAndroidRecorder` needs the same one.
-describe('the AR pill on Android runs the sweep on the STITCHER\u2019s ARCore session (M2)',
+describe('the AR arm on Android runs the sweep on the STITCHER\u2019s ARCore session (M2)',
   () => {
     it('mounts the stitcher\u2019s <ARCameraView> on the AR arm, and never on the IMU arm',
       async () => {
@@ -426,14 +470,17 @@ describe('the AR pill on Android runs the sweep on the STITCHER\u2019s ARCore se
         // (600 ms, the measured Camera2 release), as any arm change.
         await settle();
         act(() => { jest.advanceTimersByTime(250); });
-        expect(ar.has('ar-camera')).toBe(false);   // still inside the release
+        expect(ar.hasArView()).toBe(false);   // still inside the release
         act(() => { jest.advanceTimersByTime(400); });
-        expect(ar.has('ar-camera')).toBe(true);
+        expect(ar.hasArView()).toBe(true);
         ar.unmount();
         // The IMU arm still leaves it unmounted: there is one back camera.
+        // Checked past the same grace the AR arm waited out above — before
+        // it, no arm mounts the view and the check could not fail.
         const imu = mount('imu');
         await settle();
-        expect(imu.has('ar-camera')).toBe(false);
+        act(() => { jest.advanceTimersByTime(700); });
+        expect(imu.hasArView()).toBe(false);
         imu.unmount();
       });
 
@@ -446,8 +493,31 @@ describe('the AR pill on Android runs the sweep on the STITCHER\u2019s ARCore se
         await settle();
         await settle();
         act(() => { jest.advanceTimersByTime(700); });
-        expect(r.has('ar-camera')).toBe(false);
+        expect(r.hasArView()).toBe(false);
         expect(r.shows('ARCore CANNOT RUN')).toBe(true);
+        r.unmount();
+      } finally {
+        ar.isSupported = real;
+      }
+    });
+
+    it('⚑ not before ARCore has ANSWERED: a probe still pending past the grace mounts no AR view', async () => {
+      // The gate is the probe's answer, not the grace alone. Every other case
+      // resolves `isSupported` before a single timer advances, so a gate that
+      // ignored the probe and waited only the 600 ms passed them all.
+      const ar = NM.RNSARSession as { isSupported: () => Promise<boolean> };
+      const real = ar.isSupported;
+      let answer: ((v: boolean) => void) | null = null;
+      ar.isSupported = () => new Promise<boolean>((res) => { answer = res; });
+      try {
+        const r = mount('ar');
+        await settle();
+        act(() => { jest.advanceTimersByTime(1500); });
+        expect(r.hasArView()).toBe(false);   // unanswered: nothing mounts
+        await act(async () => { answer?.(true); await Promise.resolve(); });
+        await settle();
+        act(() => { jest.advanceTimersByTime(700); });
+        expect(r.hasArView()).toBe(true);    // …and the answer is what lets it
         r.unmount();
       } finally {
         ar.isSupported = real;
@@ -487,47 +557,7 @@ describe('the AR pill on Android runs the sweep on the STITCHER\u2019s ARCore se
       r.unmount();
     });
 
-    it('shows the lens chip on 1x, the camera ARCore actually picks',
-      async () => {
-        // ⚠ THIS HAS NOW INVERTED TWICE, AND THE SECOND TURN IS NOT A
-        // RETURN TO THE FIRST. 2026-09-02 HID the chip here, on a premise that
-        // was true: ARCore selects the camera id from its own CameraConfig
-        // list (camera 0, 69.7°), so a chip offering the 0.5x ultra-wide on
-        // this arm is "a control that moves a flag and not a lens — the
-        // recorder records the override, but the operator would have read the
-        // chip".
-        //
-        // 2026-09-03 brings the chip back under Pano's own rule, and ANSWERS
-        // that premise rather than discarding it: the chip paints
-        // `effectiveLens`, which on this arm is always `1x` — camera 0, the
-        // lens ARCore actually picked — whatever `panoPlusLens` says. This
-        // rig mounts with the flag at its `'ultraWide'` default, so this IS
-        // the fresh-device state, and the pill that comes up selected is the
-        // WIDE one. That is the property the 2026-09-02 note was protecting.
-        //
-        // ⚠ AND WHICH PILLS STAND DEPENDS ON WHETHER THE HOST CAN MOVE THE
-        // ARM. With `onPoseSourceChange` wired, the 0.5x pill is an offer to
-        // LEAVE this arm (the tap writes `poseSource: 'imu'` alongside the
-        // lens) and both pills stand. Without it — this rig's default — the
-        // surface has no way to leave, so a 0.5x pill would be exactly the
-        // 2026-09-02 complaint again, and it is withheld: Pano's single-lens
-        // branch, a static `1×` label with nothing to press.
-        const r = mount('ar');
-        await settle();
-        expect(r.has('panoplus-lens-chip')).toBe(true);
-        expect(r.has('panoplus-lens-chip-0_5x')).toBe(false);
-        expect(r.has('panoplus-lens-chip-1x')).toBe(false);
-        expect(r.shows('1×')).toBe(true);
-        r.unmount();
-
-        const r2 = mount('ar', true);
-        await settle();
-        const uw = r2.propsOf('panoplus-lens-chip-0_5x');
-        const wide = r2.propsOf('panoplus-lens-chip-1x');
-        expect((wide.accessibilityState as { selected: boolean }).selected).toBe(true);
-        expect((uw.accessibilityState as { selected: boolean }).selected).toBe(false);
-        r2.unmount();
-      });
+    // The lens chip's AR-arm offer (`effectiveLens`, the withheld 0.5× pill) — deleted in M10.
   });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -602,24 +632,13 @@ describe('the start bag', () => {
     // sidecar is a second CoreMotion plugin on the ARKit delegate thread; there
     // is nothing for it to reach on ARCore, and a pack echoing a declaration
     // nothing implemented would claim a pose-arm comparison it does not carry.
-    let renderer!: ReactTestRenderer;
-    act(() => {
-      renderer = TestRenderer.create(
-        <PanoPlusCaptureSurface
-          onComplete={() => undefined}
-          onCancel={() => undefined}
-          poseSource="ar"
-          imuSidecar
-        />,
-      );
-    });
-    act(() => { jest.advanceTimersByTime(PANO_PLUS_SWAP_GRACE_MS + 1); });
+    const r = mount('ar', { imuSidecar: true });
     await settle();
-    holdShutter(renderer.root);
+    r.hold();
     await settle();
     expect(startedWith).not.toBeNull();
     expect('imuSidecar' in (startedWith as Record<string, unknown>)).toBe(false);
-    act(() => { renderer.unmount(); });
+    r.unmount();
   });
 });
 
@@ -640,26 +659,32 @@ describe('the start bag', () => {
 // under a sibling, behind a native view. Those need the phone.
 
 describe('the controls inside the HUD are reachable', () => {
-  it('the lens chip is Pano\'s switcher, and it is a CONTROL again', async () => {
-    // ⚠ THIS TEST HAS FLIPPED THREE TIMES, AND THE HISTORY IS THE POINT. The
-    // chip was sealed under `pointerEvents="none"` (dead), then un-sealed
-    // (tappable but a lie — the tap re-labelled it while the recorder reopened
-    // THE SAME camera 2, measured 2026-09-03 morning), then made a read-only
-    // note. On 2026-09-03 the owner's parity requirement made it Pano's own
-    // `0.5× | 1×` switcher AND made native's `pickCamera` honour the requested
-    // lens on both the sweep and the idle viewfinder — so the control is
-    // honest again, and this pins the SDK half: a tap asks the host for the
-    // lens it names, and the request reaches native through `lens` (below).
-    // Whether camera 0 actually opens for `1×` is the phone's to prove.
-    const r = mount('imu');
+  // The lens chip as a CONTROL (its taps writing `onLensChange`) — deleted in
+  // M10; the lens chip is `<Camera>`'s. What survives is the SDK half the
+  // chip's case pinned: the lens the HOST names reaches native through `lens`.
+  it('the lens the host names reaches native — in both directions', async () => {
+    // ⚠ WHAT THE CHIP'S CASE WAS FOR. On 2026-09-03 the owner's parity
+    // requirement made native's `pickCamera` honour the requested lens on the
+    // sweep and the idle viewfinder, so the lens control is honest only if
+    // the request actually crosses. The host now owns the control; this pins
+    // that its flag, re-rendered in, is what the next hold sends.
+    const r = mount('imu', { lens: 'ultraWide' });
     await settle();
-    expect(r.has('panoplus-lens-chip')).toBe(true);
-    expect(r.has('panoplus-lens-note')).toBe(false);
+    r.setLens('wide');
+    await settle();
+    r.hold();
+    await settle();
+    expect(startedWith?.lens).toBe('wide');
+    r.release();
+    await settle();
+    clearStart();
+    r.setLens('ultraWide');
+    await settle();
+    r.hold();
+    await settle();
+    expect(startedWith?.lens).toBe('ultraWide');
+    // …and still not one word of prose about lenses on the screen.
     expect(r.shows('always opens the widest back lens')).toBe(false);
-    r.tap('panoplus-lens-chip-1x');
-    expect(lensChanges).toEqual(['wide']);
-    r.tap('panoplus-lens-chip-0_5x');
-    expect(lensChanges).toEqual(['wide', 'ultraWide']);
     r.unmount();
   });
 
@@ -671,18 +696,7 @@ describe('the controls inside the HUD are reachable', () => {
     r.unmount();
   });
 
-  it('the shutter is reachable on both arms, and the lens pills where they show', async () => {
-    for (const arm of ['imu', 'ar'] as const) {
-      const r = mount(arm);
-      await settle();
-      expect(r.blockers('panoplus-shutter')).not.toContain('none');
-      if (arm === 'imu') {
-        expect(r.blockers('panoplus-lens-chip-0_5x')).not.toContain('none');
-        expect(r.blockers('panoplus-lens-chip-1x')).not.toContain('none');
-      }
-      r.unmount();
-    }
-  });
+  // The clone shutter's and lens pills' reachability (`panoplus-shutter`, `-lens-chip-*`) — deleted in M10.
 
   it('fences the read-only HUD text off from touch rather than by inspection',
     async () => {
@@ -888,7 +902,7 @@ describe('the idle viewfinder is asked to match the rate the sweep will pin', ()
 
   it('sends the pin the HOST asked for, in both directions', async () => {
     for (const want of [true, false]) {
-      const r = mount('imu', false, want);
+      const r = mount('imu', { pinPreviewFps: want });
       await settle();
       const asked = idleCalls.filter((c) => c.on);
       expect(asked.length).toBeGreaterThan(0);
@@ -971,52 +985,4 @@ describe('the idle viewfinder notices when it loses the camera', () => {
   });
 });
 
-describe('Pano\'s lens switcher is always on screen, painting the lens that runs', () => {
-  it('is on the AR arm too, selected on 1x — the camera ARCore picks', async () => {
-    // ⚠ THIS TEST'S NAME AND ITS FIRST ASSERTION BOTH INVERTED ON 2026-09-03.
-    // It read "is hidden on the AR arm", under the owner's rule C taken
-    // literally: "AR on ⇒ switcher hidden, exactly as Pano hides it". Pano
-    // does NOT hide it — `LensChip` renders whenever `!arOnly`
-    // (`Camera.tsx:3336`) and the shell passes `captureSources="both"` — and
-    // when the owner was shown that, he adopted Pano's real rule: chip always,
-    // AR pill gated on 1x.
-    //
-    // The premise the old test was protecting is kept, not dropped: ARCore
-    // picks camera 0 here, so an ultra-wide SELECTION would be a lie. The chip
-    // paints `effectiveLens`, which is `1x` on this arm whatever the flag
-    // says, and this rig mounts at the flag's `'ultraWide'` default — so this
-    // is the fresh-device state and it comes up on the wide pill.
-    //
-    // `withArm` is on so the chip keeps BOTH pills here (see `mount`): the
-    // 0.5x offer is only made to a host that can leave the AR arm.
-    const r = mount('ar', true);
-    await settle();
-    expect(r.has('panoplus-lens-chip')).toBe(true);
-    expect(r.has('panoplus-lens-note')).toBe(false);
-    const wide = renderPropsOf(r, 'panoplus-lens-chip-1x');
-    expect((wide.accessibilityState as { selected: boolean }).selected).toBe(true);
-    // …and still not one word of prose about lenses; the pack records what ran.
-    expect(r.shows('0.5× ultra-wide is not available here')).toBe(false);
-    expect(r.shows('always opens the widest back lens')).toBe(false);
-    r.unmount();
-  });
-
-  it('shows on the IMU arm with the host\'s lens selected — 0.5× by default', async () => {
-    const r = mount('imu');
-    await settle();
-    expect(r.has('panoplus-lens-chip')).toBe(true);
-    const uw = renderPropsOf(r, 'panoplus-lens-chip-0_5x');
-    const wide = renderPropsOf(r, 'panoplus-lens-chip-1x');
-    expect((uw.accessibilityState as { selected: boolean }).selected).toBe(true);
-    expect((wide.accessibilityState as { selected: boolean }).selected).toBe(false);
-    // Pano's own labels, verbatim (`Camera.tsx:1234`, `:1254`).
-    expect(uw.accessibilityLabel).toBe('0.5x ultra-wide lens');
-    expect(wide.accessibilityLabel).toBe('1x wide-angle lens');
-    r.unmount();
-  });
-});
-
-/** The props of the first node carrying `testID`. */
-function renderPropsOf(r: Rig, testID: string): Record<string, unknown> {
-  return r.propsOf(testID);
-}
+// The clone lens switcher (always on screen, painting `effectiveLens`, Pano's labels) — deleted in M10.

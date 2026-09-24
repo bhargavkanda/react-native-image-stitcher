@@ -1,6 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// PanoPlusCaptureSurface — the WIRING, mounted for real.
+// THE SWEEP ENGINE — the WIRING, mounted for real.
+//
+// M10: this suite was `PanoPlusCaptureSurface.render.test.tsx`, and it drove
+// the sweep's OWN screen — its shutter, its pills, its prompts. That screen is
+// gone: a sweep runs inside `<Camera>`, on `<Camera>`'s shutter and chrome,
+// and the engine (`useSweepEngine`) draws only its hold overlay. So this now
+// mounts the real hook through `SweepEngineHarness` (the hatch view: the
+// viewfinder / explainer / fallback `<ARCameraView>` and `SweepHoldOverlay`)
+// and presses the shutter through the handle — `holdStart` / `holdEnd` — which
+// is exactly how `<Camera>`'s shutter reaches the engine. What the shutter
+// would PAINT is the engine's `onControlsState` report.
 //
 // WHY THIS FILE EXISTS AT ALL, and why the pure suite is not enough. The
 // 2026-07-22 field bugs (enforce-1D gating the box but not the shutter; the
@@ -8,17 +18,17 @@
 // maths under both was tested and correct. What was untested was which number
 // the pill reads and whether the button consults the lock. pano+ has exactly
 // the same shape of risk: `panoPlusModel` is unit-tested to death, and none of
-// that proves the surface FEEDS it the right thing, mounts the AR view, or
+// that proves the engine FEEDS it the right thing, mounts the AR view, or
 // stops the native session on the paths that must never leak it.
 //
-// This drives the real component through react-test-renderer: mount it, let the
-// AR-session swap grace elapse, tap Start, feed AR frames the way ARKit does
-// (through the `onArFrame` prop the stitcher render mock hands back), read what
-// the HUD actually renders, and tap Done.
+// This drives the real hook through react-test-renderer: mount it, let the
+// AR-session swap grace elapse, hold the shutter, feed AR frames the way ARKit
+// does (through the mounted `<ARCameraView>`'s `onArFrame` prop), read what
+// the HUD actually renders, and release.
 //
 // Native is a fake `NativeModules.RNISPanoPlus` whose call log the test
 // asserts on — because the leak that matters most (a sweep that keeps running
-// after the surface is gone) is invisible in the rendered tree and visible only
+// after the engine is gone) is invisible in the rendered tree and visible only
 // as a missing `stop`.
 
 // ⚠️ THIS FILE MUST LIVE IN A `__tests__/` DIRECTORY. The BUILD config
@@ -70,13 +80,15 @@ jest.mock(
 );
 (globalThis as unknown as { __ppWritten: unknown[] }).__ppWritten = written;
 
-import { PanoPlusCaptureSurface, panoBottomChromePt } from '../PanoPlusCaptureSurface';
-import {
-  holdShutter,
-  releaseShutter,
-  shutterState,
-  tapShutter,
-} from './shutterGestures';
+import { SweepEngineHarness } from './sweepEngineHarness';
+import type { SweepEngineProps } from '../sweepEngineProps';
+import { panoBottomChromePt } from '../sweepLayout';
+import { panoPlusUnavailableDetail } from '../panoPlusAndroidArm';
+// The REAL `<ARCameraView>` — the hatch view imports it by module path, so the
+// seam's mock (which only shadows the package barrel) never sees it. A test
+// drives `onArFrame` off the mounted element's props, as `<Camera>`'s own
+// suites do.
+import { ARCameraView } from '../../camera/ARCameraView';
 import {
   PANO_PLUS_PLUGIN_KEY,
   PANO_PLUS_STATUS_POLL_MS,
@@ -90,12 +102,12 @@ import type {
   SweepSurfaceState as SurfaceControlState,
 } from '../panoPlusTypes';
 
-// TEST-ONLY exports of the stitcher render MOCK (jest maps the module); the
-// real package's types do not carry them, so reach them through a require-cast.
+// TEST-ONLY export of the stitcher render MOCK (jest maps the module); the
+// real package's types do not carry it, so reach it through a require-cast.
+// `__setOrientation` is what the engine's `useDeviceOrientation` reports (the
+// render project forwards that hook to the seam).
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const stitcherMock = require('react-native-image-stitcher') as {
-  __getLastProps: () => Record<string, unknown> | null;
-  __resetLastProps: () => void;
   __setOrientation: (o: string) => void;
 };
 
@@ -193,32 +205,36 @@ function statusDict(over: Record<string, unknown> = {}): Record<string, unknown>
 
 interface Rig {
   renderer: ReactTestRenderer;
+  /** The engine's handle — what `<Camera>`'s shutter calls. */
+  ref: React.RefObject<SurfaceControlHandle | null>;
   texts: () => string[];
   shows: (needle: string) => boolean;
-  tap: (testID: string) => void;
-  /** Pano's shutter, held past the threshold — the sweep STARTS. Since
-   *  2026-09-03 there is no Start button; this is the only way in. */
+  /** The shutter held past the threshold — `holdStart`, the sweep STARTS.
+   *  There is no Start button, and since M10 no shutter of the engine's own:
+   *  this is the handle `<Camera>`'s shutter calls. */
   hold: () => void;
-  /** …and released — the sweep FINISHES, pack kept. The only way out. */
+  /** …and released — `holdEnd`, the sweep FINISHES, pack kept. */
   release: () => void;
-  /** What the shutter would paint right now. */
-  shutter: () => { disabled: boolean; busy: boolean };
+  /** What the shutter would paint right now: the engine's last
+   *  `onControlsState` report. */
+  controls: () => SurfaceControlState | undefined;
   has: (testID: string) => boolean;
-  prop: (testID: string, key: string) => unknown;
   frame: (status: Record<string, unknown> | null) => void;
   unmount: () => void;
 }
 
-function mount(
-  props: Partial<React.ComponentProps<typeof PanoPlusCaptureSurface>> = {},
-): Rig {
+function mount(props: Partial<SweepEngineProps> = {}): Rig {
   let renderer!: ReactTestRenderer;
+  const ref = React.createRef<SurfaceControlHandle>();
+  const states: SurfaceControlState[] = [];
   act(() => {
     renderer = TestRenderer.create(
-      <PanoPlusCaptureSurface
+      <SweepEngineHarness
+        ref={ref}
         onComplete={props.onComplete ?? (() => undefined)}
         onCancel={props.onCancel ?? (() => undefined)}
         onFailure={props.onFailure}
+        onControlsState={(st) => { states.push(st); }}
         rectify={props.rectify}
         gainMatch={props.gainMatch}
         packFrames={props.packFrames}
@@ -249,24 +265,16 @@ function mount(
 
   return {
     renderer,
+    ref,
     texts: collect,
     shows: (needle) => collect().some((t) => t.includes(needle)),
     has: (testID) => renderer.root.findAllByProps({ testID }).length > 0,
-    prop: (testID, key) =>
-      (renderer.root.findAllByProps({ testID })[0]?.props as Record<string, unknown>)[key],
-    tap: (testID) => {
-      const node = renderer.root.findAllByProps({ testID })[0];
-      const onPress = node?.props?.onPress as (() => void) | undefined;
-      if (onPress == null) throw new Error(`no onPress on ${testID}`);
-      act(() => {
-        onPress();
-      });
-    },
-    hold: () => holdShutter(renderer.root),
-    release: () => releaseShutter(renderer.root),
-    shutter: () => shutterState(renderer.root),
+    hold: () => { act(() => { ref.current!.holdStart!(); }); },
+    release: () => { act(() => { ref.current!.holdEnd!(); }); },
+    controls: () => states[states.length - 1],
     frame: (status) => {
-      const onArFrame = stitcherMock.__getLastProps()?.onArFrame as
+      const view = renderer.root.findAllByType(ARCameraView)[0];
+      const onArFrame = view?.props.onArFrame as
         | ((m: unknown) => void)
         | undefined;
       if (onArFrame == null) throw new Error('ARCameraView never mounted');
@@ -296,7 +304,6 @@ async function settle(): Promise<void> {
 
 beforeEach(() => {
   jest.useFakeTimers();
-  stitcherMock.__resetLastProps();
   stitcherMock.__setOrientation('landscape-left');
   stopImpl = () => Promise.resolve({});
   startImpl = () =>
@@ -321,32 +328,60 @@ describe('mount + the AR-session swap grace', () => {
     let renderer!: ReactTestRenderer;
     act(() => {
       renderer = TestRenderer.create(
-        <PanoPlusCaptureSurface onComplete={() => undefined} onCancel={() => undefined} />,
+        <SweepEngineHarness onComplete={() => undefined} onCancel={() => undefined} />,
       );
     });
     // There is ONE ARKit session: mounting before the outgoing surface's
     // unmount has called RNSARSession.stop() races two arSession.run calls.
-    expect(stitcherMock.__getLastProps()).toBeNull();
-    expect(renderer.root.findAllByProps({ testID: 'ar-camera' }).length).toBe(0);
+    expect(renderer.root.findAllByType(ARCameraView).length).toBe(0);
 
     act(() => {
       jest.advanceTimersByTime(PANO_PLUS_SWAP_GRACE_MS + 1);
     });
-    expect(renderer.root.findAllByProps({ testID: 'ar-camera' }).length).toBe(1);
+    expect(renderer.root.findAllByType(ARCameraView).length).toBe(1);
     act(() => {
       renderer.unmount();
     });
   });
 
-  it('renders the named unavailable card — not a crash — with no native module', () => {
-    delete NM.RNISPanoPlus;
-    const r = mount();
-    expect(r.has('panoplus-unavailable')).toBe(true);
-    // The card must NAME the cause; "unavailable" alone turns a five-minute
-    // config fix into a field trip.
-    expect(r.shows('RNSSweepSession native module is not registered')).toBe(true);
-    r.unmount();
-    expect(calls).toEqual([]);
+  // ⚠ THE UNAVAILABLE CARD (testID panoplus-unavailable) — deleted in M10
+  // with the screen that drew it. What it pinned still exists in another
+  // form: a hold on a build without the module is REFUSED BY NAME through
+  // `onFailure`, and the shutter the engine reports is greyed out.
+  it('refuses a hold BY NAME — not a crash, not silence — with no native module', async () => {
+    const { Platform } = require('react-native') as { Platform: { OS: string } };
+    const seen: Record<string, string> = {};
+    try {
+      for (const os of ['ios', 'android'] as const) {
+        Platform.OS = os;
+        delete NM.RNISPanoPlus;
+        const failures: PanoPlusFailure[] = [];
+        const r = mount({ onFailure: (f) => { failures.push(f); } });
+        await settle();
+        // What `<Camera>`'s shutter paints: not a capture it can take.
+        expect(r.controls()).toEqual({ canCapture: false, canFinalize: false, busy: false });
+        r.hold();
+        await settle();
+        expect(failures.map((f) => f.code)).toEqual(['panoplus-unavailable']);
+        // The refusal must NAME the cause, per platform; "unavailable" alone
+        // turns a five-minute config fix into a field trip.
+        expect(failures[0]!.message).toBe(panoPlusUnavailableDetail(os));
+        expect(failures[0]!.message)
+          .toContain('RNSSweepSession native module is not registered');
+        expect(failures[0]!.sessionDir).toBeNull();
+        seen[os] = failures[0]!.message;
+        // …and a release after the refusal ends nothing.
+        r.release();
+        await settle();
+        r.unmount();
+        expect(calls).toEqual([]);
+      }
+    } finally {
+      Platform.OS = 'ios';
+    }
+    // Two platforms, two sentences: the Android one names the Gradle module,
+    // the iOS one the pod.
+    expect(seen.ios).not.toBe(seen.android);
   });
 });
 
@@ -401,63 +436,24 @@ describe('the idle screen coaches NOTHING — the overlays stay, the prose goes'
   });
 });
 
-describe('the idle state teaches the gesture — in BOTH holds', () => {
-  // These were red against the shipped surface, which rendered
-  // `<RotateToLandscapePrompt visible={idle && !landscape} />` and gated the
-  // coach mark on `landscape`. The engine never asked for landscape:
-  // `axisOverride` is 0 on all three 2026-08-29 field packs and the axis latch
-  // votes on measured translation, so a portrait left-to-right sweep is the
-  // SAME engine case as his landscape top-to-bottom one.
-
-  it('NEVER nags a portrait operator to rotate, and coaches his gesture', () => {
-    stitcherMock.__setOrientation('portrait');
-    const p = mount();
-    expect(p.has('rotate-prompt')).toBe(false);
-    // The pan coach mark is SHOWN, which is the pan guide pointing along the
-    // portrait axis: the library picks RIGHT from a portrait orientation.
-    expect(p.has('pan-howto')).toBe(true);
-    expect(p.prop('pan-howto', 'orientation')).toBe('portrait');
-    // ⚠ THE COACHING PROSE IS GONE (2026-09-07) — the ARROW is not. The
-    // overlay is the half that does not need reading at a shelf, and it is
-    // what Pano ships too.
-    expect(p.shows('Hold portrait — sweep left to right')).toBe(false);
-    expect(p.shows('0.5–0.8 m')).toBe(false);
-    p.unmount();
-  });
-
-  it('still coaches top-to-bottom in landscape, with the DOWN-arrow overlay', () => {
-    stitcherMock.__setOrientation('landscape-left');
-    const l = mount();
-    expect(l.has('rotate-prompt')).toBe(false);
-    expect(l.has('pan-howto')).toBe(true);
-    expect(l.prop('pan-howto', 'orientation')).toBe('landscape-left');
-    // Same as portrait: the arrow overlay coaches, the paragraph does not.
-    expect(l.shows('Hold landscape — sweep top to bottom')).toBe(false);
-    expect(l.shows('0.5–0.8 m')).toBe(false);
-    l.unmount();
-  });
-
-  it('keeps ONE prompt, for the ONE hold that is worse — and asks for PORTRAIT', () => {
-    stitcherMock.__setOrientation('portrait-upside-down');
-    const u = mount();
-    expect(u.has('rotate-prompt')).toBe(true);
-    expect(u.prop('rotate-prompt', 'target')).toBe('portrait');
-    expect(u.prop('rotate-prompt', 'copy')).toBe('Turn the phone the right way up');
-    // …and the coach mark stands down under it. The library maps
-    // upside-down to a RIGHT arrow and then counter-rotates the whole
-    // overlay a half turn, so the arrow would point LEFT while the prompt
-    // asks for the hold that fixes it — two affordances contradicting.
-    expect(u.has('pan-howto')).toBe(false);
-    u.unmount();
-  });
-
-  it('never disables the shutter in any hold — the engine takes either', () => {
+// ⚠ THE OLD SCREEN'S ROTATE PROMPT AND PAN HOW-TO COACH MARK (testIDs
+// rotate-prompt, pan-howto; the upside-down "turn the right way up" prompt) —
+// deleted in M10 with the screen that drew them.
+describe('the engine takes EITHER hold', () => {
+  // The engine never asked for landscape: `axisOverride` is 0 on all three
+  // 2026-08-29 field packs and the axis latch votes on measured translation,
+  // so a portrait left-to-right sweep is the SAME engine case as a landscape
+  // top-to-bottom one — and no hold greys the shutter.
+  it('reports a capturable, idle shutter in every hold', async () => {
     for (const o of [
       'portrait', 'portrait-upside-down', 'landscape-left', 'landscape-right',
     ]) {
       stitcherMock.__setOrientation(o);
       const r = mount();
-      expect(r.shutter()).toEqual({ disabled: false, busy: false });
+      await settle();
+      expect({ o, controls: r.controls() }).toEqual({
+        o, controls: { canCapture: true, canFinalize: false, busy: false },
+      });
       r.unmount();
     }
   });
@@ -481,7 +477,7 @@ describe('the cross-axis ceiling reaches the screen', () => {
     // ...and the DETAIL is still on screen, because this is a `warn` and the
     // detail is what the operator can act on: "Recentre the shelf and keep
     // the phone level". The detail is scoped by TONE, not by phase — see the
-    // HUD block in `PanoPlusCaptureSurface`.
+    // HUD block in `SweepHoldOverlay`.
     expect(r.shows('Recentre the shelf')).toBe(true);
     // The ENGINE READOUT's `cross 1848/2048` is idle-only since 2026-09-03 (a
     // second copy of the same fact, in the dense line the operator asked off
@@ -802,7 +798,9 @@ describe('start → sweep → done, the whole wire', () => {
     expect(r.shows('Sweep stopped — session-restart')).toBe(true);
     expect(r.shows('Finish (stopped)')).toBe(false);
     expect(r.shows('Discard')).toBe(false);
-    expect(r.shutter()).toEqual({ disabled: false, busy: false });
+    // The shutter the engine reports is still live and NOT busy — the finger
+    // is down on a red ring, and a grey one would refuse the release's twin.
+    expect(r.controls()).toEqual({ canCapture: true, canFinalize: false, busy: false });
     r.release();
     await settle();
     expect(calls).toEqual(['start', 'stop']);
@@ -902,7 +900,8 @@ describe('failure paths keep the pack and clear the native latch', () => {
     r.hold();
     await settle();
     expect(r.shows('A pano+ sweep is already running')).toBe(true);
-    expect(r.shutter()).toEqual({ disabled: false, busy: false }); // back to idle
+    // Back to idle: capturable, not busy.
+    expect(r.controls()).toEqual({ canCapture: true, canFinalize: false, busy: false });
     r.unmount();
     expect(calls).toEqual(['start']); // nothing to stop
   });
@@ -924,20 +923,18 @@ describe('the session must never outlive the surface', () => {
 
   it('has NO discard, and a tap is inert — Pano\'s gesture vocabulary, exactly', async () => {
     // Pano has no mid-hold discard (release ALWAYS finalizes) and pano+ has
-    // no photo, so neither the Discard/Close/Done buttons nor a photo tap
-    // exist here any more. `onCancel` is never reached by a gesture.
+    // no photo, so a TAP (`capture`) does nothing and `onCancel` is never
+    // reached by a gesture. (The Discard/Close/Done buttons this case also
+    // checked the absence of went with the screen that drew them — deleted
+    // in M10.)
     let cancelled = 0;
     const r = mount({ onCancel: () => (cancelled += 1) });
-    expect(r.has('panoplus-cancel')).toBe(false);
-    expect(r.has('panoplus-start')).toBe(false);
-    expect(r.has('panoplus-done')).toBe(false);
-    expect(r.has('panoplus-unavailable-close')).toBe(false);
-    tapShutter(r.renderer.root);
+    act(() => { r.ref.current!.capture(); });
     await settle();
     expect(calls).toEqual([]);
     r.hold();
     await settle();
-    tapShutter(r.renderer.root);
+    act(() => { r.ref.current!.capture(); });
     await settle();
     expect(calls).toEqual(['start']);
     expect(cancelled).toBe(0);
@@ -985,19 +982,17 @@ describe('the session must never outlive the surface', () => {
   });
 });
 
-// ── THE SHELL'S PATH: UNIFIED CHROME, ONE SHUTTER, DRIVEN THROUGH THE REF ──
+// ── `<Camera>`'S CONFIGURATION: ITS SHUTTER, DRIVEN THROUGH THE REF ────────
 //
-// Every case above drives the surface's OWN `CameraShutter`. The field build
-// does not: a host camera with a bottom mode bar passes
-// `hideBuiltInControls`, draws Pano's shutter in its own bottom row, and
-// reaches the sweep through `SurfaceControlHandle.holdStart/holdEnd` — the
-// same two callbacks, by contract. That contract is exactly the kind of wiring
-// the 2026-07-22 lesson is about: if the ref exposed a stale closure, or the
-// surface still drew a second shutter under the shell's, no case above would
-// notice, and the phone would.
-describe('the shell drives the sweep through the ref, with one shutter', () => {
+// Every case in this file drives the engine through its handle now (M10: the
+// engine has no shutter of its own). These cases mount it the way `<Camera>`
+// configures it — `hideBuiltInControls` and a `bottomBarOffset`, both layout
+// inputs only — and pin the handle contract itself: that the ref exposes the
+// hold pair and `abandon`, reads the LIVE phase rather than a stale closure,
+// and that the controls report is what `<Camera>`'s shutter should paint.
+describe('<Camera> drives the sweep through the ref', () => {
   // The SHELL's types, not a local restatement: the point is that the shell's
-  // contract is what the surface honours.
+  // contract is what the engine honours.
   type Handle = SurfaceControlHandle;
   type Controls = SurfaceControlState;
   const last = (states: Controls[]): Controls | undefined => states[states.length - 1];
@@ -1007,7 +1002,6 @@ describe('the shell drives the sweep through the ref, with one shutter', () => {
   } = {}): {
     ref: React.RefObject<Handle | null>;
     states: Controls[];
-    has: (testID: string) => boolean;
     unmount: () => void;
   } {
     const ref = React.createRef<Handle>();
@@ -1015,7 +1009,7 @@ describe('the shell drives the sweep through the ref, with one shutter', () => {
     let renderer!: ReactTestRenderer;
     act(() => {
       renderer = TestRenderer.create(
-        <PanoPlusCaptureSurface
+        <SweepEngineHarness
           ref={ref}
           onComplete={() => undefined}
           onFailure={extra.onFailure}
@@ -1029,20 +1023,40 @@ describe('the shell drives the sweep through the ref, with one shutter', () => {
     return {
       ref,
       states,
-      has: (testID) => renderer.root.findAllByProps({ testID }).length > 0,
       unmount: () => { act(() => { renderer.unmount(); }); },
     };
   }
 
-  it('draws NO shutter of its own when the shell draws Pano\'s', () => {
+  // ⚠ "DRAWS NO SHUTTER OF ITS OWN" (testIDs camera-shutter, panoplus-shutter,
+  // panoplus-bottom-bar) — the engine's own shutter and bottom bar were
+  // deleted in M10, so there is no second shutter left to forbid.
+  //
+  // What that case's comment also claimed survives, as LAYOUT: the engine
+  // keeps its preview and HUD above `<Camera>`'s bottom chrome, and
+  // `hideBuiltInControls` / `bottomBarOffset` are how it knows where that is.
+  it('reserves <Camera>\'s bottom chrome: hideBuiltInControls and bottomBarOffset reach the start bag', async () => {
+    // A SHORT window, so the capsule's knee is set by the height left above
+    // the bottom chrome (on the 390x844 window the width binds first and the
+    // reservation cannot show in the number).
+    rnMock.__setWindowDimensions(390, 500);
+    const knee = (offset: number, hide: boolean): number =>
+      panoPlusPreviewWindowMultiple(
+        { width: 390, height: 500, bottomChromePt: panoBottomChromePt(0, offset, hide) },
+        'landscape-left',
+      );
+    // Each input moves the answer on this window — so the match below is
+    // discriminating, not a number every configuration would produce.
+    expect(knee(150, true)).not.toBeCloseTo(knee(150, false), 2);
+    expect(knee(150, true)).not.toBeCloseTo(knee(0, true), 2);
     const u = mountUnified();
-    // The shell's shutter is the only one — a second under it would be the
-    // "two shutters" defect, one of them wired to nothing the operator can see.
-    expect(u.has('camera-shutter')).toBe(false);
-    expect(u.has('panoplus-shutter')).toBe(false);
-    // …but Pano's bottom-bar slot is still there for the lens chip, so the
-    // HUD reserves the same chrome whether the surface draws the shutter or not.
-    expect(u.has('panoplus-bottom-bar')).toBe(false); // AR on, no onLensChange
+    act(() => { u.ref.current!.holdStart!(); });
+    await settle();
+    // The knee native sizes the preview against, computed from THIS
+    // configuration's reservation: no built-in shutter, a 150 pt bar lift.
+    expect((startedWith as Record<string, unknown>).previewWindowCrossMult as number)
+      .toBeCloseTo(knee(150, true), 6);
+    act(() => { u.ref.current!.holdEnd!(); });
+    await settle();
     u.unmount();
   });
 
@@ -1956,7 +1970,7 @@ describe('the live panel is scoped to the sweep the surface owns', () => {
    * The uri sitting in the HIDDEN slot — the one that has been accepted and is
    * decoding but has not been promoted yet.
    *
-   * The panel is a two-slot ping-pong (see PanoPlusCaptureSurface's
+   * The panel is a two-slot ping-pong (see useSweepEngine's
    * [previewSlots]): a new publish is assigned to the hidden slot and only
    * becomes visible when its own `onLoad` fires, because on Android changing a
    * mounted <Image>'s source blanks it synchronously. So "was this publish

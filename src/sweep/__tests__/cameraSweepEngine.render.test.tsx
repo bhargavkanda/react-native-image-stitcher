@@ -99,14 +99,24 @@ beforeEach(() => { jest.useFakeTimers(); });
 // the worst possible way for a suite to be wrong: the second failure is not
 // about the second case.
 afterEach(() => {
+  // ⚠ AND EVERY TREE A CASE LEFT MOUNTED. Several cases read a prop and end
+  // without unmounting; a tree left behind keeps re-rendering on shared
+  // signals (the AR probe, the sensors), and `lastSweepProps()` reads the
+  // LAST call of ANY tree — so a later case read an earlier case's AR tree
+  // (M10: surfaced when a case's async flushes moved). Unmounted here, once.
+  for (const t of mountedTrees.splice(0)) {
+    try { act(() => { t.unmount(); }); } catch { /* already unmounted */ }
+  }
   sensorsMock.__resetAccelerometer();
   jest.runOnlyPendingTimers();
   jest.useRealTimers();
 });
 
+const mountedTrees: ReactTestRenderer[] = [];
 function render(props: Record<string, unknown>): ReactTestRenderer {
   let t!: ReactTestRenderer;
   act(() => { t = create(<Camera {...(props as any)} />); });
+  mountedTrees.push(t);
   return t;
 }
 
@@ -310,22 +320,16 @@ describe('<Camera engine="sweep">', () => {
   });
 
   it('⚑ a host BAG cannot bring the clone pills back', async () => {
-    // The writers were withheld ABOVE `{...sweep}`, under a comment reading
-    // "WITHHELD UNCONDITIONALLY". A bag carrying either one overwrote the
-    // `undefined` and the surface drew its own clone again — measured, before
-    // the fix, as TWO AR pills and TWO lens chips in one tree, with the whole
-    // suite green because no test rendered the bag route.
-    //
-    // `SweepOptions` now omits both, so this is a `as never` in the test and
-    // a compile error for a real host; the runtime assertion is the belt.
+    // A bag carrying the old writers used to make the sweep draw its own
+    // clone pills — measured as TWO AR pills and TWO lens chips in one tree.
+    // M10 deleted the clones (and the writers from the engine's props), so the
+    // runtime claim is now structural; this case keeps the count honest.
     const tree = render({
       engine: 'sweep',
       sweep: { onLensChange: () => {}, onPoseSourceChange: () => {} } as never,
     });
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
-    expect(surfaceProps(tree).onLensChange).toBeUndefined();
-    expect(surfaceProps(tree).onPoseSourceChange).toBeUndefined();
-    // …and exactly one of each control in the whole tree.
+    // Exactly one of each control in the whole tree.
     expect(tree.root.findAllByType(LensChip)).toHaveLength(1);
     expect(tree.root.findAllByType(ARToggle)).toHaveLength(1);
     act(() => { tree.unmount(); });
@@ -436,69 +440,10 @@ describe('<Camera engine="sweep">', () => {
     }
   });
 
-  it('⚑ BLOCKER: the shared chrome hides while the surface owns the screen', async () => {
-    // FIRST RUN ON AN UNCALIBRATED PHONE. The surface puts up the
-    // basis-acquisition card and removes BOTH of its own pills — the note
-    // beside that term names the hazard: "the suppression would summon the
-    // more damaging of the two controls."
-    //
-    // That term did not travel when the pills moved to `<Camera>`. The
-    // copies here are rendered AFTER the surface, so they paint ON TOP of a
-    // full-screen overlay, and their ancestors are all `box-none` so they
-    // are live. One tap of the AR pill moved the arm to ARKit, which made
-    // `armWantsBasis` false and unmounted the card — the one-time basis
-    // measurement cancelled by a control that should not have been there.
-    // M8: ONLY ON THE DR-1a HATCH. In the one tree the engine mounts no basis
-    // card at all (the vision-camera arm derives its basis, D3), so the old
-    // screen — the hatch's — is the only place the card and this gate exist.
-    const tree = render({ engine: 'sweep', sweep: { frameSourceOverride: 'own' } });
-    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
-    const report = surfaceProps(tree).onEffectiveArmChange as (a: {
-      poseSource: 'ar' | 'imu'; fallbackToAr: boolean; basisRoute: string;
-      resolving: boolean; chromeSuppressed: boolean;
-    }) => void;
-    expect(typeof report).toBe('function');
-
-    // Before the overlay: the chrome is up, as it must be.
-    expect(tree.root.findAllByType(ARToggle)).toHaveLength(1);
-    expect(tree.root.findAllByType(LensChip)).toHaveLength(1);
-
-    await act(async () => {
-      report({ poseSource: 'imu', fallbackToAr: false,
-               basisRoute: 'gesture' as never, resolving: false,
-               chromeSuppressed: true });
-    });
-    expect(tree.root.findAllByType(ARToggle)).toHaveLength(0);
-    expect(tree.root.findAllByType(LensChip)).toHaveLength(0);
-
-    // …and it comes BACK when the surface releases the screen. Without this
-    // the fix could be "never draw the chrome on a sweep", which deletes the
-    // unification this whole rung is for.
-    await act(async () => {
-      report({ poseSource: 'imu', fallbackToAr: false,
-               basisRoute: 'stored' as never, resolving: false,
-               chromeSuppressed: false });
-    });
-    expect(tree.root.findAllByType(ARToggle)).toHaveLength(1);
-    expect(tree.root.findAllByType(LensChip)).toHaveLength(1);
-    act(() => { tree.unmount(); });
-  });
-
-  // ⚠ NOT TESTED, DELIBERATELY, AND THE GAP IS NAMED RATHER THAN HIDDEN.
-  //
-  // `sweepEffectiveArm` is now cleared when `engine` leaves 'sweep'
-  // (Camera.tsx), because the read is per-render but the STATE survived, so
-  // sweep → keyframe → tap 0.5× → sweep re-applied the previous sweep's arm
-  // and masked a lens the operator had legitimately chosen.
-  //
-  // The defect is a ONE-COMMIT transient and this rig cannot see it: on
-  // re-entry the surface's own effect re-reports the same declined arm
-  // before react-test-renderer flushes, so the stale value is replaced by an
-  // identical fresh one and the masked and unmasked trees are indistinguishable
-  // at every observable point. A case written anyway would pass whether the
-  // reset is there or not — which is the vacuous pass this file exists to
-  // avoid. Recorded here so the next reader knows it is a gap and not an
-  // oversight.
+  // The "shared chrome hides while the surface owns the screen" case is gone
+  // with its mechanism (M10): the first-run basis card and the
+  // `chromeSuppressed` report that hid `<Camera>`'s pills over it were
+  // deleted.
 
   it('⚑ both pills are INERT mid-sweep, as the surface\'s own were', async () => {
     // The surface's handlers opened `if (phaseRef.current !== 'idle') return;`
@@ -687,95 +632,31 @@ describe('<Camera engine="sweep">', () => {
     jest.useRealTimers();
   });
 
-  it('⚑ the chip paints the lens the ARM WILL OPEN, not the request', async () => {
-    // FIELD DEFECT, 2026-09-19: "0.5x lens does not go to that camera — shows
-    // the same view as 1x." Every layer below the chip was right. On iOS the
-    // IMU arm has no τ for `model|lens|W×H|fps`, so `panoPlusArmNotice`
-    // declines and falls back to ARKit — which publishes no ultra-wide format
-    // at all. The request survives; the glass does not change. The chip went
-    // on painting `0.5×` over an ARKit viewfinder that was on the wide.
-    //
-    // THE PURE TRUTH TABLE CANNOT CATCH THIS. `sweepEffectiveLens` is covered
-    // case-by-case in `sweepHostOwnsCamera.test.ts`, and every one of those
-    // stays green if the chip is handed the raw `lens` instead — which is
-    // precisely the mis-wire that shipped. This drives the real chip.
-    const tree = render({
-      engine: 'sweep',
-      defaultCaptureSource: 'ar',
-      defaultLens: '0.5x',
+  // M10 — THE CHIP PAINTS `lens`, ON BOTH ENGINES. It used to paint a mask
+  // fed up from the sweep screen (an iOS IMU arm falling back to ARKit painted
+  // 0.5× as 1×). On `<Camera>`'s own camera that state cannot arise, and the
+  // mask, its feed and the screen that computed it are deleted.
+  for (const engine of ['keyframe', 'sweep'] as const) {
+    it(`${engine}: the chip shows the lens the operator picked`, () => {
+      const tree = render({ engine, defaultLens: '0.5x' });
+      expect(tree.root.findByType(LensChip).props.lens).toBe('0.5x');
+      act(() => { tree.unmount(); });
     });
+  }
+
+  it('⚑ at 0.5× with no enumerable ultra-wide the AR pill is the escape, and it COMMITS 1×', async () => {
+    // The chip has no Pressable on a body whose ultra-wide `<Camera>` cannot
+    // enumerate (this harness's device), so the pill is the one live control
+    // — and pressing it must commit the 1× the chip can only show, or
+    // showing it just moves the dead control from one pill to the other.
+    const tree = render({ engine: 'sweep', defaultCaptureSource: 'ar', defaultLens: '0.5x' });
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
-
-    const report = surfaceProps(tree).onEffectiveArmChange as
-      (a: { poseSource: 'ar' | 'imu'; fallbackToAr: boolean;
-            basisRoute: string; resolving: boolean }) => void;
-    // The seam itself: an unwired callback is the defect, so name it.
-    expect(typeof report).toBe('function');
-
-    // 1. THE ARM DECLINES. This is the shipped iPhone state.
-    await act(async () => {
-      report({ poseSource: 'ar', fallbackToAr: true,
-               basisRoute: 'none' as never, resolving: false });
-    });
-    expect(tree.root.findByType(LensChip).props.lens).toBe('1x');
-    // ⚠ AND THE AR PILL IS THE ESCAPE HATCH HERE, not hidden — this
-    // assertion has now been wrong in BOTH directions and the reason is the
-    // fourth term.
-    //
-    // Pano's rule hides the pill at 0.5×, and gating it on the MASKED lens
-    // builds a dead control. But this harness's device publishes no
-    // ultra-wide, so `LensChip` renders no Pressable at all — and with the
-    // pill hidden too the screen would have ZERO live controls and no way
-    // back. The surface's own gate carries `|| !chipCanMoveLens` for
-    // exactly that, and it did not travel with the pill.
-    //
-    // So the pill shows, and pressing it COMMITS the 1× the chip is already
-    // painting — otherwise showing it just moves the dead control.
     expect(tree.root.findAllByType(ARToggle)).toHaveLength(1);
-    // ⚠ THE REQUEST IS UNTOUCHED. The mask is paint, not policy: if it fed
-    // back into the request, 0.5× would never move the arm, the fallback
-    // would never be evaluated, and this mask would have nothing to report.
     expect(surfaceProps(tree).lens).toBe('ultraWide');
-    expect(surfaceProps(tree).poseSource).toBe('imu');
-
-    // 2. NEGATIVE CONTROL — the arm accepts. Without this the case above
-    //    passes for a chip hardcoded to `1×`, which would delete the
-    //    ultra-wide from the product on the one arm that can open it.
-    await act(async () => {
-      report({ poseSource: 'imu', fallbackToAr: false,
-               basisRoute: 'none' as never, resolving: false });
-    });
-    expect(tree.root.findByType(LensChip).props.lens).toBe('0.5x');
-
-    // 3. IN FLIGHT — follows the request, so no label is offered that may be
-    //    taken back one frame later.
-    await act(async () => {
-      report({ poseSource: 'ar', fallbackToAr: true,
-               basisRoute: 'none' as never, resolving: true });
-    });
-    expect(tree.root.findByType(LensChip).props.lens).toBe('0.5x');
-
-    // …and LAST, the escape hatch actually escapes. On this body the chip
-    // has no Pressable, so the pill is the only live control — pressing it
-    // must COMMIT the 1× the chip has been painting, or showing it there
-    // just moves the dead control from one pill to the other.
-    await act(async () => {
-      report({ poseSource: 'ar', fallbackToAr: true,
-               basisRoute: 'none' as never, resolving: false });
-    });
     await act(async () => {
       (tree.root.findByType(ARToggle).props.onToggle as () => void)();
     });
     expect(surfaceProps(tree).lens).toBe('wide');
-    act(() => { tree.unmount(); });
-  });
-
-  it('⚑ …and the keyframe engine is untouched by the mask', () => {
-    // `engine` selects which engine the hold runs and changes nothing else.
-    // No sweep surface exists here, so nothing can ever report an arm — the
-    // assertion is that the chip still shows what the operator picked.
-    const tree = render({ defaultLens: '0.5x' });
-    expect(tree.root.findByType(LensChip).props.lens).toBe('0.5x');
     act(() => { tree.unmount(); });
   });
 

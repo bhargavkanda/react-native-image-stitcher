@@ -43,16 +43,19 @@ afterEach(() => {
 
 
 /**
- * M7 — the sweep's source is TWO files now: the surface keeps the props it
- * declares and the drawing, and `useSweepEngine` holds everything that
- * destructures, forwards and starts. A source guard reads both, so a hop moved
- * between them is still a hop it can see.
+ * M7 — the sweep's source is split: the props it declares live in
+ * `sweepEngineProps.ts` (M10: the surface that declared them is deleted),
+ * `useSweepEngine` holds everything that destructures, forwards and starts,
+ * and `SweepHatchScreen` is the one view that still mounts an AR view of the
+ * sweep's own (the DR-1a hatch's ARKit fallback). A source guard reads all
+ * three, so a hop moved between them is still a hop it can see.
  */
 function surfaceAndEngineSrc(): string {
   const fs = require('fs') as typeof import('fs');
   const path = require('path') as typeof import('path');
-  return fs.readFileSync(path.join(__dirname, '..', 'PanoPlusCaptureSurface.tsx'), 'utf8')
-    + '\n' + fs.readFileSync(path.join(__dirname, '..', 'useSweepEngine.ts'), 'utf8');
+  return ['sweepEngineProps.ts', 'useSweepEngine.ts', 'SweepHatchScreen.tsx']
+    .map((f) => fs.readFileSync(path.join(__dirname, '..', f), 'utf8'))
+    .join('\n');
 }
 
 describe('availability', () => {

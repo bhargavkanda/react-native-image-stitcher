@@ -204,6 +204,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   selects the control arm on both platforms.
 
 ### Removed (BREAKING)
+- **The sweep's own capture screen (M10).** There is one camera screen:
+  `<Camera>`. Deleted, with their exports:
+  - `PanoPlusCaptureSurface` and `PanoPlusCaptureSurfaceProps`, the sweep's
+    stand-alone screen. The engine it drew is `<Camera engine="sweep">`; its
+    options are `SweepOptions` (`<Camera sweep={…}>`).
+  - Its clone chrome: its own AR pill, lens chip and built-in shutter. The
+    sweep uses `<Camera>`'s.
+  - `PanoPlusBasisOverlay` and `PanoPlusBasisOverlayProps`, the in-camera
+    first-run basis gesture (D3(a)), with the model only it used:
+    `panoPlusBasisGestureView`, `basisRefusalCoaching`,
+    `PANO_PLUS_BASIS_AXIS_BAR_DEG`, `REFERENCE_GRACE_S` and the
+    `PanoPlusBasisGesture*` types. The basis ladder (`resolvePanoPlusBasis`)
+    is unchanged.
+  - The internal effective-arm feed and lens mask (`sweepEffectiveLens`,
+    never exported). The lens chip paints `lens` on both engines.
 - **The sweep's second result viewer (M10).** `PanoPlusResultView` and
   `PanoPlusResultViewProps` are no longer exported, and the component is
   deleted with the three modules only it used (`PinchZoomView`,

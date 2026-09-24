@@ -135,10 +135,9 @@ jest.mock('../../sweep/useSweepEngine', () => {
   }
   return { __esModule: true, useSweepEngine };
 });
-jest.mock('../../sweep/PanoPlusCaptureSurface', () => {
-  const actual = jest.requireActual('../../sweep/PanoPlusCaptureSurface');
-  return { __esModule: true, ...actual, SweepScreenView: () => null };
-});
+jest.mock('../../sweep/SweepHatchScreen', () => ({
+  __esModule: true, SweepHatchScreen: () => null,
+}));
 
 // eslint-disable-next-line import/first
 import { Camera } from '../Camera';
@@ -146,6 +145,8 @@ import { Camera } from '../Camera';
 import { LateralMotionModal } from '../LateralMotionModal';
 // eslint-disable-next-line import/first
 import { RotateToLandscapePrompt } from '../RotateToLandscapePrompt';
+// eslint-disable-next-line import/first
+import { CameraShutter } from '../CameraShutter';
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -637,6 +638,43 @@ describe('M9 review T7 — every keyframe start failure reaches BOTH channels', 
     // …and it raised no latch: a photo right after is taken, not refused.
     await act(async () => { void ref.current.takePhoto(); await Promise.resolve(); });
     expect(errs.map((e) => e.code)).not.toContain('CAPTURE_IN_PROGRESS');
+    act(() => t.unmount());
+  });
+});
+
+describe('M10 — the DR-1a hatch has <Camera>\'s shutter (its own screen\'s is gone)', () => {
+  const hatchShutter = (t: ReactTestRenderer) => t.root.findAll(
+    (n: any) => n.props?.testID === 'camera-hatch-shutter',
+  );
+
+  it('a press on it runs the sweep, through the one dispatcher', async () => {
+    const ref = React.createRef<any>();
+    let t!: ReactTestRenderer;
+    await act(async () => {
+      t = create(el({
+        engine: 'sweep', defaultCaptureSource: 'non-ar', rectCrop: false,
+        sweep: { frameSourceOverride: 'own' },
+      }, ref));
+    });
+    await act(async () => { await sleep(900); });
+    expect(hatchShutter(t).length).toBeGreaterThan(0);
+    const shutter = hatchShutter(t)[0].findByType(CameraShutter);
+    await act(async () => { (shutter.props as { onHoldStart: () => void }).onHoldStart(); });
+    expect(g.__sw.calls).toContain('holdStart');
+    act(() => t.unmount());
+  });
+
+  it('⚑ NEGATIVE CONTROL: hideBuiltInShutter hides it, as it hides the main tree\'s', async () => {
+    const ref = React.createRef<any>();
+    let t!: ReactTestRenderer;
+    await act(async () => {
+      t = create(el({
+        engine: 'sweep', defaultCaptureSource: 'non-ar', rectCrop: false,
+        hideBuiltInShutter: true, sweep: { frameSourceOverride: 'own' },
+      }, ref));
+    });
+    await act(async () => { await sleep(900); });
+    expect(hatchShutter(t)).toHaveLength(0);
     act(() => t.unmount());
   });
 });

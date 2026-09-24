@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// THE SURFACE REPORTS ITS PROGRESS — `onPaintedChange`, mounted for real.
+// THE ENGINE REPORTS ITS PROGRESS — `onPaintedChange`, mounted for real.
+//
+// M10: the sweep's own screen is gone; this mounts the real engine hook
+// through `SweepEngineHarness` and presses the shutter through the handle
+// (`holdStart` / `holdEnd`), which is how `<Camera>`'s shutter reaches it.
 //
 // `<Camera>`'s lateral-stop policy counts the engine's own progress: keyframes
 // on one engine, strips painted on this one. Everything it knows about the
@@ -30,9 +34,8 @@ jest.mock(
   { virtual: true },
 );
 
-import { PanoPlusCaptureSurface } from '../PanoPlusCaptureSurface';
+import { SweepEngineHarness } from './sweepEngineHarness';
 import type { SweepSurfaceHandle } from '../panoPlusTypes';
-import { holdShutter, releaseShutter } from './shutterGestures';
 import { PANO_PLUS_STATUS_POLL_MS, PANO_PLUS_SWAP_GRACE_MS } from '../panoPlusModel';
 
 const NM = NativeModules as Record<string, unknown>;
@@ -69,7 +72,7 @@ function mount(reported: number[]): {
   let renderer!: ReactTestRenderer;
   act(() => {
     renderer = TestRenderer.create(
-      <PanoPlusCaptureSurface
+      <SweepEngineHarness
         ref={ref}
         onComplete={() => undefined}
         onCancel={() => undefined}
@@ -95,10 +98,10 @@ const last = (xs: number[]): number | undefined => xs[xs.length - 1];
 
 it('reports the live status\'s painted count, and 0 after the sweep finishes', async () => {
   const reported: number[] = [];
-  const { renderer } = mount(reported);
+  const { renderer, ref } = mount(reported);
   await settle();
   expect(last(reported)).toBe(0);
-  holdShutter(renderer.root);
+  act(() => { ref.current!.holdStart!(); });
   await settle();
   statusReply = { running: true, seq: 3, painted: 7, framesSeen: 20 };
   await poll();
@@ -106,7 +109,7 @@ it('reports the live status\'s painted count, and 0 after the sweep finishes', a
   statusReply = { running: true, seq: 4, painted: 12, framesSeen: 30 };
   await poll();
   expect(last(reported)).toBe(12);
-  releaseShutter(renderer.root);
+  act(() => { ref.current!.holdEnd!(); });
   await settle();
   await poll();
   expect(last(reported)).toBe(0);
@@ -117,7 +120,7 @@ it('reports 0 when a live sweep is ABANDONED — a guard rail must not see stale
   const reported: number[] = [];
   const { renderer, ref } = mount(reported);
   await settle();
-  holdShutter(renderer.root);
+  act(() => { ref.current!.holdStart!(); });
   await settle();
   statusReply = { running: true, seq: 5, painted: 9, framesSeen: 25 };
   await poll();

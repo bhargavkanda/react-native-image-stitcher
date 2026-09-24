@@ -23,7 +23,15 @@
 //
 // So the arm is LATCHED at Start, exactly as `armsRef` (which stamps the pack)
 // already was, and released when the phase returns to idle. These tests assert
-// the mount and the reported arm, not the source — the mount is the side effect.
+// the mount and the arm the result carries, not the source — the mount is the
+// side effect.
+//
+// M10 — the sweep's own screen and its arm report (`onEffectiveArmChange`)
+// are deleted; the engine is mounted through `SweepEngineHarness` and the
+// shutter pressed through its handle. The two surviving forms of "the arm the
+// host sees" are the arm the RESULT carries (`result.arms.poseSource`, from
+// `armsRef`) and the shutter's `canCapture` (`onControlsState`), which is
+// where the old report's `resolving` term now lands.
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -48,22 +56,32 @@ jest.mock(
   { virtual: true },
 );
 
-import { PanoPlusCaptureSurface } from '../PanoPlusCaptureSurface';
-import { holdShutter, releaseShutter, shutterState } from './shutterGestures';
+import { SweepEngineHarness } from './sweepEngineHarness';
+import { ARCameraView } from '../../camera/ARCameraView';
 import { PANO_PLUS_SWAP_GRACE_MS } from '../panoPlusModel';
-import type { PanoPlusPoseSource } from '../panoPlusTypes';
+import type {
+  PanoPlusCaptureResult,
+  PanoPlusFailure,
+  PanoPlusPoseSource,
+  SweepSurfaceHandle,
+  SweepSurfaceState,
+} from '../panoPlusTypes';
 
 const NM = NativeModules as Record<string, unknown>;
 
 /** The bag the last `start()` received — the arm that actually crossed. */
 let startedWith: Record<string, unknown> | null = null;
-/** Every `onEffectiveArmChange` payload, in order. The LAST one is what the
- *  host's AR pill is drawing at that moment. */
-let armReports: {
-  poseSource: PanoPlusPoseSource;
-  fallbackToAr: boolean;
-  resolving: boolean;
-}[] = [];
+/** Forget the last start bag, so a SECOND hold's bag is what gets read. (A
+ *  function rather than an inline `= null`, which would narrow the variable
+ *  to `null` for the rest of the case.) */
+const clearStart = (): void => { startedWith = null; };
+/** Every `onControlsState` payload, in order — what the host's shutter paints.
+ *  `canCapture: false` on a live module is the arm read still resolving. */
+let controls: SweepSurfaceState[] = [];
+/** Every `onFailure`, in order — a hold the engine declines is named here. */
+let failures: PanoPlusFailure[] = [];
+/** Every `onComplete` result — the arm a finished sweep says it ran on. */
+let results: PanoPlusCaptureResult[] = [];
 
 /** A phone that HAS both halves of the calibration — the only device on which
  *  the decoupled arm is selectable at all, and therefore the only one on which
@@ -94,7 +112,9 @@ const CALIBRATED_SNAPSHOT = {
 
 function installNative(): void {
   startedWith = null;
-  armReports = [];
+  controls = [];
+  failures = [];
+  results = [];
   NM.RNISPanoPlus = {
     start: (o: Record<string, unknown>) => {
       startedWith = o;
@@ -132,14 +152,13 @@ function installNative(): void {
 }
 
 interface Rig {
-  has: (testID: string) => boolean;
-  tap: (testID: string) => void;
-  /** Pano's shutter held past the threshold — the sweep starts (2026-09-03). */
+  /** Is the stitcher's `<ARCameraView>` mounted? Found by TYPE — the harness
+   *  draws the real component. */
+  hasArView: () => boolean;
+  /** The shutter held past the threshold — the engine's `holdStart`. */
   hold: () => void;
-  /** …and released — the sweep finishes, pack kept. */
+  /** …and released — the engine's `holdEnd`: the sweep finishes, pack kept. */
   release: () => void;
-  /** What Pano's shutter would paint. */
-  shutter: () => { disabled: boolean; busy: boolean };
   /** Re-render with a different arm — what the host's AR pill does. */
   setArm: (poseSource: PanoPlusPoseSource) => void;
   unmount: () => void;
@@ -147,18 +166,15 @@ interface Rig {
 
 function mount(poseSource: PanoPlusPoseSource): Rig {
   let renderer!: ReactTestRenderer;
+  const handle = React.createRef<SweepSurfaceHandle>();
   const render = (arm: PanoPlusPoseSource): React.JSX.Element => (
-    <PanoPlusCaptureSurface
-      onComplete={() => undefined}
+    <SweepEngineHarness
+      ref={handle}
+      onComplete={(r) => { results.push(r); }}
       onCancel={() => undefined}
+      onFailure={(f) => { failures.push(f); }}
+      onControlsState={(c) => { controls.push(c); }}
       poseSource={arm}
-      onEffectiveArmChange={(a) => {
-        armReports.push({
-          poseSource: a.poseSource,
-          fallbackToAr: a.fallbackToAr,
-          resolving: a.resolving,
-        });
-      }}
     />
   );
   act(() => {
@@ -167,17 +183,15 @@ function mount(poseSource: PanoPlusPoseSource): Rig {
   act(() => {
     jest.advanceTimersByTime(PANO_PLUS_SWAP_GRACE_MS + 1);
   });
+  const press = (which: 'holdStart' | 'holdEnd'): void => {
+    const fn = handle.current?.[which];
+    if (fn == null) throw new Error(`the engine handle has no ${which}`);
+    act(() => { fn(); });
+  };
   return {
-    has: (testID) => renderer.root.findAllByProps({ testID }).length > 0,
-    tap: (testID) => {
-      const node = renderer.root.findAllByProps({ testID })[0];
-      const onPress = node?.props?.onPress as (() => void) | undefined;
-      if (onPress == null) throw new Error(`no onPress on ${testID}`);
-      act(() => { onPress(); });
-    },
-    hold: () => holdShutter(renderer.root),
-    release: () => releaseShutter(renderer.root),
-    shutter: () => shutterState(renderer.root),
+    hasArView: () => renderer.root.findAllByType(ARCameraView).length > 0,
+    hold: () => press('holdStart'),
+    release: () => press('holdEnd'),
     setArm: (arm) => { act(() => { renderer.update(render(arm)); }); },
     unmount: () => { act(() => { renderer.unmount(); }); },
   };
@@ -188,12 +202,6 @@ async function settle(): Promise<void> {
     for (let i = 0; i < 6; i += 1) await Promise.resolve();
   });
 }
-
-const lastArm = (): (typeof armReports)[number] => {
-  const last = armReports[armReports.length - 1];
-  if (last == null) throw new Error('the surface never reported an arm');
-  return last;
-};
 
 beforeEach(() => {
   jest.useFakeTimers();
@@ -209,7 +217,7 @@ describe('the arm is latched for the duration of a sweep', () => {
   it('keeps ARKit mounted when the pill is flipped to IMU mid-sweep', async () => {
     const r = mount('ar');
     await settle();
-    expect(r.has('ar-camera')).toBe(true);
+    expect(r.hasArView()).toBe(true);
     r.hold();
     await settle();
     expect(startedWith?.poseSource).toBe('ar');
@@ -219,7 +227,7 @@ describe('the arm is latched for the duration of a sweep', () => {
     // `RNSARSession.shared.stop()` under a sweep whose frames come from it.
     r.setArm('imu');
     await settle();
-    expect(r.has('ar-camera')).toBe(true);
+    expect(r.hasArView()).toBe(true);
     r.unmount();
   });
 
@@ -227,31 +235,40 @@ describe('the arm is latched for the duration of a sweep', () => {
     const r = mount('imu');
     await settle();
     // The decoupled arm is usable on this fixture, so ARKit is deliberately DOWN.
-    expect(r.has('ar-camera')).toBe(false);
+    expect(r.hasArView()).toBe(false);
     r.hold();
     await settle();
     expect(startedWith?.poseSource).toBe('imu');
 
     // Flipping back mid-sweep would mount <ARCameraView> on top of the arm's
-    // own AVCaptureSession — one body, two clients.
+    // own AVCaptureSession — one body, two clients. Checked PAST the swap
+    // grace: an arm change re-arms it, so inside it the view is down whatever
+    // the latch does and the check could not fail.
     r.setArm('ar');
     await settle();
-    expect(r.has('ar-camera')).toBe(false);
+    act(() => { jest.advanceTimersByTime(PANO_PLUS_SWAP_GRACE_MS + 1); });
+    expect(r.hasArView()).toBe(false);
     r.unmount();
   });
 
-  it('reports the RUNNING arm, never the newly requested one', async () => {
+  // The arm REPORT (`onEffectiveArmChange`, the host pill's feed) — deleted
+  // in M10. The latch it reported survives on the RESULT, which is what the
+  // pack is stamped with.
+  it('the result names the RUNNING arm, never the newly requested one', async () => {
     const r = mount('ar');
     await settle();
-    expect(lastArm()).toEqual({ poseSource: 'ar', fallbackToAr: false, resolving: false });
     r.hold();
     await settle();
 
     r.setArm('imu');
     await settle();
-    // The pack will say `ar` (the arm latched at Start). The pill must say the
-    // same thing, or the operator is told he swept decoupled when he did not.
-    expect(lastArm().poseSource).toBe('ar');
+    r.release();
+    await settle();
+    // The pack says `ar` (the arm latched at Start). What the host is handed
+    // must say the same thing, or the operator is told he swept decoupled
+    // when he did not.
+    expect(results).toHaveLength(1);
+    expect(results[0]!.arms.poseSource).toBe('ar');
     r.unmount();
   });
 
@@ -263,57 +280,81 @@ describe('the arm is latched for the duration of a sweep', () => {
       await settle();
       r.setArm('imu');
       await settle();
-      expect(lastArm().poseSource).toBe('ar');
+      expect(r.hasArView()).toBe(true);   // still latched mid-sweep
 
       r.release();
       await settle();
-      // Idle again: the requested arm is the effective arm, ARKit is down, and
-      // a second sweep would cross the bridge on 'imu'.
-      expect(lastArm().poseSource).toBe('imu');
-      expect(r.has('ar-camera')).toBe(false);
+      // Idle again: the requested arm is the effective arm, ARKit is down…
+      expect(r.hasArView()).toBe(false);
+      // …and a second sweep crosses the bridge on 'imu'.
+      clearStart();
+      r.hold();
+      await settle();
+      expect(failures).toEqual([]);
+      expect(startedWith?.poseSource).toBe('imu');
       r.unmount();
     });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  AND AN UNRESOLVED READ IS NOT A REFUSAL
+//  AND AN UNRESOLVED READ IS NOT A SETTLED ARM
 //
 //  Selecting the IMU arm RESETS the precondition read (`calibRead=false`,
 //  `plan=null`), and with no plan `panoPlusArmNotice` correctly answers "this
-//  build cannot answer" — a FALLBACK. A host pill drawing that would flash
-//  `AR ⟵ IMU n/a` at the exact moment the operator tapped "turn AR off", on a
-//  phone where the arm is perfectly usable, and read as a refusal of the thing
-//  he had just asked for. The Start button has always refused to offer a label
-//  it may take back one frame later; `resolving` is that same fact, reported.
+//  build cannot answer" — a FALLBACK. A hold in that window must not start a
+//  sweep on an arm that may be taken back one frame later.
+//
+//  M10 — this used to be pinned on the arm REPORT's `resolving` flag
+//  (`onEffectiveArmChange`, deleted). The same fact (`armResolving`) now
+//  gates the engine's `canCapture` — the host's shutter greys — and a hold in
+//  that window is refused by name, `panoplus-not-ready`.
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe('the reported arm says when nothing is settled yet', () => {
-  it('marks the IMU selection RESOLVING until the precondition read lands', async () => {
+describe('the shutter says when nothing is settled yet', () => {
+  it('holds the IMU selection NOT READY until the precondition read lands', async () => {
     const r = mount('imu');
-    // Before the read resolves: the notice is a fallback, and it must not be
-    // presented as one.
-    expect(armReports[0]).toMatchObject({ resolving: true });
+    // Before the read resolves: the shutter is greyed, and a hold is refused
+    // by name rather than started on an unsettled arm.
+    expect(controls[0]).toMatchObject({ canCapture: false });
+    r.hold();
+    expect(failures.map((f) => f.code)).toEqual(['panoplus-not-ready']);
+    expect(startedWith).toBeNull();
     await settle();
-    // After: a settled, usable IMU arm — no fallback anywhere in sight.
-    expect(lastArm()).toMatchObject({ poseSource: 'imu', fallbackToAr: false });
+    // After: a settled, usable IMU arm — the shutter is live and a hold starts.
+    expect(controls[controls.length - 1]).toMatchObject({ canCapture: true });
+    r.hold();
+    await settle();
+    expect(failures).toHaveLength(1);
+    expect(startedWith?.poseSource).toBe('imu');
     r.unmount();
   });
 
-  it('never marks the ARKit arm resolving — it has nothing to wait for', async () => {
+  it('never holds the ARKit arm not-ready — it has nothing to wait for', async () => {
     const r = mount('ar');
+    expect(controls.length).toBeGreaterThan(0);
+    for (const c of controls) expect(c).toMatchObject({ canCapture: true });
+    // A hold before any promise has settled still starts.
+    r.hold();
     await settle();
-    for (const a of armReports) expect(a).toMatchObject({ resolving: false });
+    expect(failures).toEqual([]);
+    expect(startedWith?.poseSource).toBe('ar');
     r.unmount();
   });
 
-  it('is never resolving mid-sweep — a running sweep is on a settled arm', async () => {
+  it('is never not-ready mid-sweep — a running sweep is on a settled arm', async () => {
     const r = mount('ar');
     await settle();
     r.hold();
     await settle();
+    const before = controls.length;
+    // The flip RESETS the read (this lens was never read on the IMU arm), so
+    // `armPending` goes true for the width of the round trip; the latched arm
+    // is what keeps the shutter live under the finger.
     r.setArm('imu');
     await settle();
-    expect(lastArm()).toMatchObject({ poseSource: 'ar', resolving: false });
+    const after = controls.slice(before);
+    for (const c of after) expect(c).toMatchObject({ canCapture: true });
+    expect(failures).toEqual([]);
     r.unmount();
   });
 });
