@@ -725,7 +725,11 @@ function App(): React.JSX.Element {
                   preferHighFpsFormat: false,
                 }
           }
-          panMode={panMode}
+          // M8 — the hold dispatcher applies the pan-mode gate to BOTH engines,
+          // and the default 'vertical' is a landscape hold. A sweep is held in
+          // portrait, so this host passes 'both' for it — the library keeps no
+          // per-engine default. The chip below still drives keyframe captures.
+          panMode={engine === 'sweep' ? 'both' : panMode}
           // Lateral-guard experiment knobs.  There are FOUR independent
           // triggers and each is gated by its OWN prop -- `lateralBudgetCm`
           // does NOT disable the turn channels -- so an honest OFF run has

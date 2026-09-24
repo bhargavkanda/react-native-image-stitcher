@@ -343,14 +343,38 @@ describe('<Camera engine="sweep">', () => {
     act(() => { tree.unmount(); });
   });
 
-  it('⚑ …but it still hides the KEYFRAME pill, which is what it is for', async () => {
-    // NEGATIVE CONTROL. Without it the case above passes for a term simply
-    // deleted, which would put an AR pill on a keyframe host that asked for
-    // a bare viewfinder.
+  it('⚑ D18: …and it does not delete the KEYFRAME engine\'s either — one predicate', async () => {
+    // INVERTED BY D18 (M8). This was the negative control for a term that hid
+    // the pill on a keyframe host with its own shutter and not on the sweep —
+    // the pill's presence depended on the engine. The pill is a CAMERA
+    // control, not shutter chrome, so `hideBuiltInShutter` hides it on
+    // neither engine. The private shell gains it on keyframe (U2 checks it).
     const tree = render({ hideBuiltInShutter: true });
     await act(async () => { await Promise.resolve(); await Promise.resolve(); });
-    expect(tree.root.findAllByType(ARToggle)).toHaveLength(0);
+    expect(tree.root.findAllByType(ARToggle)).toHaveLength(1);
     act(() => { tree.unmount(); });
+  });
+
+  it('⚑ …but a single-source host still gets no pill, on either engine', async () => {
+    // NEGATIVE CONTROL for the case above: the predicate still has terms.
+    for (const engine of ['sweep', 'keyframe'] as const) {
+      const tree = render({ engine, captureSources: 'non-ar' });
+      // eslint-disable-next-line no-await-in-loop
+      await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+      expect({ engine, pills: tree.root.findAllByType(ARToggle).length })
+        .toEqual({ engine, pills: 0 });
+      act(() => { tree.unmount(); });
+    }
+  });
+
+  it('⚑ M8: the settings modal knows the engine — the keyframe knobs are not offered for a sweep', () => {
+    const { PanoramaSettingsModal } = require('../../camera/PanoramaSettingsModal');
+    const sw = render({ engine: 'sweep' });
+    expect(sw.root.findByType(PanoramaSettingsModal).props.engine).toBe('sweep');
+    act(() => { sw.unmount(); });
+    const kf = render({});
+    expect(kf.root.findByType(PanoramaSettingsModal).props.engine).toBe('keyframe');
+    act(() => { kf.unmount(); });
   });
 
   it('⚑ M8: the lens chip is the MAIN tree\'s — the same place on both engines', async () => {
@@ -399,10 +423,17 @@ describe('<Camera engine="sweep">', () => {
     const t0 = pillTop(base);
     act(() => { base.unmount(); });
 
-    const docked = render({ engine: 'sweep', sweep: { hostChromeTopPt: t0 + 120 } });
-    await act(async () => { await Promise.resolve(); });
-    expect(pillTop(docked)).toBe(t0 + 120);
-    act(() => { docked.unmount(); });
+    // M8 — `<Camera topChromeInset>` on both engines (the bag's
+    // `hostChromeTopPt` is gone), and the engine is handed the same value so
+    // its hold overlay clears the banner too.
+    for (const engine of ['sweep', 'keyframe'] as const) {
+      const docked = render({ engine, topChromeInset: t0 + 120 });
+      // eslint-disable-next-line no-await-in-loop
+      await act(async () => { await Promise.resolve(); });
+      expect({ engine, top: pillTop(docked) }).toEqual({ engine, top: t0 + 120 });
+      if (engine === 'sweep') expect(surfaceProps(docked).hostChromeTopPt).toBe(t0 + 120);
+      act(() => { docked.unmount(); });
+    }
   });
 
   it('⚑ BLOCKER: the shared chrome hides while the surface owns the screen', async () => {

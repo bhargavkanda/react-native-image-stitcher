@@ -103,6 +103,13 @@ export interface PanoramaSettingsModalProps {
    * says so instead of showing a switch that silently does nothing.
    */
   cropEditorOn?: boolean;
+  /**
+   * M8 — the engine the hold runs. The frame-selection and stitcher sections
+   * tune the KEYFRAME engine only; on `'sweep'` they would be switches that do
+   * nothing, so they are replaced by one line saying where the sweep's own
+   * options live. Debug applies to both. Default `'keyframe'`.
+   */
+  engine?: 'keyframe' | 'sweep' | 'batch-keyframe';
 }
 
 
@@ -112,6 +119,7 @@ export function PanoramaSettingsModal({
   onChange,
   onClose,
   cropEditorOn = false,
+  engine = 'keyframe',
 }: PanoramaSettingsModalProps): React.JSX.Element {
   // ─── Sub-tree update helpers ─────────────────────────────────────
   //
@@ -232,6 +240,14 @@ export function PanoramaSettingsModal({
               caption="When ON, <Camera> mounts the diagnostic pills (memory, keyframes, orientation), the detailed metrics overlay, and the stitch-stats toast on every successful finalize.  OFF (default) — production end-user UI."
             />
 
+            {engine === 'sweep' ? (
+              <Text style={styles.caption} testID="settings-sweep-note">
+                The frame-selection and stitcher settings tune the keyframe
+                engine. The sweep engine takes its options from the host
+                (`sweep`), so there is nothing here to change for it.
+              </Text>
+            ) : (
+            <>
             {/* ──────────────────────────────────────────────
              *  FRAME SELECTION (`frameSelection` sub-tree, closed by default)
              *
@@ -419,6 +435,8 @@ export function PanoramaSettingsModal({
                 caption="on: after each capture, write pack.json (device + recipe + result + timings incl. the native stitchWallMs) next to the persisted keyframes in the app cache dir, so a field capture can be PULLED and replayed offline for root-cause analysis instead of eyeballed.  off (default): no write."
               />
             </Accordion>
+            </>
+            )}
 
             {/* ──────────────────────────────────────────────
              *  RESET TO DEFAULTS

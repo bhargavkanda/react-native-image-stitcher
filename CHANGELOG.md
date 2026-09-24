@@ -51,7 +51,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `arSourceMaxLongEdge` sets its CPU-image cap, `arFrameMetaInterval` is at
   most 100 ms while panorama capture is on, and all three are held while a
   capture records. New `topChromeInset` moves the top-right pills clear of a
-  host's docked banner on both engines. The internal
+  host's docked banner on both engines. **`SweepOptions` is now an explicit
+  allow-list** of the engine's own options. The chrome keys
+  (`hostChromeTopPt`, `bottomBarOffset`, `hideBuiltInControls`,
+  `onControlsState`) and `arSourceMaxLongEdge` are `<Camera>` props now
+  (`topChromeInset`, `bottomBarOffset`, `hideBuiltInShutter`,
+  `arSourceMaxLongEdge`). The AR pill no longer hides under
+  `hideBuiltInShutter` on either engine (D18). It is a camera control, so a
+  keyframe host with its own shutter now shows it. The settings modal takes an
+  `engine` prop: on the sweep, the keyframe-only sections give way to a note
+  saying where the sweep's options are set. The internal
   `sweep.frameSourceOverride: 'own'` (device round DR-1a only) still shows the
   old sweep screen, on pano+'s old own camera.
 

@@ -134,25 +134,33 @@ import {
  * chip — the same state that decides who owns the camera, so the two cannot
  * disagree. See `sweepHostOwnsCamera`.
  */
-export type SweepOptions = Omit<
+export type SweepOptions = Pick<
   PanoPlusCaptureSurfaceProps,
-  'onComplete' | 'onCancel' | 'onFailure'
-  | 'frameSource' | 'hostPreviewLive' | 'vcPluginArm' | 'vcCameraId'
-  | 'hostArmRefusal' | 'vcViewTag'
-  // ⚠ D9 (M3): the pose arm and the lens follow `<Camera>`'s own AR pill and
-  // lens chip. A bag override made both dead controls on the sweep, and was
-  // the Android route into pano+'s own Camera2 client.
-  | 'poseSource' | 'lens'
-  // ⚠ AND THE TWO PILL WRITERS. `<Camera>` draws the AR pill and the lens
-  // chip now, and the surface gates its own clones on these being non-null
-  // — so a bag carrying either one RE-CREATES the clone that produced two
-  // of the four field defects. Measured before this line existed: with
-  // `sweep={{onLensChange, onPoseSourceChange}}` the tree came back with
-  // TWO AR pills and TWO lens chips, and the whole suite stayed green.
-  //
-  // Omitted here so it cannot be written at all, and still assigned after
-  // the spread below — the same belt-and-braces the four above get.
-  | 'onPoseSourceChange' | 'onLensChange'
+  // ── M8: AN ALLOW-LIST, NOT A SUBTRACTION ─────────────────────────────────
+  // This used to be the surface's props MINUS the keys `<Camera>` owned, so
+  // every prop added to the surface leaked into the public bag by default —
+  // which is how the camera-ownership answers and the two pill writers got
+  // in (see above; with `sweep={{onLensChange, onPoseSourceChange}}` the tree
+  // once came back with TWO AR pills and TWO lens chips). It is now the
+  // engine's own options, named one by one. What is NOT here, and why:
+  //   · the result channel (`onComplete`/`onCancel`/`onFailure`) — a sweep
+  //     reports through `<Camera>`'s `onCapture`/`onError`;
+  //   · the camera answers (`frameSource`, `vcPluginArm`, `vcCameraId`,
+  //     `vcViewTag`, `hostPreviewLive`/`Error`, `hostArmRefusal`,
+  //     `onStitchingChange`) — `<Camera>`'s, derived from its own state;
+  //   · the pose arm, the lens and their pill writers (D9) — `<Camera>`'s AR
+  //     pill and lens chip;
+  //   · the chrome (`hostChromeTopPt`, `bottomBarOffset`,
+  //     `hideBuiltInControls`, `onControlsState`) — `<Camera>`'s own, set on
+  //     `<Camera>` (`topChromeInset`, `bottomBarOffset`, `hideBuiltInShutter`);
+  //   · `arSourceMaxLongEdge` — `<Camera arSourceMaxLongEdge>`, one AR session
+  //     config for both engines (D15);
+  //   · `onEffectiveArmChange` — internal wiring.
+  | 'rectify' | 'gainMatch' | 'packFrames' | 'packOptions' | 'engineOptions'
+  | 'attitudeMagFree' | 'lockCamera' | 'pinPreviewFps' | 'meteringSettleMs'
+  | 'lurchAccelMps2' | 'tauUncorrected' | 'jogGuard' | 'imuSidecar'
+  | 'guidanceCopy' | 'defectCopy'
+  | 'onSweepingChange' | 'onPaintedChange'
 > & {
   /**
    * @internal DEVICE-ROUND ONLY — do not ship. `'own'` hands the sweep its
@@ -4814,8 +4822,10 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     // `bottomBarOffset: 150, hideBuiltInShutter` (panoPlusModel.ts:2149), so
     // this term deleted the AR pill outright on the one host configuration
     // the sweep actually ships under — defect #1 rebuilt, one layer up.
-    (!hideBuiltInShutter || engine === 'sweep')
-      && arAllowed && nonArAllowed
+    // D18 — no `hideBuiltInShutter` term, on either engine: the AR pill is a
+    // CAMERA control, not shutter chrome, and a host that draws its own
+    // shutter still needs it.
+    arAllowed && nonArAllowed
       // ⚠ …OR THE CHIP CANNOT MOVE THE LENS, which is the surface's own
       // fourth term (`arPillVisible`: `effectiveLens === '1x' ||
       // !chipCanMoveLens`) and did not travel with the pill either.
@@ -5566,6 +5576,12 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     // cannot see, and the shared lens chip has to know about it or it
     // paints a lens ARKit cannot deliver. See `sweepEffectiveLens`.
     onEffectiveArmChange: handleSweepEffectiveArm,
+    // M8 — THE CHROME IS `<Camera>`'S, so the engine lays its hold overlay out
+    // against `<Camera>`'s own top inset and bottom bar, not a bag copy.
+    hostChromeTopPt: topChromeInset ?? 0,
+    bottomBarOffset,
+    hideBuiltInControls: hideBuiltInShutter,
+    arSourceMaxLongEdge,
     // ⚠ MERGED KEY-BY-KEY, NOT SPREAD. `engineOptions` is an object,
     // so letting the host's copy through the spread above would
     // REPLACE the defaults wholesale — a host that set one option
@@ -5580,7 +5596,6 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     onControlsState: (st: { busy: boolean }) => {
       // `busy` is `phase === 'finishing'` — see `sweepFinalizing`.
       setSweepFinalizing(st.busy);
-      sweep?.onControlsState?.(st as never);
     },
     onStitchingChange: setSweepStitching,
     onSweepingChange: (sweeping: boolean) => {
@@ -5970,7 +5985,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
                 // rather than `+`: `pillStackTop` already clears `<Camera>`'s
                 // OWN header, and the two are alternatives, not a stack.
                 style={[styles.pillStack, {
-                  top: Math.max(pillStackTop, sweep?.hostChromeTopPt ?? 0),
+                  top: Math.max(pillStackTop, topChromeInset ?? 0),
                 }]}
                 pointerEvents="box-none"
               >
@@ -6022,8 +6037,8 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
                   // fact, and it is why the two agree here without a prop.)
                   bottom: panoLensChipBottomPt(
                     insets.bottom,
-                    sweep?.bottomBarOffset ?? 0,
-                    sweep?.hideBuiltInControls ?? false,
+                    bottomBarOffset,
+                    hideBuiltInShutter,
                   ),
                 }]}
                 pointerEvents="box-none">
@@ -6042,8 +6057,8 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             style={[styles.sweepThumbnailAnchor, {
               bottom: panoLensChipBottomPt(
                 insets.bottom,
-                sweep?.bottomBarOffset ?? 0,
-                sweep?.hideBuiltInControls ?? false,
+                bottomBarOffset,
+                hideBuiltInShutter,
               ) + SWEEP_THUMBNAIL_LIFT_PT,
             }]}
             pointerEvents="box-none">
@@ -6388,7 +6403,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       <View
         style={[styles.pillStack, {
           // M8 — clear the host's docked top chrome, on both engines.
-          top: Math.max(pillStackTop, topChromeInset ?? sweep?.hostChromeTopPt ?? 0),
+          top: Math.max(pillStackTop, topChromeInset ?? 0),
         }]}
         pointerEvents="box-none"
       >
@@ -6431,6 +6446,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         onChange={setSettings}
         onClose={() => setSettingsModalVisible(false)}
         cropEditorOn={rectCrop}
+        engine={engine}
       />
 
       {/* Item 1/2 — rotate prompt.  Shown while a gated hold is blocked on
