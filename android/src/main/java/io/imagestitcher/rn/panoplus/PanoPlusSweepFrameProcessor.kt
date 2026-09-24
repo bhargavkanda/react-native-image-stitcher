@@ -216,11 +216,10 @@ class PanoPlusSweepFrameProcessor(
             // `out.size` — never a recomputed w*h*3/2. The JNI does not
             // validate `length` against the array, so a confident wrong
             // value is a SIGSEGV inside cvtColor rather than a refusal.
-            // The frame's own CaptureResult (M4) — exposure, lock read-back,
-            // crop, zoom, the active physical lens. Null when CameraX paired
-            // none; the sink and the recorder treat that as "not measured".
-            val meta = PanoPlusVcCameraControl.metaOf(frame)
-            val taken = PanoPlusVcFrameSink.submit(out, out.size, w, h, tsNs, meta)
+            // The frame's CaptureResult is NOT read here: CameraX never pairs
+            // an analysis frame with one. The sink's worker joins it from the
+            // capture-result tap by this timestamp (see PanoPlusVcFrameMeta).
+            val taken = PanoPlusVcFrameSink.submit(out, out.size, w, h, tsNs)
             acquired = false   // ownership handed to the sink
             return mapOf("ingested" to taken)
         } finally {

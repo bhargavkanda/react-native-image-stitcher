@@ -139,6 +139,8 @@ class PanoPlusLiveModule(
      */
     override fun invalidate() {
         try { PanoPlusVcBridge.cameraLock?.unlock() } catch (_: Throwable) { }
+        // The capture-result tap outlives a JS reload like the lock does.
+        try { PanoPlusVcBridge.cameraLock?.detachResults() } catch (_: Throwable) { }
         super.invalidate()
     }
 

@@ -27,6 +27,11 @@ class PanoPlusVcFrameSinkTest {
         val ingested: MutableList<Long> = Collections.synchronizedList(mutableListOf<Long>())
         val metas: MutableList<PanoPlusVcFrameMeta?> = Collections.synchronizedList(mutableListOf())
         val started = CountDownLatch(1)
+        /** Results the tap "delivered", keyed by SENSOR_TIMESTAMP. */
+        val results = PanoPlusVcResultRing()
+        var outcomes = 0
+
+        override fun metaFor(tsNs: Long): PanoPlusVcFrameMeta? = results.await(tsNs, 0L)
 
         override fun solveAttitude(tsNs: Long): PanoPlusVcFrameSink.PanoPlusVcAttitude {
             ingested += tsNs
@@ -40,13 +45,15 @@ class PanoPlusVcFrameSinkTest {
 
         override fun onVcFrameMeta(meta: PanoPlusVcFrameMeta?) { metas += meta }
 
-        override fun onVcFrameOutcome(ran: Boolean, painted: Boolean, outcome: Int, droppedBusy: Boolean) {}
+        override fun onVcFrameOutcome(ran: Boolean, painted: Boolean, outcome: Int, droppedBusy: Boolean) {
+            if (!droppedBusy) synchronized(this) { outcomes += 1 }
+        }
     }
 
-    private fun meta(expNs: Long) = PanoPlusVcFrameMeta(
+    private fun meta(expNs: Long, ts: Long) = PanoPlusVcFrameMeta(
         exposureTimeNs = expNs, iso = 100, aeLock = true, awbLock = true, aeState = 3,
         afMode = 0, focusDistance = 1.5f, oisMode = 0, videoStabMode = 0,
-        cropRegion = null, zoomRatio = 1f, activePhysicalId = null,
+        cropRegion = null, zoomRatio = 1f, activePhysicalId = null, sensorTimestampNs = ts,
     )
 
     private var armed: FakeHost? = null
@@ -57,10 +64,16 @@ class PanoPlusVcFrameSinkTest {
         PanoPlusVcFrameSink.awaitIdle(2000)
     }
 
-    private fun offer(ts: Long, m: PanoPlusVcFrameMeta? = null): Boolean {
+    private fun offer(ts: Long): Boolean {
         val b = PanoPlusVcFrameSink.acquireBuffer(16) ?: return false
-        return PanoPlusVcFrameSink.submit(b, b.size, 4, 2, ts, m)
+        return PanoPlusVcFrameSink.submit(b, b.size, 4, 2, ts)
     }
+
+    /** The partition the pack is read with — every offered frame in one bucket. */
+    private fun accounted(h: FakeHost): Long =
+        PanoPlusVcFrameSink.framesDroppedBusy + PanoPlusVcFrameSink.framesRefusedPostAcquire +
+            PanoPlusVcFrameSink.framesSuperseded + PanoPlusVcFrameSink.framesDroppedAtDisarm +
+            synchronized(h) { h.outcomes.toLong() }
 
     @Test
     fun `a frame arriving while one waits REPLACES it — the engine always takes the newest`() {
@@ -97,12 +110,14 @@ class PanoPlusVcFrameSinkTest {
     }
 
     @Test
-    fun `each frame's own CaptureResult travels with it to the engine`() {
+    fun `each frame is JOINED to its own capture result by timestamp — a miss is null, never a neighbour`() {
         val host = FakeHost().also { armed = it }
+        host.results.put(meta(8_000_000L, ts = 10L))
+        host.results.put(meta(9_000_000L, ts = 12L))   // for a frame that never comes
         PanoPlusVcFrameSink.arm(host)
-        assertTrue(offer(10L, meta(8_000_000L)))
+        assertTrue(offer(10L))
         assertTrue(PanoPlusVcFrameSink.awaitIdle(2000))
-        assertTrue(offer(11L, null))
+        assertTrue(offer(11L))
         assertTrue(PanoPlusVcFrameSink.awaitIdle(2000))
         assertEquals(listOf(10L, 11L), host.ingested.toList())
         assertEquals(8_000_000L, host.metas[0]?.exposureTimeNs)
@@ -123,5 +138,49 @@ class PanoPlusVcFrameSinkTest {
         assertTrue(PanoPlusVcFrameSink.awaitIdle(2000))
         assertEquals(listOf(1L), host.ingested.toList())
         assertNull(PanoPlusVcFrameSink.acquireBuffer(16))   // not armed: no buffer
+        // M4 review — the waiting frame is COUNTED, and the partition closes.
+        assertEquals(1L, PanoPlusVcFrameSink.framesDroppedAtDisarm)
+        assertEquals(PanoPlusVcFrameSink.framesOffered, accounted(host))
+    }
+
+    @Test
+    fun `M4 review — a frame offered after disarm is in no bucket because it is in no total`() {
+        val host = FakeHost().also { armed = it }
+        PanoPlusVcFrameSink.arm(host)
+        assertTrue(offer(1L))
+        assertTrue(PanoPlusVcFrameSink.awaitIdle(2000))
+        PanoPlusVcFrameSink.disarm(host)
+        armed = null
+        val before = PanoPlusVcFrameSink.framesOffered
+        assertNull(PanoPlusVcFrameSink.acquireBuffer(16))
+        assertEquals(before, PanoPlusVcFrameSink.framesOffered)
+        assertEquals(PanoPlusVcFrameSink.framesOffered, accounted(host))
+    }
+
+    @Test
+    fun `M4 review — a sweep armed while the last one's loop finishes keeps its first frame`() {
+        val gate = CountDownLatch(1)
+        val h1 = FakeHost(gate)
+        PanoPlusVcFrameSink.arm(h1)
+        assertTrue(offer(1L))                        // h1's loop blocks in ingest
+        assertTrue(h1.started.await(2, TimeUnit.SECONDS))
+        val h2 = FakeHost().also { armed = it }
+        PanoPlusVcFrameSink.arm(h2)                  // no disarm of h1 (the zombie case)
+        assertTrue(offer(100L))                      // pending under h2
+        gate.countDown()
+        assertTrue(PanoPlusVcFrameSink.awaitIdle(2000))
+        assertEquals(listOf(100L), h2.ingested.toList())
+        assertEquals(PanoPlusVcFrameSink.framesOffered, accounted(h2))
+    }
+
+    @Test
+    fun `M4 review — disarm releases the pool — the process holds no frame buffers after a sweep`() {
+        val host = FakeHost().also { armed = it }
+        PanoPlusVcFrameSink.arm(host)
+        assertTrue(offer(1L))
+        assertTrue(PanoPlusVcFrameSink.awaitIdle(2000))
+        PanoPlusVcFrameSink.disarm(host)
+        armed = null
+        assertEquals(0, PanoPlusVcFrameSink.pooledBuffersForTest())
     }
 }

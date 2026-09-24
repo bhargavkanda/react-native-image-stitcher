@@ -533,6 +533,8 @@ dependencies {
             '**/VisionCameraPluginRegistrations.kt',
             '**/PanoPlusSweepFrameProcessor.kt',
             '**/PanoPlusVcCameraControl.kt',
+            // M4(b) — the CameraX capture-result tap, in CameraX's own package.
+            '**/RNSCaptureResultTap.kt',
         ]
         tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
             vcOnlySources.each { pattern -> exclude pattern }

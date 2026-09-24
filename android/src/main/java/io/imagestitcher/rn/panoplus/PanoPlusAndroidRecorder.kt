@@ -3491,11 +3491,10 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
         if (c != null && (constFx <= 0.0 || vcConstW != width || vcConstH != height)) {
             // ⚠ AND PUT THE LABEL BACK. `computeConstantIntrinsics` stamps
             // `intrinsicsSource` itself ("LENS_INTRINSIC_CALIBRATION" /
-            // "derived" / "unavailable") — correct for the Camera2 arm,
-            // where those numbers are then crop-mapped per frame. Here they
-            // are NOT: there is no CaptureResult and no crop region. Left
-            // alone, the first frame erases the one marker that stops a vc
-            // pack being read as a crop-mapped Camera2 pack.
+            // "derived" / "unavailable") — correct for the Camera2 arm, where
+            // every frame is then crop-mapped. Here only JOINED frames are;
+            // left alone, the first frame erases the one marker that says the
+            // constant is the default-crop fallback.
             // Derived once per SIZE, not per frame: the characteristics are
             // static and the only thing that varies is the stream we are
             // being handed.
@@ -3506,10 +3505,10 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
                 "characteristics-nocrop (vision-camera owns the camera; " +
                     "derivation: $intrinsicsSource)"
         }
-        // M4: THE FRAME'S OWN CROP, when CameraX paired a CaptureResult — the
-        // same per-frame mapping the Camera2 arm makes, through the same
+        // M4: THE FRAME'S OWN CROP, when a capture result was joined to it —
+        // the same per-frame mapping the Camera2 arm makes, through the same
         // `mapIntrinsics`. Without one the constant (default-crop) answer
-        // stands, as before, and the pack counts which frames had which.
+        // stands, and the pack counts which frames had which.
         val crop = meta?.cropRegion
         if (crop != null && arrValid) {
             vcCropMappedFrames.incrementAndGet()
@@ -3519,13 +3518,29 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
         return doubleArrayOf(constFx, constFy, constCx, constCy)
     }
 
-    // ── M4: the vc frame's own CaptureResult ────────────────────────────────
+    // ── M4: the vc frame's CaptureResult, from the capture-result tap ───────
+    //
+    // ⚠ NOT FROM THE FRAME. CameraX's ImageAnalysis never pairs an analysis
+    // frame with its result (M4 review, measured in the 1.5.0-alpha03
+    // bytecode). The tap delivers every result into `vcResults`; the sink's
+    // worker joins one to each frame by SENSOR_TIMESTAMP in [metaFor].
+    private val vcResults = PanoPlusVcResultRing()
+    private val vcJoinMisses = java.util.concurrent.atomic.AtomicLong(0)
+    private val vcJoinMissRun = java.util.concurrent.atomic.AtomicLong(0)
+    @Volatile private var vcJoinDisabled = false
+    @Volatile private var vcTapState = "not-requested"
+    @Volatile private var vcTapDetail = ""
+    @Volatile private var vcTapDetached = ""
     private val vcCropMappedFrames = java.util.concurrent.atomic.AtomicLong(0)
     private val vcMetaFrames = java.util.concurrent.atomic.AtomicLong(0)
     private val vcMetaMissing = java.util.concurrent.atomic.AtomicLong(0)
+    private val vcFrameIdx = java.util.concurrent.atomic.AtomicLong(0)
+    // The read-back window: from the FIRST result that reports AE locked.
+    @Volatile private var vcFirstLockedFrame = -1L
+    private val vcInFlightBeforeLock = java.util.concurrent.atomic.AtomicLong(0)
+    private val vcResultsAfterLocked = java.util.concurrent.atomic.AtomicLong(0)
     private val vcAeLockedFrames = java.util.concurrent.atomic.AtomicLong(0)
     private val vcAwbLockedFrames = java.util.concurrent.atomic.AtomicLong(0)
-    private val vcFramesAfterLock = java.util.concurrent.atomic.AtomicLong(0)
     @Volatile private var vcExpMinNs = Long.MAX_VALUE
     @Volatile private var vcExpMaxNs = 0L
     @Volatile private var vcIsoMin = Int.MAX_VALUE
@@ -3533,45 +3548,92 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
     @Volatile private var vcLastZoom: Float? = null
     @Volatile private var vcLastCrop: android.graphics.Rect? = null
     private val vcPhysicalIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
-    /** "not-requested" → "requested" / "unavailable"; see [PanoPlusVcCameraLock]. */
+    /** "not-requested" → "requesting" → "applied" / "apply-failed" /
+     *  "cancelled" / "unavailable"; see [PanoPlusVcCameraLock.lock]. */
     @Volatile private var vcLockState = "not-requested"
     @Volatile private var vcLockDetail = ""
     @Volatile private var vcLockCleared = ""
     private val vcLockAsked = java.util.concurrent.atomic.AtomicBoolean(false)
+    @Volatile private var vcSettle: PanoPlusVcSettle? = null
+    @Volatile private var vcSettleDecision: PanoPlusVcSettle.Decision? = null
+
+    /** After this many consecutive misses with no join at all, stop waiting. */
+    private val vcJoinGiveUpAfter = 30L
+
+    override fun metaFor(tsNs: Long): PanoPlusVcFrameMeta? {
+        // No tap, no wait: a missing tap must not cost every frame the join
+        // budget. And a tap whose timestamps never match (a clock-domain
+        // surprise) stops being waited on after a run of misses — counted and
+        // named in the pack, never silently.
+        val wait = if (vcTapState == "attached" && !vcJoinDisabled) {
+            cfg.metaJoinWaitMs.toLong()
+        } else {
+            0L
+        }
+        val m = vcResults.await(tsNs, wait)
+        if (m == null) {
+            vcJoinMisses.incrementAndGet()
+            if (vcJoinMissRun.incrementAndGet() >= vcJoinGiveUpAfter && vcMetaFrames.get() == 0L) {
+                vcJoinDisabled = true
+            }
+        } else {
+            vcJoinMissRun.set(0)
+        }
+        return m
+    }
 
     override fun onVcFrameMeta(meta: PanoPlusVcFrameMeta?) {
-        // THE LOCK, ON THE FIRST FRAME. The viewfinder has been running, so
-        // AE/AWB are already converged; the first frame's result supplies the
-        // focus distance the AF lock pins (none → AE/AWB/OIS/EIS only).
-        if (cfg.lockCamera && vcLockAsked.compareAndSet(false, true)) {
-            val ctl = PanoPlusVcBridge.cameraLock
-            if (ctl == null) {
-                vcLockState = "unavailable"
-                vcLockDetail = "the vision-camera lock half is not in this build"
-            } else {
-                vcLockState = "requesting"
-                ctl.lock(ctx, cfg.vcViewTag, meta?.focusDistance) { state, detail ->
-                    vcLockState = state
-                    vcLockDetail = detail
+        val idx = vcFrameIdx.incrementAndGet()
+        if (meta != null) {
+            vcMetaFrames.incrementAndGet()
+            meta.zoomRatio?.let { vcLastZoom = it }
+            meta.cropRegion?.let { vcLastCrop = it }
+            meta.activePhysicalId?.let { if (it.isNotEmpty()) vcPhysicalIds.add(it) }
+        } else {
+            vcMetaMissing.incrementAndGet()
+        }
+        // ── THE LOCK, ONCE METERING HAS SETTLED (M4 review) ─────────────────
+        // Not on the first frame: a sweep started while AE was still searching
+        // would be pinned to a transitional exposure. `PanoPlusVcSettle`
+        // decides — N converged results, or the ceiling — and pins focus only
+        // if AF had settled.
+        if (cfg.lockCamera && !vcLockAsked.get()) {
+            val d = vcSettle?.feed(meta, SystemClock.elapsedRealtime().toDouble())
+            if (d != null && vcLockAsked.compareAndSet(false, true)) {
+                vcSettleDecision = d
+                val ctl = PanoPlusVcBridge.cameraLock
+                if (ctl == null) {
+                    vcLockState = "unavailable"
+                    vcLockDetail = "the vision-camera lock half is not in this build"
+                } else {
+                    vcLockState = "requesting"
+                    ctl.lock(ctx, cfg.vcViewTag, d.focusDistance) { state, detail ->
+                        vcLockState = state
+                        vcLockDetail = detail
+                    }
                 }
             }
         }
-        if (meta == null) { vcMetaMissing.incrementAndGet(); return }
-        vcMetaFrames.incrementAndGet()
-        meta.zoomRatio?.let { vcLastZoom = it }
-        meta.cropRegion?.let { vcLastCrop = it }
-        meta.activePhysicalId?.let { if (it.isNotEmpty()) vcPhysicalIds.add(it) }
-        if (vcLockState == "requested") {
-            vcFramesAfterLock.incrementAndGet()
-            if (meta.aeLock == true) vcAeLockedFrames.incrementAndGet()
-            if (meta.awbLock == true) vcAwbLockedFrames.incrementAndGet()
-            if (meta.exposureTimeNs > 0L) {
-                if (meta.exposureTimeNs < vcExpMinNs) vcExpMinNs = meta.exposureTimeNs
-                if (meta.exposureTimeNs > vcExpMaxNs) vcExpMaxNs = meta.exposureTimeNs
-            }
-            if (meta.iso > 0) {
-                if (meta.iso < vcIsoMin) vcIsoMin = meta.iso
-                if (meta.iso > vcIsoMax) vcIsoMax = meta.iso
+        // ── THE READ-BACK, FROM THE FIRST RESULT THAT SAYS LOCKED ───────────
+        // The 2–6 frames already in the pipeline when the options land were
+        // captured under the old request; counting from the request would
+        // fail a lock that held.
+        if (meta != null && vcLockAsked.get()) {
+            if (vcFirstLockedFrame < 0L && meta.aeLock == true) vcFirstLockedFrame = idx
+            if (vcFirstLockedFrame < 0L) {
+                vcInFlightBeforeLock.incrementAndGet()
+            } else {
+                vcResultsAfterLocked.incrementAndGet()
+                if (meta.aeLock == true) vcAeLockedFrames.incrementAndGet()
+                if (meta.awbLock == true) vcAwbLockedFrames.incrementAndGet()
+                if (meta.exposureTimeNs > 0L) {
+                    if (meta.exposureTimeNs < vcExpMinNs) vcExpMinNs = meta.exposureTimeNs
+                    if (meta.exposureTimeNs > vcExpMaxNs) vcExpMaxNs = meta.exposureTimeNs
+                }
+                if (meta.iso > 0) {
+                    if (meta.iso < vcIsoMin) vcIsoMin = meta.iso
+                    if (meta.iso > vcIsoMax) vcIsoMax = meta.iso
+                }
             }
         }
     }
@@ -3646,12 +3708,13 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
         vcChars = chars
         intrinsicsSource = "characteristics-nocrop (vision-camera owns the camera)"
         intrinsicsNote =
-            "vision-camera owns the camera on this arm and surfaces no CaptureResult, so " +
-                "there is no SCALER_CROP_REGION to map and no per-frame intrinsics. These " +
-                "are derived once from CameraCharacteristics for camera " +
-                "'${cfg.vcCameraId}' and scaled to each frame's size, which assumes the " +
-                "DEFAULT crop. A pack from this arm is NOT interchangeable with a Camera2 " +
-                "arm pack, whose numbers are crop-mapped per frame."
+            "vision-camera owns the camera on this arm. The intrinsics are derived from " +
+                "CameraCharacteristics for camera '${cfg.vcCameraId}' and, for every frame " +
+                "JOINED to its capture result (arm.vcMeta.framesWithResult), crop-mapped by " +
+                "that result's SCALER_CROP_REGION exactly as the Camera2 arm does " +
+                "(arm.vcMeta.cropMappedFrames). A frame with no joined result is scaled to " +
+                "its size under the DEFAULT crop — count the two before comparing a pack " +
+                "from this arm with a Camera2 arm pack."
         startLiveEngine()
         if (liveStartError != null) {
             return fail(
@@ -3659,18 +3722,51 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
                 "the engine refused to start: $liveStartError",
             )
         }
-        PanoPlusVcFrameSink.arm(this)
+        // ── THE CAPTURE-RESULT TAP, BEFORE THE FIRST FRAME ──────────────────
+        // A lock a previous sweep failed to clear comes off first (the plan's
+        // "cleared at every arm"), then the tap is attached so the first
+        // frames can already be joined to their results.
+        val ctl = PanoPlusVcBridge.cameraLock
+        try { ctl?.unlock() } catch (_: Throwable) { }
+        vcResults.clear()
+        vcSettle = PanoPlusVcSettle(cfg.settleStableResults, cfg.settleCeilingMs)
+        if (ctl == null) {
+            vcTapState = "unavailable"
+            vcTapDetail = "the vision-camera half of this package is not in this build"
+        } else {
+            vcTapState = "requesting"
+            ctl.attachResults(ctx, cfg.vcViewTag, { m -> vcResults.put(m) }) { state, detail ->
+                vcTapState = state
+                vcTapDetail = detail
+            }
+        }
+        // ⚠ ACTIVE BEFORE ARMED, AND RE-CHECKED AFTER (M4 review). A stop or
+        // cancel racing this start used to read `vcPluginArmActive` false,
+        // skip the disarm, and leave this — torn-down — recorder as the sink's
+        // host until the next sweep armed over it.
         vcPluginArmActive = true
+        PanoPlusVcFrameSink.arm(this)
+        if (torndown.get()) {
+            PanoPlusVcFrameSink.disarm(this)
+            PanoPlusVcFrameSink.awaitIdle(500L)
+            try { ctl?.unlock() } catch (_: Throwable) { }
+            try { ctl?.detachResults() } catch (_: Throwable) { }
+            return settleReject(
+                promise, "panoplus-cancelled",
+                "the sweep was stopped while the vision-camera arm was starting; the arm " +
+                    "was disarmed rather than left feeding a torn-down session.",
+            )
+        }
         arArmReason =
             "VISION-CAMERA PLUGIN ARM: the sweep runs on frames from the camera <Camera> " +
                 "already owns (FrameProcessor '${PanoPlusVcFrameSink.PLUGIN_NAME}'), and this " +
-                "recorder opens no Camera2 client. M4: each frame carries its own CaptureResult " +
-                "(exposure time, ISO, crop region, zoom ratio, active physical lens — see " +
-                "arm.vcMeta), the intrinsics are crop-mapped per frame when it is present, and " +
-                "the AE/AWB lock, OIS/EIS off and a frozen focus are applied to vision-camera's " +
-                "camera through CameraX interop on the first frame (arm.vcLock — the read-back " +
-                "says whether it held). Either can be unavailable on a given build or device; " +
-                "the pack says which."
+                "recorder opens no Camera2 client. M4: vision-camera's capture results reach " +
+                "this recorder through a CameraX capture-result listener and are JOINED to " +
+                "frames by SENSOR_TIMESTAMP (arm.vcMeta: tapState, joinMisses); a joined frame " +
+                "feeds the engine its exposure and is crop-mapped. The AE/AWB lock, OIS/EIS off " +
+                "and — when AF had settled — a frozen focus are applied through CameraX interop " +
+                "once metering has settled (arm.vcLock: settle, verdict). Either can be " +
+                "unavailable on a given build or device; the pack says which."
         advise(arArmReason)
         state.set(ST_RECORDING)
         CoroutineScope(Dispatchers.IO).launch { writeDeviceJson("recording-started") }
@@ -6783,15 +6879,27 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
                             // M4 — a newer frame replaced this one while it
                             // waited for the engine (the latest-wins slot).
                             .i("vcFramesSuperseded", PanoPlusVcFrameSink.framesSuperseded)
-                            // M4 — the frame's own CaptureResult: how many
-                            // frames carried one, and what it said.
+                            // M4 review — a frame waiting for the engine at
+                            // stop; the fifth bucket of the partition.
+                            .i("vcFramesDroppedAtDisarm", PanoPlusVcFrameSink.framesDroppedAtDisarm)
+                            // M4 — the frame's CaptureResult, from the tap,
+                            // joined by SENSOR_TIMESTAMP: how many frames got
+                            // one, how many missed, and what they said.
                             .raw(
                                 "vcMeta", Jo()
+                                    .s("route", "capture-result-tap (Camera2CameraControlImpl listener, joined by SENSOR_TIMESTAMP)")
+                                    .s("tapState", vcTapState)
+                                    .s("tapDetail", vcTapDetail)
+                                    .s("tapDetached", vcTapDetached)
+                                    .i("resultsReceived", vcResults.resultsReceived)
+                                    .n("joinWaitMs", cfg.metaJoinWaitMs)
+                                    .i("joinMisses", vcJoinMisses.get())
+                                    .b("joinGaveUp", vcJoinDisabled)
                                     .i("framesWithResult", vcMetaFrames.get())
                                     .i("framesWithoutResult", vcMetaMissing.get())
                                     .i("cropMappedFrames", vcCropMappedFrames.get())
                                     .s("lastCropRegion", vcLastCrop?.toShortString())
-                                    .n("lastZoomRatio", (vcLastZoom ?: Float.NaN).toDouble())
+                                    .raw("lastZoomRatio", vcLastZoom?.let { jnum(it.toDouble()) } ?: "null")
                                     .raw("activePhysicalIds", jarrStr(vcPhysicalIds.sorted()))
                                     .i("sensorOrientation",
                                         (vcChars?.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: -1).toLong())
@@ -6801,9 +6909,9 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
                                     .end(),
                             )
                             // M4 — the AE/AWB lock on vision-camera's camera,
-                            // and the READ-BACK that says whether it held:
-                            // aeLockedFrames == framesAfterLock and
-                            // expMinNs == expMaxNs is a lock that held.
+                            // the settle that decided WHEN, and the derived
+                            // VERDICT (`panoVcLockVerdict`) — never left for a
+                            // reader to assemble from counters.
                             .raw(
                                 "vcLock", Jo()
                                     .s("route", "camerax-camera2-interop")
@@ -6811,7 +6919,21 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
                                     .s("state", vcLockState)
                                     .s("detail", vcLockDetail)
                                     .s("cleared", vcLockCleared)
-                                    .i("framesAfterLock", vcFramesAfterLock.get())
+                                    .s("verdict", panoVcLockVerdict(
+                                        vcResultsAfterLocked.get(), vcAeLockedFrames.get(),
+                                        vcAwbLockedFrames.get(),
+                                        if (vcExpMinNs == Long.MAX_VALUE) 0L else vcExpMinNs, vcExpMaxNs,
+                                        if (vcIsoMin == Int.MAX_VALUE) 0 else vcIsoMin, vcIsoMax,
+                                    ))
+                                    .s("settleReason", vcSettleDecision?.reason)
+                                    .n("settleMs", vcSettleDecision?.settleMs ?: -1.0)
+                                    .i("settleResultsSeen", (vcSettleDecision?.resultsSeen ?: 0).toLong())
+                                    .i("aeStateAtLock", (vcSettleDecision?.aeStateAtLock ?: -1).toLong())
+                                    .i("afStateAtLock", (vcSettleDecision?.afStateAtLock ?: -1).toLong())
+                                    .raw("focusPinned", vcSettleDecision?.focusDistance?.let { jnum(it.toDouble()) } ?: "null")
+                                    .i("firstLockedFrame", vcFirstLockedFrame)
+                                    .i("framesInFlightBeforeLock", vcInFlightBeforeLock.get())
+                                    .i("resultsAfterFirstLocked", vcResultsAfterLocked.get())
                                     .i("aeLockedFrames", vcAeLockedFrames.get())
                                     .i("awbLockedFrames", vcAwbLockedFrames.get())
                                     .i("expMinNs", if (vcExpMinNs == Long.MAX_VALUE) 0L else vcExpMinNs)
@@ -7207,6 +7329,7 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
                 // Interop options outlive the sweep on vision-camera's camera;
                 // left on, they would pin the exposure of every photo after it.
                 vcLockCleared = PanoPlusVcBridge.cameraLock?.unlock() ?: "no-lock-half"
+                vcTapDetached = PanoPlusVcBridge.cameraLock?.detachResults() ?: "no-lock-half"
             }
             // ⚠ `arArmActive` IS DELIBERATELY NOT CLEARED HERE. The writer
             // thread is joined BELOW, so a frame is very likely mid-row right

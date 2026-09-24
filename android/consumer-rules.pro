@@ -31,3 +31,14 @@
     public static com.google.ar.core.ArCoreApk getInstance();
     public *** checkAvailability(android.content.Context);
 }
+
+# The vision-camera sweep's capture-result tap (M4(b)) lives in CameraX's own
+# package because the listener hook it calls is package-private there. Keep
+# both halves of that access from being renamed or repackaged apart.
+# Harmless without vision-camera (no CameraX, no class).
+-keep class androidx.camera.camera2.internal.RNSCaptureResultTap { *; }
+-keep class androidx.camera.camera2.internal.RNSCaptureResultTap$Handle { *; }
+-keepclassmembers class androidx.camera.camera2.internal.Camera2CameraControlImpl {
+    void addCaptureResultListener(androidx.camera.camera2.internal.Camera2CameraControlImpl$CaptureResultListener);
+    void removeCaptureResultListener(androidx.camera.camera2.internal.Camera2CameraControlImpl$CaptureResultListener);
+}

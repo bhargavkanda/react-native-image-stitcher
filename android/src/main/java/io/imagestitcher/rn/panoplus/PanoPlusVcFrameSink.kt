@@ -38,7 +38,23 @@ import java.util.concurrent.atomic.AtomicLong
  *     frame is waiting.
  *
  * Still never a queue: at ~3 MB a frame a queue reaches a gigabyte in seconds
- * of stall. Bounded at [POOL] buffers whatever happens.
+ * of stall. Bounded at [POOL] buffers whatever happens, and RELEASED at
+ * disarm (M4 review: the process-wide pool used to pin ~7–9 MB after every
+ * sweep, for the life of the process).
+ *
+ * ── THE PARTITION THE PACK IS READ WITH ─────────────────────────────────
+ * Every frame counted in [framesOffered] lands in exactly ONE bucket:
+ *
+ *   offered = droppedBusy + refusedPostAcquire + superseded
+ *           + droppedAtDisarm + (the frames the engine took)
+ *
+ * The M4 review measured the identity failing by one on 19 of 30 simulated
+ * sweeps — the frame waiting in the pending slot at stop was counted nowhere.
+ *
+ * ── THE FRAME'S CAPTURE RESULT IS JOINED HERE, ON THE WORKER ────────────
+ * CameraX never pairs an analysis frame with its result (see
+ * [PanoPlusVcFrameMeta]); the host joins one by SENSOR_TIMESTAMP in
+ * [Host.metaFor], with a bounded wait — on this thread, never on the camera's.
  */
 internal object PanoPlusVcFrameSink {
 
@@ -55,6 +71,9 @@ internal object PanoPlusVcFrameSink {
 
         /** Intrinsics for a frame of this size, crop-mapped when [meta] has a crop. */
         fun intrinsicsFor(width: Int, height: Int, meta: PanoPlusVcFrameMeta?): DoubleArray
+
+        /** The frame's capture result, joined by SENSOR_TIMESTAMP; null on a miss. */
+        fun metaFor(tsNs: Long): PanoPlusVcFrameMeta?
 
         /** The frame's own CaptureResult (null when CameraX paired none). */
         fun onVcFrameMeta(meta: PanoPlusVcFrameMeta?)
@@ -81,7 +100,6 @@ internal object PanoPlusVcFrameSink {
         val width: Int,
         val height: Int,
         val tsNs: Long,
-        val meta: PanoPlusVcFrameMeta?,
         val seq: Long,
     )
 
@@ -98,6 +116,7 @@ internal object PanoPlusVcFrameSink {
     private val offered = AtomicLong(0)
     private val droppedBusy = AtomicLong(0)
     private val superseded = AtomicLong(0)
+    private val droppedAtDisarm = AtomicLong(0)
     private val refusedPreOffer = AtomicLong(0)
     private val refusedPostAcquire = AtomicLong(0)
     private val generation = AtomicLong(0)
@@ -113,6 +132,8 @@ internal object PanoPlusVcFrameSink {
     val framesDroppedBusy: Long get() = droppedBusy.get()
     /** Frames converted and then replaced by a newer one before the engine took them. */
     val framesSuperseded: Long get() = superseded.get()
+    /** Frames waiting in the pending slot when the sweep disarmed. */
+    val framesDroppedAtDisarm: Long get() = droppedAtDisarm.get()
     val framesRefusedPreOffer: Long get() = refusedPreOffer.get()
     val framesRefusedPostAcquire: Long get() = refusedPostAcquire.get()
     fun notePreOfferRefusal() { refusedPreOffer.incrementAndGet() }
@@ -141,6 +162,7 @@ internal object PanoPlusVcFrameSink {
             offered.set(0)
             droppedBusy.set(0)
             superseded.set(0)
+            droppedAtDisarm.set(0)
             refusedPreOffer.set(0)
             refusedPostAcquire.set(0)
             seq.set(0)
@@ -162,9 +184,19 @@ internal object PanoPlusVcFrameSink {
                 return
             }
             host = null
-            // A frame waiting for the engine will never be taken now.
-            pending?.let { returnLocked(it.buf) }
+            // A frame waiting for the engine will never be taken now — and it
+            // was OFFERED, so it is counted (the partition in the header).
+            pending?.let {
+                droppedAtDisarm.incrementAndGet()
+                returnLocked(it.buf)
+            }
             pending = null
+            // RELEASE THE POOL. It is process-wide; left filled it pins up to
+            // POOL frame buffers after the camera screen is gone. Buffers still
+            // out (the one being ingested, one a plugin is writing) now fail
+            // the size check on return and are dropped rather than pooled.
+            free.clear()
+            poolBytes = -1
         }
         Log.i(
             TAG,
@@ -179,10 +211,13 @@ internal object PanoPlusVcFrameSink {
      * Counts the frame as OFFERED either way.
      */
     fun acquireBuffer(bytes: Int): ByteArray? {
-        val h = host ?: return null
-        offered.incrementAndGet()
+        val h: Host
         synchronized(lock) {
-            if (host == null) return null
+            // Counted as offered only once it is known the sink is ARMED, so a
+            // frame arriving after disarm is in no bucket because it is in no
+            // total either.
+            h = host ?: return null
+            offered.incrementAndGet()
             if (bytes != poolBytes) {
                 // A new size (a new sweep, or a format change): the old pool
                 // cannot hold this frame. Buffers still out are dropped when
@@ -201,6 +236,9 @@ internal object PanoPlusVcFrameSink {
         h.onVcFrameOutcome(false, false, -1, droppedBusy = true)
         return null
     }
+
+    /** Buffers held in the free pool — test-only. */
+    internal fun pooledBuffersForTest(): Int = synchronized(lock) { free.size }
 
     /** Give back a buffer the plugin acquired and did not submit. */
     fun returnBuffer(buf: ByteArray) {
@@ -224,13 +262,17 @@ internal object PanoPlusVcFrameSink {
         width: Int,
         height: Int,
         tsNs: Long,
-        meta: PanoPlusVcFrameMeta?,
     ): Boolean {
         val start: Job
         val h: Host
         synchronized(lock) {
-            h = host ?: run { returnLocked(buf); return false }
-            val job = Job(buf, length, width, height, tsNs, meta, seq.getAndIncrement())
+            h = host ?: run {
+                // Disarmed while the plugin converted it: offered, then refused.
+                refusedPostAcquire.incrementAndGet()
+                returnLocked(buf)
+                return false
+            }
+            val job = Job(buf, length, width, height, tsNs, seq.getAndIncrement())
             if (working) {
                 pending?.let {
                     superseded.incrementAndGet()
@@ -254,15 +296,29 @@ internal object PanoPlusVcFrameSink {
         }
     }
 
-    /** Ingest [first], then whatever is pending when it finishes, until nothing is. */
-    private fun runLoop(h: Host, first: Job) {
+    /**
+     * Ingest [first], then whatever is pending when it finishes, until nothing
+     * is.
+     *
+     * ⚠ UNDER THE CURRENT HOST, re-read every turn (M4 review). The loop used
+     * to take the pending job only if the host was still the one it started
+     * with, and cleared `pending` either way — so a NEW sweep armed while the
+     * previous one's loop was finishing lost its first frame, uncounted, and
+     * with it a pool slot. `arm()` clears `pending`, so anything pending now
+     * was submitted to the current host; `disarm()` clears it too, so a null
+     * host means there is nothing to take.
+     */
+    private fun runLoop(h0: Host, first: Job) {
+        var h = h0
         var job: Job? = first
         while (job != null) {
             ingest(h, job)
             synchronized(lock) {
                 returnLocked(job!!.buf)
-                job = if (host === h) pending else null
+                val cur = host
+                job = if (cur != null) pending else null
                 pending = null
+                if (cur != null) h = cur
                 if (job == null) working = false
             }
         }
@@ -270,10 +326,10 @@ internal object PanoPlusVcFrameSink {
 
     private fun ingest(h: Host, job: Job) {
         try {
-            h.onVcFrameMeta(job.meta)
+            val m = h.metaFor(job.tsNs)
+            h.onVcFrameMeta(m)
             val att = h.solveAttitude(job.tsNs)
-            val k = h.intrinsicsFor(job.width, job.height, job.meta)
-            val m = job.meta
+            val k = h.intrinsicsFor(job.width, job.height, m)
             val res = PanoPlusLiveNative.ingest(
                 nv21 = job.buf,
                 length = job.length,
