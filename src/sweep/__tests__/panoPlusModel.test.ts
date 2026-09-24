@@ -88,6 +88,7 @@ function statusFixture(over: Partial<PanoPlusStatus> = {}): PanoPlusStatus {
   const base: PanoPlusStatus = {
     running: true,
     vcDeviceRefusal: null,
+    cameraReleased: false,
     // The drift verdict a CLEAN sweep reports: level 0, no arm, never fired.
     // Spelled out rather than defaulted so a test that means to exercise the
     // guard has to say so.

@@ -463,6 +463,7 @@ export function coercePanoPlusStatus(raw: unknown): PanoPlusStatus | null {
     viewfinderAttached: s.viewfinderAttached === true,
     viewfinderNote: str(s.viewfinderNote),
     vcDeviceRefusal: nullableStr(s.vcDeviceRefusal),
+    cameraReleased: s.cameraReleased === true,
     droppedQueue: num(s.droppedQueue),
     droppedPack: num(s.droppedPack),
     engineMs: num(s.engineMs),

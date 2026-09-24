@@ -36,6 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - switching the engine at idle no longer unmounts the camera;
   - the camera stays mounted behind the review on both engines (the sweep
     engine itself is deselected there);
+  - a sweep's finish is ordered like a keyframe stitch. The camera stays
+    mounted while native tears the sweep down. Once native reports the new
+    status field `cameraReleased` (iOS and Android), the camera unmounts for
+    the rest of the finish and the status overlay reads "Stitching". It
+    mounts again when the finish ends;
   - AR sweeps are pose-guarded against sideways drift, like AR keyframe
     captures; the IMU guard no longer stands in for them;
   - at idle the sweep draws nothing of its own over the viewfinder; its

@@ -2357,6 +2357,11 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
    * emitted value is untouched.
    */
   const [sweepFinalizing, setSweepFinalizing] = useState(false);
+  // M8 — a finishing sweep past native's camera-release point. From here the
+  // camera unmounts for the rest of the finish, exactly as it does for a
+  // keyframe stitch: ONE phase for every "may the camera be mounted" decision.
+  const [sweepStitching, setSweepStitching] = useState(false);
+  const cameraPhase: CaptureStatusPhase = sweepStitching ? 'stitching' : statusPhase;
   /**
    * THE SWEEP'S PROGRESS, for the guards that key on how much a capture has
    * got — the keyframe engine's `acceptedCount`, in the sweep's own unit
@@ -5303,7 +5308,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       ? (cameraShouldUnmount(
           inFlightTransition,
           arSupportPending,
-          statusPhase,
+          cameraPhase,
           cameraHandoffPending,
         ) ? SWEEP_CAMERA_NOT_READY : null)
     : sweepHostArmRefusal({
@@ -5316,7 +5321,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       cameraUnmounting: cameraShouldUnmount(
         inFlightTransition,
         arSupportPending,
-        statusPhase,
+        cameraPhase,
         cameraHandoffPending,
       ),
       deviceId: capture.device?.id ?? '',
@@ -5408,7 +5413,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     !sweepLegacyTree && !isAR && !cameraShouldUnmount(
       inFlightTransition,
       arSupportPending,
-      statusPhase,
+      cameraPhase,
       cameraHandoffPending,
     );
   // ⚠ NO DEPENDENCY ARRAY, DELIBERATELY — which normally reads as a
@@ -5577,6 +5582,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       setSweepFinalizing(st.busy);
       sweep?.onControlsState?.(st as never);
     },
+    onStitchingChange: setSweepStitching,
     onSweepingChange: (sweeping: boolean) => {
       // Latch ownership at the first edge and release it at the
       // last — see `sweepOwnershipLatch`. Set from the LIVE value,
@@ -5587,7 +5593,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       // arm and null when idle — two different falsy meanings. The
       // pills need the PHASE.
       setSweepRunning(sweeping);
-      if (!sweeping) setSweepFinalizing(false);
+      if (!sweeping) { setSweepFinalizing(false); setSweepStitching(false); }
       // The vision-camera ingest runs only when the sweep is on that camera.
       sweepDriver.setActive(sweeping && !isAR);
       // A new sweep starts from zero progress; the surface's own
@@ -5839,7 +5845,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     enabled: engine === 'sweep' && cropPending == null,
   });
   const cameraKind = cameraKindFor(
-    cameraShouldUnmount(inFlightTransition, arSupportPending, statusPhase, cameraHandoffPending),
+    cameraShouldUnmount(inFlightTransition, arSupportPending, cameraPhase, cameraHandoffPending),
     isAR,
   );
   // D7 — the per-render answer (the dispatcher raises it synchronously before
@@ -6088,7 +6094,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         // "Stitching…" state on top, so no placeholder label is needed
         // in that case — only for the camera-switch transition.
         <View style={[StyleSheet.absoluteFill, styles.transitionPlaceholder]}>
-          {statusPhase === 'stitching' ? null : (
+          {cameraPhase === 'stitching' ? null : (
             <Text style={styles.transitionLabel}>Switching camera…</Text>
           )}
         </View>
@@ -6159,7 +6165,12 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           too-fast copy) when the pan is too fast: the single speed cue that
           replaced the always-red border + separate amber pill. */}
       <CaptureStatusOverlay
-        phase={engine === 'sweep' && sweepRunning ? 'recording' : statusPhase}
+        // M8 — a sweep reads 'recording' while it records, nothing while it
+        // finishes with the camera still up (its own overlay says
+        // "Finishing…"), and 'stitching' once the camera is released.
+        phase={engine === 'sweep'
+          ? (sweepStitching ? 'stitching' : captureRecording ? 'recording' : statusPhase)
+          : statusPhase}
         topInset={insets.top}
         recordingStartedAt={recordingStartedAt ?? undefined}
         tooFast={recordingTooFast}

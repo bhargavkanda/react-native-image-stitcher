@@ -922,10 +922,15 @@ class PanoPlusLiveModule(
         val json = PanoPlusLiveNative.statusJson()
         val obj = try { JSONObject(json) } catch (_: Throwable) { null }
         if (obj == null) {
-            promise.resolve(WritableNativeMap().apply { putBoolean("running", false) })
+            promise.resolve(WritableNativeMap().apply {
+                putBoolean("running", false)
+                // M8 — read through the FINISH: JS unmounts the camera on it.
+                putBoolean("cameraReleased", PanoPlusCameraRelease.released)
+            })
             return
         }
         val out = jsonToWritableMap(obj)
+        out.putBoolean("cameraReleased", PanoPlusCameraRelease.released)
         // The capture arm's own numbers, which the engine structurally cannot
         // see: it is never told about a frame that the backpressure gate
         // dropped before it, and `droppedQueue` written by the party that

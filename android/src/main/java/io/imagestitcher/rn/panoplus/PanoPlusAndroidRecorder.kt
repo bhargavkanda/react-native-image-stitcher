@@ -472,6 +472,19 @@ private class Stat(private val cap: Int = 512) {
 //  The module
 // ════════════════════════════════════════════════════════════════════════
 
+/**
+ * M8 — THE CAMERA-RELEASE POINT OF A STOP. A stop disarms the plugin arm,
+ * releases the AE/AWB lock, stops ARCore and closes any Camera2 client of its
+ * own, and only THEN finalizes the canvas and the pack, which takes seconds.
+ * JS keeps the camera mounted until this reads true, then unmounts it for the
+ * rest of the finish — the keyframe engine's stitching rule — so nothing
+ * native still reads the camera it unmounts. Process-wide because the session
+ * object is detached the moment `stop()` begins. False from every start.
+ */
+internal object PanoPlusCameraRelease {
+    @Volatile var released: Boolean = false
+}
+
 class PanoPlusAndroidRecorder(private val reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext), LifecycleEventListener {
 
@@ -748,6 +761,7 @@ class PanoPlusAndroidRecorder(private val reactContext: ReactApplicationContext)
 
     @ReactMethod
     fun start(options: ReadableMap?, promise: Promise) {
+        PanoPlusCameraRelease.released = false
         // Permission is checked BEFORE anything is opened. openCamera throws
         // SecurityException without it, and a thrown SecurityException out of
         // a HandlerThread is an app kill, not a rejected promise.
@@ -7376,6 +7390,9 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
             try { PanoPlusPreview.release() } catch (t: Throwable) {
                 Log.w(TAG, "releasing the preview surface threw", t)
             }
+            // M8 — every camera this stop can hold is let go; the finalize
+            // below needs none of them.
+            PanoPlusCameraRelease.released = true
 
             try { sensorMgr?.unregisterListener(sensorListener) } catch (t: Throwable) {
                 Log.w(TAG, "unregisterListener threw", t)

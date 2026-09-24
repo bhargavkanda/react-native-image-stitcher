@@ -1263,6 +1263,14 @@ export interface PanoPlusStatus {
    * appears rather than letting it run on showing nothing.
    */
   vcDeviceRefusal: string | null;
+  /**
+   * M8 — native has passed the CAMERA-RELEASE point of a stop: the plugin arm
+   * is disarmed, the camera lock released and any camera of pano+'s own
+   * closed, and what remains of the stop (the canvas, the pack) needs no
+   * camera. Read through the finish; `<Camera>` unmounts its camera on it.
+   * False from every start, and on a binary that predates it.
+   */
+  cameraReleased: boolean;
   droppedQueue: number;
   droppedPack: number;
   engineMs: number;

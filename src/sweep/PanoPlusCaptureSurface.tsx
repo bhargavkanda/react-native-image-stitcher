@@ -217,6 +217,13 @@ export interface PanoPlusCaptureSurfaceProps {
    */
   frameSource?: 'own' | 'host' | 'host-ar';
   /**
+   * M8 — told `true` once a finishing sweep has passed native's
+   * camera-release point (`PanoPlusStatus.cameraReleased`), and `false` again
+   * when the finish ends. `<Camera>` unmounts its camera for that window, as
+   * it does for a keyframe stitch.
+   */
+  onStitchingChange?: (stitching: boolean) => void;
+  /**
    * S7 — is the host's preview actually mounted right now? Only meaningful
    * with `frameSource="host"`, where it distinguishes "vision-camera is
    * drawing behind this surface" from the ~600 ms handoff window in which

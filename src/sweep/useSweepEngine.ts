@@ -140,6 +140,9 @@ export type PreviewSlot = {
   top: number;
 };
 
+/** M8 — how often a finishing sweep asks whether the camera is released. */
+const PANO_PLUS_RELEASE_POLL_MS = 100;
+
 export function useSweepEngine(
   props: PanoPlusCaptureSurfaceProps,
   ref: React.ForwardedRef<SurfaceControlHandle>,
@@ -189,6 +192,7 @@ export function useSweepEngine(
     imuSidecar = false,
     packOptions,
     onSweepingChange,
+    onStitchingChange,
     onPaintedChange,
     onEffectiveArmChange,
   } = props;
@@ -2717,6 +2721,37 @@ export function useSweepEngine(
     if (!enabled) return;
     onControlsStateRef.current?.({ canCapture, canFinalize: false, busy: shutterBusy });
   }, [canCapture, shutterBusy, enabled]);
+
+  // ── M8: FINISHING, THEN STITCHING ───────────────────────────────────────
+  // A stop tears the arm down and only then writes the canvas and the pack,
+  // which takes seconds. Until native says the camera is released the camera
+  // must stay mounted (native may still be disarming the plugin that reads
+  // it); from then on the host can unmount it for the rest of the finish —
+  // the keyframe engine's stitching rule. Read by poll: the push channel is
+  // the AR view's, and the status poll stops at 'finishing'. A finish that
+  // completes before a poll lands never unmounts the camera, which is fine.
+  const [cameraReleased, setCameraReleased] = useState(false);
+  useEffect(() => {
+    if (phase !== 'finishing') {
+      setCameraReleased(false);
+      return undefined;
+    }
+    if (!enabled || cameraReleased) return undefined;
+    let live = true;
+    const id = setInterval(() => {
+      void getPanoPlusStatus().then((s) => {
+        if (live && mountedRef.current && s?.cameraReleased === true) setCameraReleased(true);
+      });
+    }, PANO_PLUS_RELEASE_POLL_MS);
+    return () => { live = false; clearInterval(id); };
+  }, [phase, enabled, cameraReleased]);
+  const stitching = phase === 'finishing' && cameraReleased;
+  const onStitchingChangeRef = useRef(onStitchingChange);
+  onStitchingChangeRef.current = onStitchingChange;
+  useEffect(() => {
+    if (!enabled) return;
+    onStitchingChangeRef.current?.(stitching);
+  }, [stitching, enabled]);
 
   // THE COACHING CONTEXT — one object, read by BOTH the governor line and the
   // HUD so the two can never coach different gestures. `screenIsLandscape` is
