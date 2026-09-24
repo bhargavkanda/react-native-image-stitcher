@@ -28,6 +28,15 @@ internal enum class PanoStartMode {
     /** vision-camera's camera feeds the engine through the frame processor plugin. */
     VC_PLUGIN,
 
+    /**
+     * M3 backstop — a LIVE sweep on no plugin arm that was not given its own
+     * camera. `<Camera>` never sends that (its non-AR Android sweep is always
+     * the vc arm, or refused by name in JS), so reaching here means the arm
+     * was lost on the way; opening pano+'s own Camera2 client would put a
+     * second owner on the camera vision-camera holds. Refused by name.
+     */
+    REFUSE_LIVE_WITHOUT_CAMERA,
+
     /** Everything else: the recorder's own start path (recording, reference runs). */
     RECORDER,
 }
@@ -37,6 +46,7 @@ internal fun panoStartMode(
     poseSource: String,
     arcoreReference: ArCoreRefMode,
     vcPluginArm: Boolean,
+    allowOwnCamera: Boolean = false,
 ): PanoStartMode = when {
     live && poseSource == "ar" && arcoreReference != ArCoreRefMode.OFF ->
         PanoStartMode.REFUSE_OWN_ARCORE_ON_AR_ARM
@@ -44,5 +54,6 @@ internal fun panoStartMode(
     // Read WITH the pose arm, never alone (the 2026-09-10 regression: a flag
     // that selects an ARM read on its own sent an IMU sweep down the wrong one).
     vcPluginArm && poseSource == "imu" -> PanoStartMode.VC_PLUGIN
+    live && !allowOwnCamera -> PanoStartMode.REFUSE_LIVE_WITHOUT_CAMERA
     else -> PanoStartMode.RECORDER
 }

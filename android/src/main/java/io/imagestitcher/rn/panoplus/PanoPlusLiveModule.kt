@@ -372,6 +372,8 @@ class PanoPlusLiveModule(
         // the pose arm), and a module that filtered here would be a second
         // place that decision lives.
         bag.putBoolean("vcPluginArm", optBool(options, "vcPluginArm", false))
+        // M3 — see PanoPlusStartMode.REFUSE_LIVE_WITHOUT_CAMERA.
+        bag.putBoolean("allowOwnCamera", optBool(options, "allowOwnCamera", false))
         bag.putString("vcCameraId", optStr(options, "vcCameraId", "") ?: "")
 
         // ── Camera ───────────────────────────────────────────────────────

@@ -53,6 +53,13 @@ export interface SweepWorkletHandle {
   setActive: (on: boolean) => void;
   /** The plugin has acquired. */
   isReady: boolean;
+  /**
+   * Acquisition gave up after its bounded retry: the plugin is not in this
+   * build. Distinct from `!isReady`, which is also true for the first moments
+   * while it registers — a hold then is refused as "still loading", not as
+   * "not in this build".
+   */
+  unavailable: boolean;
 }
 
 /** The registered name — must match `PanoPlusSweepFrameProcessor.PLUGIN_NAME`. */
@@ -126,6 +133,8 @@ export function useSweepWorklet(enabled: boolean = true): SweepWorkletHandle {
   // certifying the bound could not see it because it never re-rendered.
   // Latched in a ref so the render path can read it.
   const acquireGaveUpRef = useRef(false);
+  // The render-visible twin of the ref, so a caller learns it gave up.
+  const [gaveUp, setGaveUp] = useState(false);
   if (enabled && pluginRef.current == null && !acquireGaveUpRef.current) {
     const p = acquire();
     if (p != null) {
@@ -139,7 +148,7 @@ export function useSweepWorklet(enabled: boolean = true): SweepWorkletHandle {
   useEffect(() => {
     // A switch back INTO the sweep is a fresh question: the registry may
     // have come up since. Re-open the budget, once, on that edge.
-    if (!enabled) { acquireGaveUpRef.current = false; return undefined; }
+    if (!enabled) { acquireGaveUpRef.current = false; setGaveUp(false); return undefined; }
     if (plugin != null) return undefined;
     let cancelled = false;
     let timerId: ReturnType<typeof setTimeout> | null = null;
@@ -152,7 +161,11 @@ export function useSweepWorklet(enabled: boolean = true): SweepWorkletHandle {
       // GIVE UP RATHER THAN POLL FOREVER. A plugin that has not registered
       // in 1.5 s is not in this build, and `isReady` stays false — which is
       // the correct answer, and the one the ownership predicate needs.
-      if (waitedMs >= ACQUIRE_BUDGET_MS) { acquireGaveUpRef.current = true; return; }
+      if (waitedMs >= ACQUIRE_BUDGET_MS) {
+        acquireGaveUpRef.current = true;
+        setGaveUp(true);
+        return;
+      }
       timerId = setTimeout(tryAcquire, ACQUIRE_RETRY_MS);
     };
     tryAcquire();
@@ -185,5 +198,10 @@ export function useSweepWorklet(enabled: boolean = true): SweepWorkletHandle {
   // worklet is rebuilt by identity (that is why `plugin` is in its deps at
   // all), and native reads the arm at `start()`, which is a deliberate
   // operator hold many renders later — not during this one.
-  return { call, setActive, isReady: pluginRef.current != null };
+  return {
+    call,
+    setActive,
+    isReady: pluginRef.current != null,
+    unavailable: plugin == null && gaveUp,
+  };
 }

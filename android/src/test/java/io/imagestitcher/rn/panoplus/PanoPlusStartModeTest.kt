@@ -42,9 +42,29 @@ class PanoPlusStartModeTest {
             PanoStartMode.VC_PLUGIN,
             panoStartMode(live = true, poseSource = "imu", arcoreReference = ArCoreRefMode.OFF, vcPluginArm = true),
         )
+    }
+
+    @Test
+    fun `M3 — a live IMU sweep on no plugin arm is refused unless it owns its camera`() {
+        // <Camera> never sends this: its non-AR Android sweep is the vc arm or
+        // refused in JS. Reaching here means the arm was lost on the way, and
+        // pano+'s own Camera2 client would be a second camera owner.
+        assertEquals(
+            PanoStartMode.REFUSE_LIVE_WITHOUT_CAMERA,
+            panoStartMode(live = true, poseSource = "imu", arcoreReference = ArCoreRefMode.OFF, vcPluginArm = false),
+        )
+        // A surface that OWNS its camera (standalone, or the DR-1a hatch) may.
         assertEquals(
             PanoStartMode.RECORDER,
-            panoStartMode(live = true, poseSource = "imu", arcoreReference = ArCoreRefMode.OFF, vcPluginArm = false),
+            panoStartMode(
+                live = true, poseSource = "imu", arcoreReference = ArCoreRefMode.OFF,
+                vcPluginArm = false, allowOwnCamera = true,
+            ),
+        )
+        // Recording sessions are untouched.
+        assertEquals(
+            PanoStartMode.RECORDER,
+            panoStartMode(live = false, poseSource = "imu", arcoreReference = ArCoreRefMode.OFF, vcPluginArm = false),
         )
     }
 

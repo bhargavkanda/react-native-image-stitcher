@@ -317,6 +317,13 @@ export interface PanoPlusCaptureSurfaceProps {
    *  guessing a focal length. */
   vcCameraId?: string;
   /**
+   * M3 — when the host owns the camera and a hold cannot be served by it
+   * right now, the NAMED reason (from `<Camera>`'s `sweepHostArmRefusal`). A
+   * hold is then refused with it, on screen and on `onFailure`, instead of
+   * the recorder opening a camera of its own.
+   */
+  hostArmRefusal?: { code: string; message: string } | null;
+  /**
    * Long-edge budget (px) for the AR arm's CPU image. Omit for the library's
    * 1920 default.
    *
@@ -778,6 +785,7 @@ export const PanoPlusCaptureSurface = forwardRef<
   attitudeMagFree,
   vcPluginArm,
   vcCameraId,
+  hostArmRefusal,
   frameSource = 'own',
   hostPreviewLive = true,
   hostPreviewError = '',
@@ -2359,6 +2367,23 @@ export const PanoPlusCaptureSurface = forwardRef<
     // instruction to native, and a recorder that opens its own client. So
     // the guard is derived from the same expression the bag uses, and the
     // two cannot drift.
+    // ⚠ M3: A NAMED REFUSAL FROM THE HOST COMES FIRST. `<Camera>` knows WHY
+    // its camera cannot serve this hold (plugin missing or loading, a zoom-
+    // only 0.5× lens, a drawable host processor, the camera still opening);
+    // saying so beats every generic message below, and it reaches the host
+    // on `onFailure` as well as the screen.
+    if (frameSource === 'host' && hostArmRefusal != null) {
+      busyRef.current = false;
+      setError(hostArmRefusal.message);
+      onFailure?.({
+        code: hostArmRefusal.code,
+        message: hostArmRefusal.message,
+        sessionDir: null,
+        counts: null,
+        abort: null,
+      } as PanoPlusFailure);
+      return;
+    }
     const willSendArm = vcPluginArm === true
       && typeof vcCameraId === 'string'
       && vcCameraId.length > 0
@@ -2529,6 +2554,13 @@ export const PanoPlusCaptureSurface = forwardRef<
       ...(willSendArm && frameSource === 'host'
         ? { vcPluginArm: true, vcCameraId }
         : {}),
+      // M3 — the recorder's backstop refuses a live sweep that neither runs
+      // on a plugin arm nor was explicitly given its own camera. Only a
+      // surface that OWNS its camera (`frameSource: 'own'` — a standalone
+      // mount, or `<Camera>`'s DR-1a reference hatch) says so; a host-camera
+      // sweep that somehow lost its arm is then refused natively rather than
+      // opening a second camera.
+      ...(frameSource === 'own' ? { allowOwnCamera: true } : {}),
       ...(meteringSettleMs != null ? { meteringSettleMs } : {}),
       // WHICH PRODUCER. Sent last, with the other sweep-level arms, and it is
       // `armNotice.effectivePoseSource` rather than the raw prop: when the IMU
@@ -2837,6 +2869,7 @@ export const PanoPlusCaptureSurface = forwardRef<
     tauUncorrected,
     vcCameraId,
     vcPluginArm,
+    hostArmRefusal,
     box.height,
     box.width,
   ]);

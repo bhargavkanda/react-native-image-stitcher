@@ -788,6 +788,7 @@ class PanoPlusAndroidRecorder(private val reactContext: ReactApplicationContext)
             lockCamera = optBool(options, "lockCamera", true),
             attitudeMagFree = optBool(options, "attitudeMagFree", false),
             vcPluginArm = optBool(options, "vcPluginArm", false),
+            allowOwnCamera = optBool(options, "allowOwnCamera", false),
             vcCameraId = optStr(options, "vcCameraId", "") ?: "",
             meteringMemoMaxAgeMs =
                 optDbl(options, "meteringMemoMaxAgeMs", 4000.0).coerceIn(0.0, 60000.0),
@@ -1634,6 +1635,13 @@ private class Config(
      * arm.
      */
     val vcPluginArm: Boolean,
+    /**
+     * M3 — the caller OWNS its camera (a standalone surface, or the DR-1a
+     * reference hatch) and may therefore run a live sweep on pano+'s own
+     * Camera2 client. Without it a live sweep on no plugin arm is refused by
+     * name ([PanoStartMode.REFUSE_LIVE_WITHOUT_CAMERA]).
+     */
+    val allowOwnCamera: Boolean,
     /**
      * The camera id vision-camera opened, so the recorder can derive
      * intrinsics from its `CameraCharacteristics` — which needs no open
@@ -2643,7 +2651,9 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
         // never sent — so the library-default AR sweep reached pano+'s own
         // SHARED_CAMERA arm (which has never painted a strip in 23 packs), and
         // even the plugin arm opened pano+'s ARCore channel first.
-        when (panoStartMode(cfg.live, cfg.livePoseSource, cfg.arcoreReference, cfg.vcPluginArm)) {
+        when (panoStartMode(
+            cfg.live, cfg.livePoseSource, cfg.arcoreReference, cfg.vcPluginArm, cfg.allowOwnCamera,
+        )) {
             PanoStartMode.AR_PLUGIN -> return startArPluginArm(promise)
             PanoStartMode.REFUSE_OWN_ARCORE_ON_AR_ARM -> return fail(
                 promise, "ar-arm-no-own-arcore",
@@ -2653,6 +2663,13 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
                     "reference series on a non-live session.",
             )
             PanoStartMode.VC_PLUGIN -> return startVcPluginArm(promise)
+            PanoStartMode.REFUSE_LIVE_WITHOUT_CAMERA -> return fail(
+                promise, "live-sweep-without-camera",
+                "a live sweep arrived with no plugin arm and without allowOwnCamera. The " +
+                    "library's non-AR sweep runs on vision-camera's camera (vcPluginArm) or is " +
+                    "refused in JS; opening pano+'s own Camera2 client here would be a second " +
+                    "owner of a camera vision-camera already holds.",
+            )
             PanoStartMode.RECORDER -> armRan = if (cfg.live) "imu" else ""
         }
 

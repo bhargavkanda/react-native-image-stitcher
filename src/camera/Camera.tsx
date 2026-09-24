@@ -136,6 +136,11 @@ export type SweepOptions = Omit<
   PanoPlusCaptureSurfaceProps,
   'onComplete' | 'onCancel' | 'onFailure'
   | 'frameSource' | 'hostPreviewLive' | 'vcPluginArm' | 'vcCameraId'
+  | 'hostArmRefusal'
+  // ⚠ D9 (M3): the pose arm and the lens follow `<Camera>`'s own AR pill and
+  // lens chip. A bag override made both dead controls on the sweep, and was
+  // the Android route into pano+'s own Camera2 client.
+  | 'poseSource' | 'lens'
   // ⚠ AND THE TWO PILL WRITERS. `<Camera>` draws the AR pill and the lens
   // chip now, and the surface gates its own clones on these being non-null
   // — so a bag carrying either one RE-CREATES the clone that produced two
@@ -146,7 +151,16 @@ export type SweepOptions = Omit<
   // Omitted here so it cannot be written at all, and still assigned after
   // the spread below — the same belt-and-braces the four above get.
   | 'onPoseSourceChange' | 'onLensChange'
->;
+> & {
+  /**
+   * @internal DEVICE-ROUND ONLY — do not ship. `'own'` hands the sweep its
+   * OLD camera (pano+'s own AVF session on iOS, its Camera2 client on
+   * Android) instead of `<Camera>`'s, so DR-1a can take same-scene reference
+   * captures from the arm the vision-camera arm replaces. Deleted with that
+   * arm (M6a/M6b).
+   */
+  frameSourceOverride?: 'own';
+};
 import { CameraShutter } from './CameraShutter';
 import { CameraView, type CameraViewProps } from './CameraView';
 import { CaptureHeader, type CaptureHeaderProps } from './CaptureHeader';
@@ -2975,13 +2989,13 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // S7 — the sweep's own worklet, gated by `setActive` so an idle screen
   // pays no per-frame JNI hop.
   //
-  // ⚠ AND GATED ON THE ENGINE, because the hook is called from every mode.
-  // It used to acquire unconditionally, and its retry loop had no bound: on
-  // any build where `panoplus_sweep_ingest` is not registered — which is
-  // every iOS build until that arm exists — photo, scan, doc and keyframe
-  // pano each carried a permanent ~62 Hz JS timer polling for a plugin they
-  // would never call.
-  const sweepDriver = useSweepWorklet(engine === 'sweep');
+  // ⚠ GATED ON PANORAMA MODE, NOT THE ENGINE (M3). The hook is called from
+  // every mode, and its retry loop once had no bound — a permanent ~62 Hz JS
+  // timer in photo, scan and doc modes on a build without the plugin. The
+  // loop is bounded now, and acquiring whenever panorama mode is on (rather
+  // than only on the sweep engine) keeps the composed frame processor's
+  // identity across an engine switch.
+  const sweepDriver = useSweepWorklet(enablePanoramaMode);
   const fpDriver = useFrameProcessorDriver({
     evalEveryNFrames:
       settings.frameSelection.flow?.evalEveryNFrames ??
@@ -3214,15 +3228,10 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       + 'JSDoc for the composition pattern).  AR-mode capture is '
       + 'unaffected (AR-session dispatch fans out to both '
       + 'first-party and host worklets independently).  '
-      + '\u26a0 AND WITH engine="sweep" IT TURNS THE VISION-CAMERA ARM OFF '
-      + 'ENTIRELY: the sweep is fed by the first-party worklet, and a host '
-      + 'processor replaces it, so `<Camera>` declines host camera ownership '
-      + 'and the sweep falls back to opening its own camera session. Your '
-      + 'worklet then does not run on the sweep screen at all. \u26a0 AND '
-      + 'COMPOSITION DOES NOT HELP HERE: the term is PRESENCE, not whether '
-      + 'you call us, so `useSweepWorklet()` inside your own worklet still '
-      + 'turns the arm off. A host frameProcessor and engine="sweep" are '
-      + 'mutually exclusive today; use one or the other on that screen.',
+      + 'With engine="sweep" your worklet runs ALONGSIDE the sweep\'s own '
+      + 'ingest (the sweep is always fed first-party); a DRAWABLE (Skia) '
+      + 'processor cannot be composed, and a sweep hold is then refused by '
+      + 'name.',
     );
   }
   // The Frame Processor worklet bound to vision-camera's Camera.
@@ -3232,12 +3241,46 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // natively, and a second pose synthesised here would silently disagree
   // with the one the engine actually uses.
   const sweepCall = sweepDriver.call;
-  const sweepFrameProcessor = useFrameProcessor((frame) => {
+  // ── ONE COMPOSED FRAME PROCESSOR (M3) ──────────────────────────────────
+  // vision-camera sets `enableFrameProcessor={frameProcessor != null}`, and
+  // toggling that REBINDS the camera's outputs. The processor used to be
+  // `host ?? (engine === 'sweep' ? sweep : keyframe)`, and the keyframe one is
+  // null until its plugin is ready — so an engine switch, or a plugin landing,
+  // rebuilt the session under the operator. Now there is ONE processor,
+  // present whenever panorama mode (or a host processor) is on, that feeds
+  // both engines; each engine's worklet is a no-op unless its own capture is
+  // live, so they cannot both ingest.
+  //
+  //   · The KEYFRAME feed keeps its documented contract: a host processor
+  //     REPLACES it, and the host composes by calling `stitcher.call(frame)`
+  //     itself (`useStitcherWorklet`). Feeding it here as well would
+  //     double-ingest every such host.
+  //   · The SWEEP feed is always first-party (its worklet is not public), so
+  //     a host processor and the sweep now run together — they used to be
+  //     mutually exclusive, and the host's presence sent the sweep to a
+  //     camera of its own.
+  //   · A DRAWABLE (Skia) host processor cannot be composed into a readonly
+  //     one: it is passed through as-is and a sweep hold is refused by name
+  //     (`sweepHostArmRefusal`).
+  const hostWorklet = hostFrameProcessor != null
+    && hostFrameProcessor.type !== 'drawable-skia'
+    ? hostFrameProcessor.frameProcessor
+    : null;
+  const keyframeCall = fpDriver.call;
+  const composedFrameProcessor = useFrameProcessor((frame) => {
     'worklet';
+    if (hostWorklet != null) {
+      hostWorklet(frame);
+    } else {
+      (keyframeCall as unknown as (f: unknown) => void)(frame);
+    }
     (sweepCall as unknown as (f: unknown) => void)(frame);
-  }, [sweepCall]);
-  const effectiveFrameProcessor = hostFrameProcessor
-    ?? (engine === 'sweep' ? sweepFrameProcessor : fpDriver.frameProcessor);
+  }, [hostWorklet, keyframeCall, sweepCall]);
+  const effectiveFrameProcessor = hostFrameProcessor?.type === 'drawable-skia'
+    ? hostFrameProcessor
+    : (enablePanoramaMode || hostFrameProcessor != null)
+      ? composedFrameProcessor
+      : undefined;
 
   // ── Keyframe thumbnails ──────────────────────────────────────────────
   // perf-3a change 4: Camera.tsx no longer keeps its OWN
@@ -5029,31 +5072,34 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // Reading the effective source reproduces the sweep's whole "0.5× ⇒
   // decoupled arm" policy as a CONSEQUENCE of Pano's rule rather than as a
   // second copy of it.
-  const sweepPoseSource = sweepMergedPoseSource(
-    sweep?.poseSource,
-    effectiveCaptureSource === 'ar',
-  );
-  const sweepLens = sweepMergedLens(sweep?.lens, lens);
-  const hostOwnsSweepCameraLive = sweepHostOwnsCamera(sweepOwnershipInput({
+  // THE CAMERA DECIDES THE ARM (M3/D9): `isAR` ⇒ 'ar', else 'imu', and the
+  // lens is `<Camera>`'s own chip. No host bag override — see
+  // `sweepHostOwnsCamera`.
+  const sweepPoseSource: 'ar' | 'imu' = isAR ? 'ar' : 'imu';
+  const sweepLens: 'wide' | 'ultraWide' = lens === '0.5x' ? 'ultraWide' : 'wide';
+  const hostOwnsSweepCameraLive = sweepHostOwnsCamera({
     isAR,
     platformOS: Platform.OS,
-    cameraUnmounting: cameraShouldUnmount(
-      inFlightTransition,
-      arSupportPending,
-      statusPhase,
-      sweepHandoffPending,
-    ),
-    bagPoseSource: sweep?.poseSource,
-    // ⚠ EFFECTIVE, matching `sweepPoseSource` above. Passing the raw
-    // `arPreference` here is what silently downgraded every 0.5x sweep with
-    // the AR pill on from the vc arm to a self-opened Camera2 session.
-    arEffective: effectiveCaptureSource === 'ar',
-    pluginReady: sweepDriver.isReady,
-    deviceId: capture.device?.id ?? '',
-    captureMode: capture.captureMode,
-    lens,
-    hostFrameProcessorPresent: hostFrameProcessor != null,
-  }));
+    frameSourceOverride: sweep?.frameSourceOverride,
+  });
+  // …and when the host camera cannot serve a hold right now, the hold is
+  // REFUSED BY NAME rather than handed to another camera.
+  const sweepHostRefusal = hostOwnsSweepCameraLive
+    ? sweepHostArmRefusal({
+      hostProcessorDrawable: hostFrameProcessor?.type === 'drawable-skia',
+      captureMode: capture.captureMode,
+      lens,
+      pluginReady: sweepDriver.isReady,
+      pluginUnavailable: sweepDriver.unavailable,
+      cameraUnmounting: cameraShouldUnmount(
+        inFlightTransition,
+        arSupportPending,
+        statusPhase,
+        sweepHandoffPending,
+      ),
+      deviceId: capture.device?.id ?? '',
+    })
+    : null;
 
   const prevOwnsRef = useRef(hostOwnsSweepCameraLive);
   useEffect(() => {
@@ -5309,17 +5355,9 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             // reachable: `frameSource: 'host'` with no preview mounted is a
             // black screen with the explainer suppressed.
             //
-            // `poseSource` is the MERGED value the predicate ALSO judged,
-            // so the arm cannot drift between this line and that one.
-            //
-            // ⚠ `lens` IS MERGED HERE AND **NOT** IN THE PREDICATE, and that
-            // asymmetry is deliberate rather than an oversight. This prop
-            // says which lens the SURFACE should show; the predicate's term
-            // asks which PHYSICAL DEVICE is mounted, and only `<Camera>`'s
-            // own `lens` moves that (`useCapture({ lens })`). Feeding the
-            // merged value to the predicate let a bag `lens` disarm the
-            // multicam guard while the device stayed where it was. See
-            // `sweepOwnershipInput`.
+            // `poseSource` and `lens` follow `<Camera>`'s own camera state
+            // (M3/D9) — the same state the predicate judged, so the arm
+            // cannot drift between this line and that one.
             frameSource={surfaceFrameSource}
             // The handoff's other half: `'host'` says who owns the camera,
             // this says whether it is on screen yet. See
@@ -5332,6 +5370,10 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             hostPreviewError={hostPreviewError}
             vcPluginArm={mountHostPreview}
             vcCameraId={mountHostPreview ? (capture.device?.id ?? '') : ''}
+            // The NAMED reason a hold on the host camera cannot start now —
+            // the surface refuses with it rather than opening a camera of
+            // its own. See `sweepHostArmRefusal`.
+            hostArmRefusal={sweepHostRefusal}
             poseSource={sweepPoseSource}
             lens={sweepLens}
             // ⚠ THE ARM THAT WILL REALLY RUN, COMING BACK UP. The fallback is
@@ -6206,140 +6248,45 @@ export const _extractPanoramaOverridesForTests = extractPanoramaOverrides;
 export const _stitcherForNativeForTests = stitcherForNative;
 
 /**
- * sweepHostOwnsCamera — on `engine="sweep"`, will the embedding `<Camera>`'s
- * own `<CameraView>` be the camera, with the sweep fed from it by the
- * `panoplus_sweep_ingest` frame processor?
+ * sweepHostOwnsCamera — on `engine="sweep"`, is `<Camera>`'s own
+ * `<CameraView>` the camera the sweep runs on?
  *
- * ── WHY THIS IS ONE FUNCTION AND NOT FOUR CONDITIONS ────────────────────
+ * ── M3 (2026-09-24): ON ANDROID NON-AR, ALWAYS ─────────────────────────
  *
- * S7 asked this question in three places with three different answers:
- * `!isAR` chose whether to render the preview, `!isAR && pluginReady` chose
- * whether to ask native for the arm, and the main tree's handoff guard
- * applied to neither. An adversarial review found three reachable states in
- * which they disagree, and every disagreement lands the same way — vision-
- * camera holds the back camera while the native recorder opens its own
- * session against it. Two stacks, one camera, on a phone.
+ * It used to answer "no" whenever any of six conditions failed — the plugin
+ * not yet acquired, no device id, the multicam 0.5× lens, a host frame
+ * processor, a camera transition in flight, AR preferred but unavailable —
+ * and "no" handed the sweep to pano+'s OWN Camera2 client: a second camera
+ * owner, with its own viewfinder, behind the engine the operator had picked.
+ * Each of those is now impossible by construction or a NAMED REFUSAL of the
+ * hold (`sweepHostArmRefusal`), and which camera the sweep runs on follows
+ * `<Camera>`'s own state and nothing else:
  *
- * So it is one boolean now. A disagreement is no longer expressible.
+ *   · AR     → the stitcher's AR session (this predicate is not asked);
+ *   · non-AR → vision-camera's `<CameraView>` — on Android now, on iOS with M5.
  *
- * Each term below is a defect that was reachable, not a precaution:
+ * The pose arm follows the same state: `isAR` ⇒ 'ar', else 'imu' (D9 — the
+ * host bag's `poseSource`/`lens` overrides are gone; they made `<Camera>`'s AR
+ * pill and lens chip dead controls on the sweep, and were the route into
+ * Camera2).
  *
- *  * **`platformOS === 'android'` — a REGRESSION S7 INTRODUCED, and the
- *    reason this function exists.** `vcPluginArm` / `vcCameraId` are read by
- *    `PanoPlusAndroidRecorder` and by nothing whatsoever under `ios/`: the
- *    iOS bridge knows two producers, `"ar"` and `"imu"`, and `"imu"`
- *    unconditionally starts `RNISPanoAvfSource`, which opens its OWN
- *    `AVCaptureSession` on a physical back device. Before S7 that was the
- *    only session on the sweep screen. S7 mounted `<CameraView>` beside it.
- *    ⚠ And it does NOT fail loudly: `canAddInput` tests configuration
- *    compatibility, not runtime exclusivity, so the second open usually
- *    SUCCEEDS and one of the two sessions is interrupted afterwards — a dead
- *    preview, not an error code. iOS stays on the arm that works until
- *    `PanoPlusBridge` grows the fourth start mode Android has.
- *
- *  * **`sweepPoseSource === 'imu'` — NOT implied by `!isAR`, and the gap is
- *    reachable.** `deriveEffectiveCaptureSource` returns `'non-ar'` when AR
- *    is merely UNSUPPORTED or the lens is 0.5×, so `isAR` is false on plenty
- *    of sweeps the operator has AR switched on for. Meanwhile the surface
- *    forwards `vcPluginArm` only on the IMU arm — because the recorder's own
- *    gate is `cfg.vcPluginArm && cfg.livePoseSource == "imu"`. So with AR
- *    preferred but unavailable, the old predicate declared "the host owns the
- *    camera", `<CameraView>` mounted, the surface drew no viewfinder, the arm
- *    flag was dropped on the way out — and the recorder opened its own camera
- *    anyway. Every 0.5× sweep with the AR pill on took that path.
- *
- *    ⚠ IT IS THE MERGED VALUE, not `arPreference`. `poseSource` is a host-
- *    settable key in the `sweep` bag and the bag is spread over these props,
- *    so reading `<Camera>`'s own state here would answer a question about a
- *    value the surface is not going to receive — which is the same
- *    two-places-one-fact defect one level up.
- *
- *  * **`!cameraUnmounting`** — the v0.14.2 camera-handoff race, reintroduced.
- *    `isAR` is false until the async `isSupported()` probe settles, so with
- *    AR preferred the sweep cell mounted `<CameraView>` for the width of the
- *    probe. That is precisely the window in which vision-camera's session
- *    grabs the camera and the switch to AR 200-500 ms later fails with ARKit
- *    "Required sensor failed". The main tree has guarded this for a year;
- *    the sweep cell was not using the guard.
- *
- *  * **`pluginReady` and a non-empty `deviceId`** — the arm cannot be served
- *    without a plugin handle and an id to read intrinsics from, and when it
- *    is not served the recorder opens its own camera anyway. Declaring the
- *    host owns it in that state tells the surface to draw no viewfinder
- *    while native takes the device: a black screen over a live sweep.
- *
- *  * **not multicam away from the wide baseline** — S6 refuses a frame on
- *    iOS precisely because a VIRTUAL multi-camera container switches its
- *    active constituent under zoom with no notification. In `'multicam'`
- *    mode `capture.device.id` IS that logical container, and the recorder
- *    derives intrinsics from its `CameraCharacteristics` assuming the default
- *    crop. Refusing the hazard on one platform and handing it to the other
- *    would be the same bug twice.
- *
- * Pure + exported for test, for the same reason `cameraShouldUnmount` is:
- * the lib's jest config cannot drive `<Camera>`'s vision-camera mocks, so a
- * render test cannot reach most of these states. A truth table can reach all
- * of them.
+ * The ONE exception is the internal `frameSourceOverride: 'own'`, which exists
+ * only so device round DR-1a can take same-scene reference captures from the
+ * old arm, and is deleted with that arm (M6).
  */
 export interface SweepHostOwnsCameraInput {
-  /** The sweep resolved to the ARKit/ARCore arm, which feeds itself. */
   isAR: boolean;
-  /**
-   * The pose arm the surface will ACTUALLY be given — `<Camera>`'s
-   * `arPreference`, already merged with any host override from the `sweep`
-   * bag. ⚠ NOT the same question as `isAR`, and the gap between them is a
-   * reachable collision; see the term's note below.
-   */
-  sweepPoseSource: 'ar' | 'imu';
   /** `Platform.OS`. */
   platformOS: string;
-  /** `cameraShouldUnmount(...)` — a switch, probe or stitch is in flight. */
-  cameraUnmounting: boolean;
-  /** The `panoplus_sweep_ingest` plugin handle has been acquired. */
-  pluginReady: boolean;
-  /** `capture.device?.id ?? ''`. */
-  deviceId: string;
-  /** How lenses are switched for the mounted device. */
-  captureMode: CaptureDeviceMode;
-  /** The lens the operator chose. */
-  lens: '1x' | '0.5x';
-  /**
-   * The host supplied its own `frameProcessor` prop.
-   *
-   * ⚠ IT SILENTLY REPLACES OURS. `effectiveFrameProcessor` is
-   * `hostFrameProcessor ?? (engine === 'sweep' ? sweepFrameProcessor : …)`,
-   * so a host that sets both `frameProcessor` and `engine="sweep"` gets its
-   * own worklet bound to `<CameraView>` and the sweep's ingest worklet
-   * bound to nothing. Without this term the predicate still said "the host
-   * owns the camera", so the recorder was told to open NOTHING and wait to
-   * be fed — by a plugin no frame will ever reach. That is the
-   * armed-with-no-feeder failure the AR arm already shipped once, and it
-   * presents as `vcFramesOffered == 0`, i.e. as a plugin that never mounted.
-   */
-  hostFrameProcessorPresent: boolean;
+  /** `sweep?.frameSourceOverride` — the DR-1a reference hatch, or undefined. */
+  frameSourceOverride: 'own' | undefined;
 }
 
-/**
- * The same keys at RUNTIME, because a TypeScript parameter type is erased
- * and a table test cannot enumerate it.
- *
- * ⚠ AND EXHAUSTIVENESS IS ENFORCED BY `tsc`, NOT BY EYE — see the check
- * below. The truth table reads this list, so a term added to the interface
- * without a falsifying value fails the build and then the table, rather
- * than sitting in the predicate unexercised. An earlier version of that
- * table compared two literals in the same test file and claimed to be
- * derived from the predicate; it was not, and could not have been.
- */
+/** The keys at RUNTIME, for the truth table; exhaustiveness enforced by tsc. */
 export const SWEEP_HOST_OWNS_INPUT_KEYS = [
   'isAR',
-  'sweepPoseSource',
   'platformOS',
-  'cameraUnmounting',
-  'pluginReady',
-  'deviceId',
-  'captureMode',
-  'lens',
-  'hostFrameProcessorPresent',
+  'frameSourceOverride',
 ] as const;
 
 // A key missing from the list above makes this line a type error.
@@ -6350,102 +6297,14 @@ type _SweepOwnsKeysAreExhaustive =
 const _sweepOwnsKeysAreExhaustive: _SweepOwnsKeysAreExhaustive = true;
 void _sweepOwnsKeysAreExhaustive;
 
-/**
- * sweepOwnershipInput — build `sweepHostOwnsCamera`'s argument list from what
- * `<Camera>` actually has.
- *
- * ⚠ THE WIRING IS WHERE THE BUGS WERE, WHICH IS WHY IT IS A FUNCTION. The
- * predicate has had a truth table for three review rounds; both defects that
- * reached a commit were in the argument list, invisible to it:
- *
- *   * `sweepPoseSource` was `<Camera>`'s own `arPreference` rather than the
- *     MERGED value — and the `sweep` bag is spread over the surface's props,
- *     so the host's key wins. The predicate judged one arm while the surface
- *     ran another, dropped the vc flag on the way out, and the recorder
- *     opened its own camera against the one vision-camera held.
- *   * The multicam term was the MERGED lens — but the physical device and
- *     its zoom come from `useCapture({ lens })`, which reads `<Camera>`'s
- *     own state. So `sweep={{ lens: 'wide' }}` disarmed the virtual-
- *     constituent guard while the device stayed at 0.5×.
- *
- * Stated as one rule: a term takes the value of whatever it is a question
- * ABOUT. "Which arm will run" is the surface's, so it is merged. "Which
- * physical device is mounted" is `<Camera>`'s, so it is not.
- */
-export function sweepOwnershipInput(src: {
-  isAR: boolean;
-  platformOS: string;
-  cameraUnmounting: boolean;
-  /** `sweep?.poseSource` — the host's override, or undefined. */
-  bagPoseSource: 'ar' | 'imu' | undefined;
-  /**
-   * ⚠ THE **EFFECTIVE** AR VALUE, NOT THE RAW TOGGLE — and the name says so
-   * because the raw one is what the third defect of this shape was made of.
-   *
-   * `deriveEffectiveCaptureSource` returns 'non-ar' at 0.5x (and on a device
-   * with no ARKit/ARCore) WITHOUT mutating `arPreference`. The surface three
-   * lines up already merges against the effective value; this term read the
-   * raw toggle, so with the AR pill ON at 0.5x the two disagreed: the surface
-   * ran the imu arm while the predicate judged 'ar', returned false, and the
-   * host never took the camera. The sweep then opened its own Camera2
-   * session instead of the vc arm — a silent DOWNGRADE, on every 0.5x sweep
-   * with AR on, with `tsc` clean and every predicate case green.
-   */
-  arEffective: boolean;
-  pluginReady: boolean;
-  deviceId: string;
-  captureMode: CaptureDeviceMode;
-  /** ⚠ `<Camera>`'s OWN lens — the one that chose the device. */
-  lens: CameraLens;
-  hostFrameProcessorPresent: boolean;
-}): SweepHostOwnsCameraInput {
-  return {
-    isAR: src.isAR,
-    // MERGED: this asks which arm the SURFACE will run.
-    sweepPoseSource: sweepMergedPoseSource(src.bagPoseSource, src.arEffective),
-    platformOS: src.platformOS,
-    cameraUnmounting: src.cameraUnmounting,
-    pluginReady: src.pluginReady,
-    deviceId: src.deviceId,
-    captureMode: src.captureMode,
-    // NOT merged: this asks which physical device is mounted, and only
-    // `<Camera>`'s own lens moves that.
-    lens: src.lens === '0.5x' ? '0.5x' : '1x',
-    hostFrameProcessorPresent: src.hostFrameProcessorPresent,
-  };
-}
-
 function sweepHostOwnsCamera(input: SweepHostOwnsCameraInput): boolean {
-  return (
-    !input.isAR
-    && input.sweepPoseSource === 'imu'
+  return !input.isAR
     && input.platformOS === 'android'
-    && !input.cameraUnmounting
-    && input.pluginReady
-    && input.deviceId !== ''
-    && !(input.captureMode === 'multicam' && input.lens !== '1x')
-    && !input.hostFrameProcessorPresent
-  );
+    && input.frameSourceOverride !== 'own';
 }
 
-/**
- * What the surface will actually be given for `poseSource` / `lens`, host
- * override included.
- *
- * ⚠ PURE AND EXPORTED BECAUSE THE RENDER HARNESS CANNOT SEE THE FIX. The
- * merge exists so `sweepHostOwnsCamera` judges the value the SURFACE
- * receives rather than `<Camera>`'s own state — but the harness pins three
- * of that predicate's other terms false, so reverting the merge leaves
- * every mounted assertion green. Measured: the whole suite passed with it
- * reverted. A two-line derivation with no falsifiable test is how the first
- * version of this collapse shipped a claim it could not support.
- */
-export function sweepMergedPoseSource(
-  bagPoseSource: 'ar' | 'imu' | undefined,
-  arPreference: boolean,
-): 'ar' | 'imu' {
-  return bagPoseSource ?? (arPreference ? 'ar' : 'imu');
-}
+/** @internal test-only — see `sweepHostOwnsCamera`. */
+export const _sweepHostOwnsCameraForTests = sweepHostOwnsCamera;
 
 /**
  * The lens the RUNNING arm will actually open — the value the chip paints.
@@ -6511,16 +6370,83 @@ function emitUri<T>(result: T): T {
   return { ...result, uri: toFileUri(r.uri) };
 }
 
-/** Twin of `sweepMergedPoseSource` for the lens. */
-export function sweepMergedLens(
-  bagLens: 'wide' | 'ultraWide' | undefined,
-  lens: CameraLens,
-): 'wide' | 'ultraWide' {
-  return bagLens ?? (lens === '0.5x' ? 'ultraWide' : 'wide');
+/** Why a hold on the host camera cannot start right now — or null. */
+export interface SweepHostArmRefusal {
+  /** Carried on the sweep's `onFailure` / `<Camera>`'s `onError` cause. */
+  code: string;
+  /** Shown on screen and carried on the error. */
+  message: string;
 }
 
-/** @internal test-only — see `sweepHostOwnsCamera`. */
-export const _sweepHostOwnsCameraForTests = sweepHostOwnsCamera;
+export interface SweepHostArmRefusalInput {
+  /** The host passed a `drawable-skia` frame processor. */
+  hostProcessorDrawable: boolean;
+  captureMode: CaptureDeviceMode;
+  /** ⚠ `<Camera>`'s OWN lens — the one that chose the device. */
+  lens: CameraLens;
+  /** The `panoplus_sweep_ingest` plugin handle has been acquired. */
+  pluginReady: boolean;
+  /** Acquisition gave up: the plugin is not in this build. */
+  pluginUnavailable: boolean;
+  /** `cameraShouldUnmount(...)` — a switch, probe or stitch is in flight. */
+  cameraUnmounting: boolean;
+  /** `capture.device?.id ?? ''`. */
+  deviceId: string;
+}
+
+/**
+ * sweepHostArmRefusal — the NAMED reason a sweep hold on the host camera must
+ * be refused, or null when it can run.
+ *
+ * Every entry is one of the six conditions that used to send the sweep to
+ * pano+'s own camera instead. Refusing says what is wrong; the fallback hid
+ * it behind a different camera. Ordered so the most actionable reason wins.
+ */
+export function sweepHostArmRefusal(
+  i: SweepHostArmRefusalInput,
+): SweepHostArmRefusal | null {
+  if (i.hostProcessorDrawable) {
+    return {
+      code: 'panoplus-refused-drawable-processor',
+      message: 'This sweep cannot start: the screen\'s frame processor draws '
+        + 'on the preview (a Skia processor), and the sweep cannot share the '
+        + 'camera with one. Use a read-only frame processor on this screen.',
+    };
+  }
+  if (i.captureMode === 'multicam' && i.lens !== '1x') {
+    // D13: until the arm reads which physical lens a zoomed logical camera
+    // is streaming from (M4), the focal length would come from the wrong lens
+    // while the canvas reports success.
+    return {
+      code: 'panoplus-refused-zoom-lens',
+      message: 'This sweep cannot start at 0.5× on this phone: its ultra-wide '
+        + 'is reached by zooming a combined camera, and the sweep cannot yet '
+        + 'tell which lens a frame came from. Switch to 1× for the sweep.',
+    };
+  }
+  if (i.pluginUnavailable) {
+    return {
+      code: 'panoplus-unavailable',
+      message: 'This sweep cannot start: its frame processor '
+        + '(panoplus_sweep_ingest) is not in this build.',
+    };
+  }
+  if (!i.pluginReady) {
+    return {
+      code: 'panoplus-not-ready',
+      message: 'This sweep cannot start yet: it is still loading. Try again '
+        + 'in a moment.',
+    };
+  }
+  if (i.cameraUnmounting || i.deviceId === '') {
+    return {
+      code: 'panoplus-camera-not-ready',
+      message: 'This sweep cannot start yet: the camera is still opening. '
+        + 'Try again in a moment.',
+    };
+  }
+  return null;
+}
 
 /**
  * sweepCameraHandoff — resolve the live ownership answer, the in-flight sweep

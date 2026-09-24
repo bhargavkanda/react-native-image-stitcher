@@ -785,9 +785,12 @@ describe('<Camera engine="sweep">', () => {
     act(() => { tree.unmount(); });
   });
 
-  it('lets the host override a default rather than being overridden by it', () => {
-    const tree = render({ engine: 'sweep', sweep: { poseSource: 'ar' } });
-    expect(surfaceProps(tree).poseSource).toBe('ar');
+  it('D9: the pose arm is <Camera>\'s own — a bag poseSource no longer overrides it', () => {
+    // It made the AR pill a dead control on the sweep, and on Android it was
+    // the route into pano+'s own Camera2 client. The key is no longer typed;
+    // a stale host that still sends it is ignored.
+    const tree = render({ engine: 'sweep', sweep: { poseSource: 'ar' } as never });
+    expect(surfaceProps(tree).poseSource).toBe('imu');
     act(() => { tree.unmount(); });
   });
 
@@ -923,19 +926,17 @@ describe('<Camera engine="sweep">', () => {
     expect(p.vcCameraId).toBe('');
   });
 
-  it('⚑ a bag-supplied poseSource reaches the OWNERSHIP predicate, not just the surface', () => {
-    // The other half. `poseSource` IS legitimately host-settable — it is the
-    // operator's arm — but the surface forwards `vcPluginArm` only on the IMU
-    // arm, so a bag that sets `'ar'` while the predicate reads `<Camera>`'s
-    // own `arPreference` produces the collision one layer down: host owns the
-    // camera, arm flag dropped on the way out, recorder opens its own.
-    // `<Camera>` therefore MERGES first and derives ownership from the merged
-    // value, so these two can never disagree.
+  it('⚑ D9: a bag poseSource cannot pull the arm away from the camera the predicate judged', () => {
+    // The collision this used to guard (bag 'ar' vs a predicate reading
+    // `<Camera>`'s own state) cannot arise any more: both read `<Camera>`'s
+    // own AR state, and the bag key is gone.
     const p = surfaceProps(render({
-      engine: 'sweep', sweep: { poseSource: 'ar' as const },
+      engine: 'sweep', sweep: { poseSource: 'ar' } as never,
     }));
-    expect(p.poseSource).toBe('ar');          // the host's choice is honoured
-    expect(p.frameSource).toBe('own');        // …and ownership followed it
+    expect(p.poseSource).toBe('imu');
+    // iOS (this harness): the vision-camera arm lands with M5, so the surface
+    // still owns its camera here.
+    expect(p.frameSource).toBe('own');
     expect(p.vcPluginArm).toBe(false);
   });
 
@@ -957,18 +958,12 @@ describe('<Camera engine="sweep">', () => {
     ]) {
       const tree = render(props);
       const p = surfaceProps(tree);
-      // The predicate's answer for the state this harness pins: iOS, no
-      // device, no plugin — three independent falses.
+      // The predicate's answer for the state this harness pins: iOS, whose
+      // vision-camera arm lands with M5.
       const owns = hostOwns({
         isAR: false,
-        sweepPoseSource: 'imu',
         platformOS: 'ios',
-        cameraUnmounting: false,
-        pluginReady: false,
-        deviceId: '',
-        captureMode: 'wide-only',
-        lens: '1x',
-        hostFrameProcessorPresent: false,
+        frameSourceOverride: undefined,
       });
       expect(owns).toBe(false);
       expect(p.frameSource).toBe(owns ? 'host' : 'own');

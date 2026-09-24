@@ -581,7 +581,8 @@ describe('⚑ THE OWNERSHIP FLIP — a handoff, not an instant swap', () => {
     // assertions below exist so a fourth cannot happen silently.
     const tree = await render({
       defaultLens: '0.5x' as const,
-      sweep: { lens: 'wide' as const },
+      // D9: the bag's `lens` is no longer typed and no longer read.
+      sweep: { lens: 'wide' } as never,
     });
     const p = surfaceProps(tree);
     // ⚠ THE PRECONDITION IS THE DEVICE, NOT THE PROP. An earlier draft
@@ -592,9 +593,13 @@ describe('⚑ THE OWNERSHIP FLIP — a handoff, not an instant swap', () => {
     expect(selectCaptureDevice([MULTICAM] as never, {
       lens: '0.5x', platform: 'android',
     } as never).mode).toBe('multicam');
-    expect(p.lens).toBe('wide');
-    expect(p.vcPluginArm).toBe(false);      // the bag bought no ownership
-    expect(p.frameSource).toBe('own');
+    // M3/D9: the lens is `<Camera>`'s own (0.5×); the host keeps the camera
+    // (no fallback to a camera of the sweep's own), and the hold is REFUSED
+    // BY NAME until the arm can tell which lens a zoomed logical camera is
+    // streaming from (D13).
+    expect(p.lens).toBe('ultraWide');
+    expect(p.frameSource).toBe('host');
+    expect((p.hostArmRefusal as { code?: string } | null)?.code).toBe('panoplus-refused-zoom-lens');
     act(() => { tree.unmount(); });
   });
 });
@@ -1160,6 +1165,73 @@ describe('⚑ one camera, one format — the hardware list reaches BOTH cells', 
     )).toHaveLength(0);
     await act(async () => { resolveProbe(HW_REPORT); await Promise.resolve(); await Promise.resolve(); });
     expect([innerFormat(tree).videoWidth, innerFormat(tree).videoHeight]).toEqual([1440, 1080]);
+    act(() => { tree.unmount(); });
+  });
+});
+
+// ── M3: ONE COMPOSED FRAME PROCESSOR ────────────────────────────────────────
+//
+// vision-camera sets `enableFrameProcessor={frameProcessor != null}`, and a
+// flip of that REBINDS the camera's outputs. The processor used to be
+// `host ?? (engine === 'sweep' ? sweep : keyframe)`, with the keyframe one
+// null until its plugin was ready — so switching engines rebuilt the session.
+describe('M3 — the frame processor vision-camera sees is one composed worklet', () => {
+  const vcAny = require('react-native-vision-camera') as {
+    Camera: unknown;
+    useFrameProcessor: unknown;
+  };
+  const realUseFP = vcAny.useFrameProcessor;
+  beforeEach(() => {
+    // Memoised by deps, as the real hook is — identity is the property here.
+    vcAny.useFrameProcessor = (fn: unknown, deps: unknown[]) =>
+      // eslint-disable-next-line react-hooks/rules-of-hooks, react-hooks/exhaustive-deps
+      React.useMemo(() => ({ frameProcessor: fn, type: 'readonly' }), deps);
+  });
+  afterEach(() => { vcAny.useFrameProcessor = realUseFP; });
+
+  const fpOf = (t: ReactTestRenderer): unknown => {
+    const cams = t.root.findAll((n) => n.type === vcAny.Camera);
+    expect(cams.length).toBe(1);
+    return cams[0]!.props.frameProcessor;
+  };
+
+  it('is present on BOTH engines and is the SAME object across a switch', async () => {
+    const tree = await render({ engine: 'keyframe', enablePanoramaMode: true });
+    const kf = fpOf(tree);
+    expect(kf).not.toBeUndefined();
+    await setEngine(tree, 'sweep', { enablePanoramaMode: true });
+    // Let the ownership settle window pass so the host preview is mounted.
+    await act(async () => { jest.advanceTimersByTime(700); await Promise.resolve(); });
+    const sw = fpOf(tree);
+    expect(sw).toBe(kf);
+    await setEngine(tree, 'keyframe', { enablePanoramaMode: true });
+    await act(async () => { jest.advanceTimersByTime(700); await Promise.resolve(); });
+    expect(fpOf(tree)).toBe(kf);
+    act(() => { tree.unmount(); });
+  });
+
+  it('a host processor runs WITH the sweep — the host no longer costs the sweep its camera', async () => {
+    const hostCalls: string[] = [];
+    const host = { type: 'readonly', frameProcessor: () => { hostCalls.push('host'); } };
+    const tree = await render({ engine: 'sweep', frameProcessor: host });
+    await act(async () => { jest.advanceTimersByTime(700); await Promise.resolve(); });
+    const surface = tree.root.findByType(PanoPlusCaptureSurface);
+    expect(surface.props.frameSource).toBe('host');
+    expect(surface.props.hostArmRefusal).toBeNull();
+    const fp = fpOf(tree) as { frameProcessor: (f: unknown) => void };
+    expect(fp).not.toBe(host);           // composed, not replaced
+    fp.frameProcessor({});
+    expect(hostCalls).toEqual(['host']);
+    act(() => { tree.unmount(); });
+  });
+
+  it('a DRAWABLE host processor is passed through, and a sweep hold is refused by name', async () => {
+    const host = { type: 'drawable-skia', frameProcessor: () => undefined };
+    const tree = await render({ engine: 'sweep', frameProcessor: host });
+    await act(async () => { jest.advanceTimersByTime(700); await Promise.resolve(); });
+    expect(fpOf(tree)).toBe(host);
+    const surface = tree.root.findByType(PanoPlusCaptureSurface);
+    expect(surface.props.hostArmRefusal?.code).toBe('panoplus-refused-drawable-processor');
     act(() => { tree.unmount(); });
   });
 });

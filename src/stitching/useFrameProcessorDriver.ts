@@ -122,6 +122,14 @@ export interface FrameProcessorDriverHandle {
    * processor in that window.
    */
   frameProcessor: ReadonlyFrameProcessor | null;
+  /**
+   * The first-party keyframe worklet itself, for a caller that composes it
+   * into ONE frame processor (`<Camera>` does, so vision-camera's
+   * frame-processor output is never toggled by the engine or by this plugin
+   * becoming ready). A no-op until the plugin is ready and while ingest is
+   * inactive, so it is always safe to call.
+   */
+  call: (frame: Parameters<ReturnType<typeof useStitcherWorklet>['call']>[0]) => void;
 
   /**
    * v0.24.3 — mirrors `useStitcherWorklet().acquisitionFailed`: `true`
@@ -195,8 +203,9 @@ export function useFrameProcessorDriver(
     stop,
     resetCadence,
     frameProcessor: stitcher.isReady ? frameProcessor : null,
+    call: stitcher.call,
     acquisitionFailed: stitcher.acquisitionFailed,
     get isRunning() { return isRunningRef.current; },
   }), [start, stop, resetCadence, frameProcessor, stitcher.isReady,
-    stitcher.acquisitionFailed]);
+    stitcher.call, stitcher.acquisitionFailed]);
 }
