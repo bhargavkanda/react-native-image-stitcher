@@ -120,14 +120,8 @@ public final class RNISPanoAvfSource: NSObject, AVCaptureVideoDataOutputSampleBu
     /// handlers bounce here asynchronously.  Nothing on this queue ever hops
     /// back onto it, so there is no re-entrancy to deadlock on.
     private let sessionQ = DispatchQueue(label: "io.imagestitcher.rn.panoplus.avf.session")
-    private let motionManager = CMMotionManager()
     private var device: AVCaptureDevice?
     private var output: AVCaptureVideoDataOutput?
-
-    /// Requested motion rate.  CMMotionManager exposes only a REQUESTED
-    /// interval and silently clamps it, so we ask for more than exists and
-    /// report what actually arrives (`deliveredMotionHz` below).
-    private static let requestedMotionHz = 200.0
 
     /// How long the input open may be retried while a previous owner (ARKit)
     /// finishes releasing the camera.  Bounded, and the attempt count is
@@ -142,29 +136,9 @@ public final class RNISPanoAvfSource: NSObject, AVCaptureVideoDataOutputSampleBu
     private var sessionDir: String = ""
     private var config: [String: Any] = [:]
 
-    /// ── THE RAW MOTION SERIES, WRITTEN TO `sensors.jsonl` ────────────────
-    ///
-    /// Android has written `sensors.jsonl` on every sweep for months; this arm
-    /// wrote NOTHING, so an iOS pack could not answer a question about its own
-    /// motion. The specific casualty: the shipped lateral guard
-    /// (`usePanMotion.ts`) is an EMA of `|gyro.x|` and it runs on iOS too, but
-    /// no iOS pack carried a gyro trace — so what the guard actually saw on a
-    /// capture was not measurable, only reconstructed. On Android four
-    /// independent reconstructions of ONE sweep spanned 0.046 to 0.533.
-    ///
-    /// `dm.rotationRate` is the quantity that guard consumes and it was
-    /// already in hand in the callback below, discarded every sample at 200 Hz.
-    ///
-    /// ⚠ NOT the magnetometer question. This arm is `.xArbitraryZVertical`
-    /// and ARKit's default is `.gravity`, so BOTH iOS arms are mag-free and
-    /// the compass contamination that makes Android's `crossRectifyDeg` ~90%
-    /// heading correction cannot occur here. There is no second stream to
-    /// difference because there is no compass term to remove — which is also
-    /// why `crossRectifyDeg` is a TRUSTWORTHY hand-motion signal on iOS and
-    /// not on Android.
-    private var sensorsFp: UnsafeMutablePointer<FILE>?
-    private var sensorRows: Int64 = 0
-    private var sensorWriteFailed = false
+    // M5 — the motion half (CoreMotion, `sensors.jsonl`, the aligner's
+    // configuration and the τ/basis report) lives in `RNISPanoImuArm`, which
+    // the vision-camera arm shares. This file keeps only the camera.
 
     /// Set once at configure; used for the fallback intrinsics and reported.
     private var fovFx: Double = 0
@@ -190,9 +164,6 @@ public final class RNISPanoAvfSource: NSObject, AVCaptureVideoDataOutputSampleBu
     // while the start-time lock claimed success.
     private var lockArmed = false
     private var framesObservedUnlocked: Int64 = 0
-    private var motionSamples: Int64 = 0
-    private var firstMotionS: Double = .nan
-    private var lastMotionS: Double = .nan
     private var lastPtsS: Double = .nan
     private var ptsGapsOverTwoFrames: Int64 = 0
     private var firstRefusalName: String = ""
@@ -235,11 +206,11 @@ public final class RNISPanoAvfSource: NSObject, AVCaptureVideoDataOutputSampleBu
     /// permanent refusal.
     private var inputOpenAttempts = 0
 
-    /// Guards EVERY field written from the CoreMotion queue and read at
-    /// `stop()`: the acceleration magnitude and the three motion counters.  One
-    /// lock, because they are written in the same callback.
+    /// Guards `running` and the session fault ledger — every field written on
+    /// one queue and read on another.  (The motion fields it used to guard
+    /// moved to `RNISPanoImuArm` with the motion callback, M5; the name is
+    /// kept so the fault-ledger code reads as it shipped.)
     private let motionLock = NSLock()
-    private var lastAccelMagMps2: Double = .nan
 
     private override init() { super.init() }
 
@@ -688,7 +659,7 @@ public final class RNISPanoAvfSource: NSObject, AVCaptureVideoDataOutputSampleBu
         // `RNISPanoBasisCalibration.start` already refuses this case.
         //
         // Asked HERE, before anything is opened, so the refusal costs nothing.
-        guard motionManager.isDeviceMotionAvailable else {
+        guard RNISPanoImuArm.shared.isDeviceMotionAvailable else {
             throw StartFailure(
                 code: "panoplus-no-device-motion",
                 detail: "CoreMotion reports no device-motion support on this hardware. "
@@ -727,25 +698,13 @@ public final class RNISPanoAvfSource: NSObject, AVCaptureVideoDataOutputSampleBu
         // explicit claim, silently.  Asking the shared rule also keeps this
         // belt and the bridge's from drifting apart, which two hand-written
         // copies of one predicate reliably do.
-        var alignOptions = options
-        let uncorrectedTau =
-            (options["tauUncorrected"] as? NSNumber)?.boolValue == true
-        let rawTauNum = options["tauS"] as? NSNumber
-        if uncorrectedTau,
-           RNISPanoAttitude.uncorrectedOptionConflict(
-               uncorrected: true,
-               claimsMeasuredTau:
-                   (options["tauMeasured"] as? NSNumber)?.boolValue ?? false,
-               hasExplicitTau: rawTauNum != nil,
-               tauS: rawTauNum?.doubleValue ?? 0.0) == "none" {
-            alignOptions["tauS"] = 0.0
-            alignOptions["tauMeasured"] = false
-        }
+        // M5 — MOVED, unchanged, to `RNISPanoImuArm.configureAlignment`, which
+        // the vision-camera arm shares: the forced zero, the shared-C++
+        // conflict test on the RAW bag, and the configure itself.
         do {
-            try RNISPanoAttitude.configure(options: alignOptions)
-        } catch let e as NSError {
-            throw StartFailure(code: "panoplus-alignment-unconfigured",
-                               detail: e.localizedDescription)
+            try RNISPanoImuArm.configureAlignment(options: options)
+        } catch let f as RNISPanoImuArm.Failure {
+            throw StartFailure(code: f.code, detail: f.detail)
         }
 
         frameW = plan.width
@@ -961,7 +920,11 @@ public final class RNISPanoAvfSource: NSObject, AVCaptureVideoDataOutputSampleBu
             "gdcSupported": gdcSupported,
             "gdcEnabled": gdcEnabled,
             "configLockError": lockError,
-            "requestedMotionHz": Self.requestedMotionHz,
+            "requestedMotionHz": RNISPanoImuArm.requestedMotionHz,
+            // M5 — which producer fed the engine. The vision-camera arm writes
+            // `vc-plugin` / false here; this arm opens its own session.
+            "frameSource": "avf-own",
+            "opensAvCaptureSession": true,
             "holdBudgetS": holdBudgetS,
             // ── JOB 1: WHICH CALIBRATION THIS SWEEP RAN ON ─────────────
             // The pack must be self-describing about the two numbers the whole
@@ -995,7 +958,7 @@ public final class RNISPanoAvfSource: NSObject, AVCaptureVideoDataOutputSampleBu
         // motion second, so the aligner has samples bracketing the first
         // frames instead of refusing them for an empty buffer.
         installSessionObservers()
-        startMotion()
+        RNISPanoImuArm.shared.startMotion()
         session.startRunning()
 
         // ── 5. LOCK, THEN INGEST — v12 ─────────────────────────────────
@@ -1175,94 +1138,6 @@ public final class RNISPanoAvfSource: NSObject, AVCaptureVideoDataOutputSampleBu
         observers.removeAll()
     }
 
-    private func startMotion() {
-        // Availability is refused at `start()`, before anything is opened —
-        // see the 0a block.  This guard stays as a belt: a silent return here
-        // was what produced a live preview that could never paint.
-        guard motionManager.isDeviceMotionAvailable else { return }
-        motionManager.deviceMotionUpdateInterval = 1.0 / Self.requestedMotionHz
-        // A FAILURE TO OPEN IS NEVER A FAILED SWEEP. The row is diagnostic;
-        // an operator in an aisle must not lose a capture because a log file
-        // could not be created. The refusal is recorded and the sweep runs.
-        // ⚠ RESET THE COUNTERS WITH THE FILE, NOT JUST THE FILE.
-        // `RNISPanoAvfSource` outlives a sweep, so a counter that is only ever
-        // incremented accumulates across captures while `fopen(..., "w")`
-        // truncates — and the pack then reports a row count larger than its
-        // own file. Measured on three consecutive iPhone sweeps before this
-        // line: reported 861 / 1298 / 1727 against 525 / 437 / 429 on disk,
-        // each report being the running total. A count that overstates is
-        // worse than no count, because the whole point of reporting rows
-        // rather than a `present` flag is to catch a channel that wrote less
-        // than it claimed.
-        sensorRows = 0
-        sensorWriteFailed = false
-        if !sessionDir.isEmpty {
-            let path = (sessionDir as NSString).appendingPathComponent("sensors.jsonl")
-            sensorsFp = fopen(path, "w")
-            if sensorsFp == nil { sensorWriteFailed = true }
-        } else {
-            sensorWriteFailed = true
-        }
-        let q = OperationQueue()
-        q.maxConcurrentOperationCount = 1
-        q.qualityOfService = .userInitiated
-        // `.xArbitraryZVertical`, NOT `.xTrueNorthZVertical`: the magnetometer
-        // injects yaw STEPS mid-sweep as it re-converges, and a step in the
-        // attitude is a step in the rectification.  The arbitrary yaw datum
-        // costs nothing — it cancels exactly in `dR = R₀ᵀ·Rᵢ`, which is the
-        // only rotation that reaches the geometry.
-        motionManager.startDeviceMotionUpdates(using: .xArbitraryZVertical, to: q) {
-            [weak self] dm, _ in
-            guard let self = self, let dm = dm else { return }
-            let a = dm.userAcceleration
-            // CoreMotion reports userAcceleration in G; the cage is in m/s².
-            let magMps2 = (a.x * a.x + a.y * a.y + a.z * a.z).squareRoot() * 9.80665
-            self.motionLock.lock()
-            self.lastAccelMagMps2 = magMps2
-            self.motionSamples += 1
-            if self.firstMotionS.isNaN { self.firstMotionS = dm.timestamp }
-            self.lastMotionS = dm.timestamp
-            self.motionLock.unlock()
-
-            let q = dm.attitude.quaternion
-            RNISPanoAttitude.pushSample(atTimeS: dm.timestamp,
-                                        qx: q.x, qy: q.y, qz: q.z, qw: q.w)
-
-            // ── THE RAW ROW ──────────────────────────────────────────────
-            // FORMATTED BEFORE THE LOCK, for the same reason the sidecar does
-            // it: `String(format:)` allocates, and holding the motion lock
-            // across an allocation puts microseconds between this queue and a
-            // lock it wants 200 times a second. The hold below is one buffered
-            // `fputs`, i.e. a memcpy.
-            //
-            // `rotationRate` is the whole point — it is what `usePanMotion`
-            // consumes and what no iOS pack has ever carried. `userAccel` in
-            // m/s² to match `accelMps2` above, so the lurch cage can be
-            // re-run offline against the same quantity it uses live, rather
-            // than against CoreMotion's G-units.
-            let r = dm.rotationRate
-            let line = String(
-                format: "{\"type\":\"device-motion\",\"tsS\":%.9f,"
-                      + "\"q\":[%.9f,%.9f,%.9f,%.9f],"
-                      + "\"rotationRate\":[%.9f,%.9f,%.9f],"
-                      + "\"userAccelMps2\":[%.6f,%.6f,%.6f],"
-                      + "\"accelMagMps2\":%.6f}\n",
-                dm.timestamp, q.x, q.y, q.z, q.w,
-                r.x, r.y, r.z,
-                a.x * 9.80665, a.y * 9.80665, a.z * 9.80665, magMps2)
-            self.motionLock.lock()
-            if let f = self.sensorsFp {
-                fputs(line, f)
-                self.sensorRows += 1
-                // Flush on a cadence, not per row: a crash mid-sweep should
-                // still leave a readable file, but fsync at 200 Hz would be
-                // the most expensive thing on this queue.
-                if self.sensorRows % 200 == 0 { fflush(f) }
-            }
-            self.motionLock.unlock()
-        }
-    }
-
     // MARK: - Frame delivery
 
     public func captureOutput(_ output: AVCaptureOutput,
@@ -1279,9 +1154,7 @@ public final class RNISPanoAvfSource: NSObject, AVCaptureVideoDataOutputSampleBu
         if !lastPtsS.isNaN, pts - lastPtsS > 2.5 / 60.0 { ptsGapsOverTwoFrames += 1 }
         lastPtsS = pts
 
-        motionLock.lock()
-        let accel = lastAccelMagMps2
-        motionLock.unlock()
+        let accel = RNISPanoImuArm.shared.latestAccelMagMps2
 
         // ── ALIGN, WITH A BOUNDED HOLD BUT NEVER AN EXTRAPOLATION ──────
         //
@@ -1440,7 +1313,6 @@ public final class RNISPanoAvfSource: NSObject, AVCaptureVideoDataOutputSampleBu
         guard wasRunning else { return ["ran": false] }
         removeSessionObservers()
         session.stopRunning()
-        motionManager.stopDeviceMotionUpdates()
         if let out = output { out.setSampleBufferDelegate(nil, queue: nil) }
         // BARRIER, not decoration: the frame counters below are written only on
         // `videoQueue`, and a delegate call already in flight when
@@ -1448,18 +1320,13 @@ public final class RNISPanoAvfSource: NSObject, AVCaptureVideoDataOutputSampleBu
         // onto that queue is the cheapest correct fence.
         videoQueue.sync { }
 
-        // Closed AFTER `stopDeviceMotionUpdates()` and after the videoQueue
-        // fence, so no callback can still be holding the pointer. Under the
-        // lock because the motion queue writes through it.
-        motionLock.lock()
-        if let f = sensorsFp { fflush(f); fclose(f); sensorsFp = nil }
-        let sensorRowsSnapshot = sensorRows
-        let sensorWriteFailedSnapshot = sensorWriteFailed
-        motionLock.unlock()
+        // CoreMotion stops AFTER the videoQueue fence — no frame can still be
+        // aligning against the ring — and `stopMotion` waits out an in-flight
+        // motion callback before it closes `sensors.jsonl` (M5: moved to the
+        // shared IMU arm with the callback that writes it).
+        let motion = RNISPanoImuArm.shared.stopMotion()
 
         motionLock.lock()
-        let motionSamplesSnapshot = motionSamples
-        let motionSpan = lastMotionS - firstMotionS
         let interruptionsSnapshot = interruptions
         let interruptionsEndedSnapshot = interruptionsEnded
         let interruptedSnapshot = interrupted
@@ -1489,23 +1356,10 @@ public final class RNISPanoAvfSource: NSObject, AVCaptureVideoDataOutputSampleBu
         // every delivered frame.
         report["framesObservedUnlocked"] = framesObservedUnlocked
         report["ptsGapsOverTwoFrames"] = ptsGapsOverTwoFrames
-        report["motionSamples"] = motionSamplesSnapshot
-        // ── THE SENSOR LOG, AS A COUNT NOT A CLAIM ─────────────────────
-        // A `present: true` says a file was opened; only a non-zero count says
-        // rows were WRITTEN. A pack that merely asserts it carries a gyro
-        // trace is worse than one that admits it does not, because the first
-        // gets replayed and the second gets recaptured.
-        report["sensorsJsonl"] = [
-            "rows": sensorRowsSnapshot,
-            "openFailed": sensorWriteFailedSnapshot,
-            "fields": "tsS, q[xyzw], rotationRate[xyz] rad/s, "
-                + "userAccelMps2[xyz], accelMagMps2",
-            "referenceFrame": "xArbitraryZVertical",
-            "note": "CoreMotion device-motion at the requested 200 Hz. "
-                + "rotationRate is the quantity usePanMotion's lateral guard "
-                + "consumes; before this it was discarded every sample and no "
-                + "iOS pack could say what that guard saw.",
-        ]
+        // `motionSamples`, `sensorsJsonl`, `deliveredMotionHz` — the IMU arm's
+        // own account of the motion half, merged exactly where it used to be
+        // composed.
+        for (k, v) in motion { report[k] = v }
         // ── THE SESSION FAULT LEDGER ───────────────────────────────────
         // A sweep that stopped delivering because the phone rang and a sweep
         // that stopped delivering because the arm is broken produced BYTE-
@@ -1526,228 +1380,12 @@ public final class RNISPanoAvfSource: NSObject, AVCaptureVideoDataOutputSampleBu
                   + "every other counter keeps its last value; read framesDelivered "
                   + "against these before reading it as a capture-side finding",
         ]
-        // MEASURED, not the requested rate: CMMotionManager exposes only a
-        // requested interval and silently clamps it, so the only honest number
-        // is the one derived from the delivered timestamps.
-        report["deliveredMotionHz"] =
-            (motionSamplesSnapshot > 1 && motionSpan > 0)
-                ? Double(motionSamplesSnapshot - 1) / motionSpan : NSNull()
-        report["alignment"] = RNISPanoAttitude.report()
-
-        // ── THE THREE-WAY τ PROVENANCE, COMPOSED EXACTLY ONCE ──────────
-        // The seam knows `measured` vs `uncorrected`; only THIS layer knows
-        // whether a measured τ came from the caller or off the calibration
-        // store.  Composed here and read from `report` by `metaBlock` below,
-        // so the sidecar and `meta.json` cannot disagree — two independent
-        // derivations of one fact is how they start to.
-        let prov = Self.tauProvenance(report: report)
-        report["tauProvenance"] = prov
-        report["tauCorrectionApplied"] = (prov == "measured" || prov == "from-store")
-        report["tauNote"] = Self.tauNote(provenance: prov)
-        // ── AND THE BASIS HALF, COMPOSED THE SAME WAY AND ONCE ─────────
-        // The basis provenance used to be a literal inside `metaBlock`, which
-        // meant `meta.json` asserted it and the sidecar did not carry it at
-        // all: one file claiming, the other silent. Derived here from
-        // `basisSource` through the shared C++ mapping, written into `report`,
-        // and read back by `metaBlock` — so the two files cannot disagree, for
-        // the same reason τ's three-way field is composed here.
-        let basisProv = RNISPanoAttitude.basisProvenance(
-            source: report["basisSource"] as? String)
-        report["basisProvenance"] = basisProv
-        report["basisNote"] = Self.basisNote(provenance: basisProv)
-
-        writeSidecar(report)
-        // ── M7: THE MARKER GOES IN meta.json TOO ───────────────────────
-        //
-        // The sidecar was the whole disclosure, and `meta.json` is the file
-        // every offline harness in this repo reads.  `meta.json` carries
-        // `rejectedPoseSpeed: 0` and `maxTranslationJump: 0` from cages that
-        // NEVER RAN on this arm (there is no translation at all), and it
-        // carried no `poseSource` key to say so — so the one file with the
-        // zeros in it was the one file with no marker on it.
-        //
-        // Recorded through the engine rather than written here so it lands
-        // inside the pack the engine is about to finalize.  On the ARKit arm
-        // nothing calls this, the key is absent, and `meta.json` is byte-
-        // identical to what shipped.
-        RNISPanoCore.recordPoseSource(Self.metaBlock(from: report))
+        // The aligner's report, the composed τ/basis provenance, the
+        // `pose_source.json` sidecar and the `meta.json` block — M5: moved to
+        // `RNISPanoImuArm.publish`, which the vision-camera arm shares, so the
+        // two producers cannot word their packs differently.
+        RNISPanoImuArm.publish(&report, sessionDir: sessionDir)
         return report
-    }
-
-    /// WHERE THIS SWEEP'S τ CAME FROM — `measured` / `from-store` /
-    /// `uncorrected`, plus `not-measured` for a configuration that could never
-    /// have started.  **THREE VALUES, NEVER A BOOLEAN.**
-    ///
-    /// The two halves come from different layers and neither can answer alone:
-    /// the C++ seam owns `measured` vs `uncorrected` (it is the thing that
-    /// applies, or does not apply, the offset), and only this layer knows
-    /// whether a measured τ was handed in by the caller or looked up in
-    /// `RNISPanoCalibStore`.  A pack that cannot tell those three apart is a
-    /// pack whose central number is unattributable — which is the defect this
-    /// arm's entire calibration step exists to prevent.
-    static func tauProvenance(report: [String: Any]) -> String {
-        let alignment = report["alignment"] as? [String: Any] ?? [:]
-        // The SEAM's answer outranks everything: it is the layer that either
-        // applied an offset or did not.
-        // `alignment.tauMode` is the SEAM's own three-valued answer
-        // (`measured` / `uncorrected` / `not-measured`); `tauUncorrected` is
-        // the same fact as a flag.  Either is authoritative over anything this
-        // layer thinks, because the seam is what applies the offset.
-        if (alignment["tauMode"] as? String) == "uncorrected"
-            || (alignment["tauUncorrected"] as? NSNumber)?.boolValue == true {
-            return "uncorrected"
-        }
-        guard (alignment["tauMeasured"] as? NSNumber)?.boolValue == true else {
-            // Unreachable through `start` (the configuration is refused before
-            // the camera opens) and reported honestly anyway rather than
-            // collapsed into one of the three real answers.
-            return "not-measured"
-        }
-        return (report["tauSource"] as? String) == "store" ? "from-store" : "measured"
-    }
-
-    /// THE PLAIN SENTENCE, so a reader six weeks from now cannot mistake an
-    /// experiment for a calibrated run without reading a single other field.
-    static func tauNote(provenance: String) -> String {
-        switch provenance {
-        case "uncorrected":
-            return "THIS SWEEP APPLIED NO TIMING CORRECTION. tau was held at 0 and "
-                 + "was NOT measured — attitude was sampled at each frame's "
-                 + "presentation timestamp exactly, with no camera-to-IMU offset of "
-                 + "any kind. It is a DELIBERATE EXPERIMENT: the device's tau "
-                 + "calibration resolved on 8 of 12 runs and scattered 5.03 ms, wider "
-                 + "than the 3.08 ms budget the correction is meant to buy back, so "
-                 + "the persist gate refused to write one and this pack is the "
-                 + "evidence for whether tau binds at all. DO NOT read it as a "
-                 + "calibrated run, and do not compare its residuals with a corrected "
-                 + "pack's without saying which is which. The BASIS was measured and "
-                 + "IS a real calibration — see attitudeBasisIndex."
-        case "from-store":
-            return "tau was MEASURED for this (device, lens, format) and read from the "
-                 + "on-device calibration store, then applied: attitude was sampled at "
-                 + "pts + tau."
-        case "measured":
-            return "tau was supplied by the caller as a measured offset and applied: "
-                 + "attitude was sampled at pts + tau."
-        default:
-            return "tau provenance could not be established, which should be "
-                 + "unreachable: the arm refuses to start without either a measured "
-                 + "tau or an explicit uncorrected request."
-        }
-    }
-
-    /// THE BASIS HALF'S SENTENCE, chosen by where the basis came from.
-    ///
-    /// On the τ = 0 experiment exactly one of the two numbers is missing, and
-    /// recording the pair under one "uncalibrated" banner would throw away a
-    /// real measurement: the basis was selected from 777 pairs at 0.234°
-    /// against a 19.45° runner-up and survived every offset in ±10 ms, i.e. it
-    /// was chosen by the geometry and not by the clock.  But that sentence is
-    /// only true for the basis this device MEASURED, and a caller may hand one
-    /// in instead — in which case saying it was validated would be the pack
-    /// certifying a calibration nobody ran.
-    static func basisNote(provenance: String) -> String {
-        switch provenance {
-        case "measured":
-            return "the device→camera basis C was MEASURED and validated on this "
-                 + "device (selectBasis against a live ARKit reference, plus the "
-                 + "±10 ms tau-stability gate) and read from the on-device "
-                 + "calibration store. It is a real calibration, whatever "
-                 + "tauProvenance says: the two numbers have different scopes and do "
-                 + "not expire together."
-        case "caller-supplied":
-            return "the device→camera basis C was HANDED IN BY THE CALLER. This build "
-                 + "did NOT measure or validate it — nothing here certifies it, and it "
-                 + "must not be read as a calibration this device ran. Compare it "
-                 + "against attitudeBasisIndex in a pack whose basisProvenance is "
-                 + "'measured' before trusting any geometry derived from it."
-        default:
-            return "no device→camera basis was resolved, which should be unreachable: "
-                 + "a -1 basis index is a fatal refusal and the sweep would not have "
-                 + "started. Treat this pack's orientation as unattributable."
-        }
-    }
-
-    /// The compact `meta.json` block — a POINTER plus the four facts a reader
-    /// must not have to open the sidecar to learn.  Deliberately not the whole
-    /// report: duplicating it would create two copies that can disagree.
-    private static func metaBlock(from report: [String: Any]) -> [String: Any] {
-        let alignment = report["alignment"] as? [String: Any] ?? [:]
-        // READ, never re-derived — see the composition site in `stop()`.
-        let basisProv = (report["basisProvenance"] as? String) ?? "not-measured"
-        return [
-            "poseSource": "imu-attitude-only",
-            "translation": "none",
-            // The sentence that stops the misreading. Both of these counters
-            // are structurally zero here and neither is a cage that passed.
-            "posesSpeedCageNote":
-                "counts.rejectedPoseSpeed and the translation-jump cage did NOT run "
-              + "on this sweep: t is identically zero on this arm, so both are "
-              + "structurally 0 and neither is evidence of anything.",
-            // L16 — `referenceQuat` is exported on BOTH arms under one key and
-            // denotes a DIFFERENT frame on each: world←cam on ARKit, versus
-            // R_imu(t0)·C in CoreMotion's arbitrary-yaw datum here. Naming the
-            // frame is what stops an offline reader comparing two packs that
-            // do not share a datum.
-            "referenceQuatFrame":
-                "R_imu(t0)*C in CoreMotion .xArbitraryZVertical — NOT the ARKit "
-              + "world frame the ARKit arm's referenceQuat is expressed in. The "
-              + "arbitrary yaw datum B cancels in dR = R0^T*Ri, which is the only "
-              + "rotation that reaches the geometry.",
-            "tauS": alignment["tauS"] ?? NSNull(),
-            "tauMeasured": alignment["tauMeasured"] ?? NSNull(),
-            // ── THE THREE-WAY FIELD, IN THE FILE EVERY HARNESS READS ───
-            // `measured` / `from-store` / `uncorrected`. Read from `report`,
-            // never re-derived: the sidecar and meta.json must not be able to
-            // disagree about which of the three this sweep was.
-            "tauProvenance": report["tauProvenance"] ?? NSNull(),
-            "tauCorrectionApplied": report["tauCorrectionApplied"] ?? NSNull(),
-            "tauNote": report["tauNote"] ?? NSNull(),
-            "tauSource": report["tauSource"] ?? NSNull(),
-            "basisSource": report["basisSource"] ?? NSNull(),
-            // ── THE BASIS *DID* CALIBRATE, AND SAYS SO ─────────────────
-            // On the τ = 0 experiment exactly one of the two numbers is
-            // missing. Recording the pair under one "uncalibrated" banner
-            // would throw away a real measurement — the basis was selected
-            // from 777 pairs at 0.234° against a 19.45° runner-up and survived
-            // every offset in ±10 ms, i.e. it was chosen by the geometry and
-            // not by the clock. The arm cannot start without it (a −1 index is
-            // a fatal refusal), so a pack that exists has a validated one.
-            //
-            // ⚠ DERIVED FROM `basisSource`, NOT ASSERTED.  This was an
-            // unconditional "measured" literal sitting one key away from
-            // `basisSource`, which the bridge can set to "options" — so a
-            // caller-supplied basis would have been certified by the pack as a
-            // calibration this build never ran. That is the SAME defect class
-            // the τ side of this file exists to kill, committed on the other
-            // number, and it was added by the cut that killed it. The mapping
-            // is in the shared C++ so the Android leg reads the same one.
-            "basisProvenance": basisProv,
-            "basisNote": report["basisNote"] ?? NSNull(),
-            "tauSign": alignment["tauSign"] ?? NSNull(),
-            "attitudeBasisIndex": alignment["attitudeBasisIndex"] ?? NSNull(),
-            "attitudeBasisLabel": alignment["attitudeBasisLabel"] ?? NSNull(),
-            "lurchCage": alignment["lurchCage"] ?? NSNull(),
-            "calibrationSource": report["calibrationSource"] ?? NSNull(),
-            "lens": report["lens"] ?? NSNull(),
-            // The request beside the run, in meta.json too — the file every
-            // offline harness reads must not need the sidecar to say which
-            // chip position produced this pack.
-            "lensRequested": report["lensRequested"] ?? NSNull(),
-            "lensLabel": report["lensLabel"] ?? NSNull(),
-            "session": report["session"] ?? NSNull(),
-            "sidecar": "pose_source.json",
-        ]
-    }
-
-    private func writeSidecar(_ report: [String: Any]) {
-        guard !sessionDir.isEmpty else { return }
-        let path = (sessionDir as NSString).appendingPathComponent("pose_source.json")
-        guard JSONSerialization.isValidJSONObject(report),
-              let data = try? JSONSerialization.data(
-                withJSONObject: report,
-                options: [.prettyPrinted, .sortedKeys]) else { return }
-        try? data.write(to: URL(fileURLWithPath: path), options: .atomic)
     }
 
     private func resetCounters() {
@@ -1755,16 +1393,15 @@ public final class RNISPanoAvfSource: NSObject, AVCaptureVideoDataOutputSampleBu
         framesIntrinsicsDelivered = 0; framesIntrinsicsFovDerived = 0
         holdsAttempted = 0; holdsRescued = 0
         lockArmed = false; framesObservedUnlocked = 0
-        motionSamples = 0; firstMotionS = .nan; lastMotionS = .nan
         lastPtsS = .nan; ptsGapsOverTwoFrames = 0
         firstRefusalName = ""
         motionLock.lock()
-        lastAccelMagMps2 = .nan
         interruptions = 0; interruptionsEnded = 0; interrupted = false
         firstInterruptionReason = ""
         runtimeErrors = 0; firstRuntimeError = ""
         restartsAttempted = 0
         motionLock.unlock()
-        RNISPanoAttitude.reset()
+        // The motion half: counters, the accel handoff, and the aligner's ring.
+        RNISPanoImuArm.shared.resetForSweep(sessionDir: sessionDir)
     }
 }

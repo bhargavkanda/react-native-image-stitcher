@@ -114,7 +114,14 @@ public class PanoPlusBridge: NSObject, RCTInvalidating {
         let docs = FileManager.default.urls(
             for: .documentDirectory, in: .userDomainMask
         ).first
-        return ["documentDirectory": docs?.absoluteString as Any]
+        return [
+            "documentDirectory": docs?.absoluteString as Any,
+            // M5 — the vision-camera sweep arm is compiled into this binary.
+            // JS reads it to REFUSE a host-camera sweep by name on a build
+            // without it (`ENGINE_UNAVAILABLE`), never to fall back to a
+            // camera of pano+'s own.
+            "vcArmSupported": RNISPanoVcArm.isSupported,
+        ]
     }
 
     /// Set while pano+ owns the high-fps override, so stop restores exactly
@@ -184,6 +191,24 @@ public class PanoPlusBridge: NSObject, RCTInvalidating {
     private static func avfArmIsClaimed() -> Bool {
         armLock.lock(); defer { armLock.unlock() }
         return avfArmClaimed
+    }
+
+    /// M5 — the SAME claim discipline for the vision-camera arm: claimed on
+    /// the bridge queue before start goes async, TAKEN by exactly one
+    /// teardown, and re-checked by start after arming, so a stop racing the
+    /// start can neither miss the arm nor be missed by it.
+    private static var vcArmClaimed = false
+    private static func claimVcArm() { armLock.lock(); vcArmClaimed = true; armLock.unlock() }
+    private static func releaseVcArm() { armLock.lock(); vcArmClaimed = false; armLock.unlock() }
+    private static func takeVcArm() -> Bool {
+        armLock.lock(); defer { armLock.unlock() }
+        let held = vcArmClaimed
+        vcArmClaimed = false
+        return held
+    }
+    private static func vcArmIsClaimed() -> Bool {
+        armLock.lock(); defer { armLock.unlock() }
+        return vcArmClaimed
     }
 
     /// How long `start` will wait for ARKit to acknowledge a stop before it
@@ -303,6 +328,15 @@ public class PanoPlusBridge: NSObject, RCTInvalidating {
         // key.  See RNISPanoImuSidecar's header for why an AVCaptureSession
         // could not do this and CoreMotion can.
         let imuSidecar = (options["imuSidecar"] as? Bool) ?? false
+        // ── M5: THE VISION-CAMERA ARM ──────────────────────────────────
+        // An IMU sweep on the camera `<Camera>` already opened: no
+        // AVCaptureSession here, no ARKit, and every state that cannot run is
+        // a NAMED refusal. Read WITH the pose arm, never alone.
+        if poseSource == "imu", (options["vcPluginArm"] as? Bool) == true {
+            startVcArm(options: options, sessionDir: sessionDir,
+                       imuSidecar: imuSidecar, resolver: resolver, rejecter: rejecter)
+            return
+        }
         // ⚠ CLAIMED HERE, SYNCHRONOUSLY, ON THE BRIDGE QUEUE — before the hop
         // below.  A `stop()` / `cancel()` / bundle reload that reaches teardown
         // while start is still in flight must find the arm claimed, or it takes
@@ -740,6 +774,160 @@ public class PanoPlusBridge: NSObject, RCTInvalidating {
         }
     }
 
+    /// M5 — the vision-camera arm's start. See `RNISPanoVcArm` for the what;
+    /// this is the order: claim → refuse what cannot run (device, zoom, fps,
+    /// basis) → start the ENGINE → start the arm (IMU, lock, plugin armed) →
+    /// re-check the claim → resolve. Nothing is opened, so a refusal at any
+    /// step leaves no camera state behind.
+    private func startVcArm(
+        options: NSDictionary,
+        sessionDir: String,
+        imuSidecar: Bool,
+        resolver: @escaping RCTPromiseResolveBlock,
+        rejecter: @escaping RCTPromiseRejectBlock
+    ) {
+        Self.claimVcArm()
+        DispatchQueue.global(qos: .userInitiated).async {
+            func refuse(_ code: String, _ detail: String) {
+                Self.releaseVcArm()
+                rejecter(code, detail, nil)
+            }
+            if RNISPanoCore.isRunning() {
+                refuse("panoplus-busy", "A pano+ sweep is already running.")
+                return
+            }
+            guard RNISPanoVcArm.isSupported else {
+                refuse("panoplus-vc-arm-unavailable",
+                       "This build has no vision-camera sweep plugin "
+                     + "(panoplus_sweep_ingest), so a sweep on <Camera>'s camera "
+                     + "cannot run. It is refused rather than opening a camera of "
+                     + "pano+'s own.")
+                return
+            }
+            var opts = (options as? [String: Any]) ?? [:]
+            opts["sessionDir"] = sessionDir
+            let cameraId = (opts["vcCameraId"] as? String) ?? ""
+            let dev: RNISPanoVcArm.Device
+            do {
+                dev = try RNISPanoVcArm.resolve(cameraId: cameraId)
+            } catch let f as RNISPanoVcArm.StartFailure {
+                refuse(f.code, f.detail); return
+            } catch {
+                refuse("panoplus-io", "\(error)"); return
+            }
+            if let r = RNISPanoVcRules.zoomRefusal(zoomFactor: Double(dev.device.videoZoomFactor)) {
+                refuse(r.code, r.detail); return
+            }
+            if let r = RNISPanoVcRules.fpsRefusal(activeFps: dev.activeFps) {
+                refuse(r.code, r.detail); return
+            }
+
+            // ── τ (D2): 0 BY DEFAULT ON THIS ARM ───────────────────────
+            // A caller that passes a measured τ is running a deliberate
+            // experiment and wins; otherwise the sweep applies no timing
+            // correction and SAYS so. The conflict test is the shared C++
+            // one on the RAW bag: a contradicting bag travels on untouched so
+            // `configure` refuses it by name.
+            let optTauNum = opts["tauS"] as? NSNumber
+            let claimsMeasured = (opts["tauMeasured"] as? NSNumber)?.boolValue ?? false
+            let askedUncorrected = (opts["tauUncorrected"] as? NSNumber)?.boolValue ?? false
+            let tauSource: String
+            if (claimsMeasured || optTauNum != nil) && !askedUncorrected {
+                tauSource = "options"
+            } else {
+                tauSource = "uncorrected"
+                opts["tauUncorrected"] = true
+                if RNISPanoAttitude.uncorrectedOptionConflict(
+                    uncorrected: true, claimsMeasuredTau: claimsMeasured,
+                    hasExplicitTau: optTauNum != nil,
+                    tauS: optTauNum?.doubleValue ?? 0.0) == "none" {
+                    opts["tauS"] = 0.0
+                    opts["tauMeasured"] = false
+                }
+            }
+
+            // ── THE BASIS (D3): DERIVED FROM THE CAMERA THAT IS OPEN ───
+            let basisSource: String
+            if opts["basisIndex"] as? NSNumber != nil {
+                basisSource = "options"
+                opts["basisDerivation"] = ["skipped": "the caller supplied basisIndex"]
+            } else {
+                let der = RNISPanoVcArm.deriveBasis(device: dev.device)
+                opts["basisDerivation"] = der
+                let idx = (der["index"] as? NSNumber)?.intValue ?? -1
+                if let r = RNISPanoVcRules.basisRefusal(
+                    derivedIndex: idx,
+                    mountingAngleDeg: (der["mountingAngleDeg"] as? NSNumber)?.intValue,
+                    method: (der["method"] as? String) ?? "",
+                    refusal: der["refusal"] as? String) {
+                    refuse(r.code, r.detail); return
+                }
+                opts["basisIndex"] = idx
+                basisSource = "derived"
+            }
+            opts["tauSource"] = tauSource
+            opts["basisSource"] = basisSource
+            opts["calibrationSource"] = "vc-arm: tau-\(tauSource)+basis-\(basisSource)"
+            // The lens the frames come from, for the undistortion gate — the
+            // colour lens, never a virtual container's type.
+            opts["lensDeviceLens"] = dev.colourLens
+
+            // The second attitude channel is an ARKit-arm instrument.
+            if imuSidecar {
+                RNISPanoCore.recordImuSidecar([
+                    "ran": false, "requested": true, "reason": "not-applicable-on-vc-arm",
+                    "detail": "the sweep ran on vision-camera's camera with CoreMotion as its "
+                        + "only attitude source; there is no ARKit channel to compare.",
+                ])
+            }
+
+            do {
+                try RNISPanoCore.start(options: opts)
+            } catch let nsError as NSError {
+                let key = nsError.code == 409 ? "panoplus-busy"
+                        : (nsError.code == 400 ? "invalid-options" : "panoplus-io")
+                refuse(key, (nsError.userInfo[NSLocalizedDescriptionKey] as? String)
+                             ?? "Could not start the pano+ sweep.")
+                return
+            }
+            do {
+                let report = try RNISPanoVcArm.shared.start(
+                    sessionDir: sessionDir, device: dev, options: opts)
+                // A teardown that landed while the arm was starting has taken
+                // the claim and found nothing to stop.
+                guard Self.vcArmIsClaimed() else {
+                    RNISPanoVcArm.shared.stop()
+                    RNISPanoCameraLock.shared.unlock()
+                    RNISPanoCore.cancel()
+                    rejecter("panoplus-cancelled",
+                             "The sweep was stopped while the vision-camera arm was "
+                             + "starting; it was disarmed rather than left running.", nil)
+                    return
+                }
+                let lockReport = report["cameraLock"] as? [String: Any]
+                RNISPanoCore.recordCameraLock(lockReport)
+                resolver([
+                    "sessionDir": sessionDir,
+                    "startedAtMs": Date().timeIntervalSince1970 * 1000.0,
+                    "pluginAvailable": true,
+                    "poseSource": "imu",
+                    "frameSource": "vc-plugin",
+                    "opensAvCaptureSession": false,
+                    "vcArm": report,
+                    "cameraLock": (lockReport as Any?) ?? NSNull(),
+                ])
+            } catch let f as RNISPanoVcArm.StartFailure {
+                Self.releaseVcArm()
+                RNISPanoCore.cancel()
+                rejecter(f.code, f.detail, nil)
+            } catch {
+                Self.releaseVcArm()
+                RNISPanoCore.cancel()
+                rejecter("panoplus-io", "\(error)", nil)
+            }
+        }
+    }
+
     /// Finish the sweep: unregister, drain, tail-flush, write the pack, and
     /// resolve the summary.  Rejects `panoplus-not-running` / `panoplus-empty`
     /// / `panoplus-io`; on `panoplus-empty` the ORIGINAL NSError is passed to
@@ -799,7 +987,16 @@ public class PanoPlusBridge: NSObject, RCTInvalidating {
         resolver: @escaping RCTPromiseResolveBlock,
         rejecter: @escaping RCTPromiseRejectBlock
     ) {
-        resolver(RNISPanoCore.status() ?? ["running": false])
+        var st = RNISPanoCore.status() ?? ["running": false]
+        // M5 — a DEVICE-LEVEL refusal on the vision-camera arm (a mirrored or
+        // rotated buffer, a changed orientation, a zoom other than 1×) is
+        // surfaced live, so the host discards the sweep by name instead of
+        // letting it run on painting nothing.
+        if RNISPanoVcArm.shared.isRunning,
+           let r = RNISPanoVcArm.pluginReport()?["deviceRefusal"] as? String, !r.isEmpty {
+            st["vcDeviceRefusal"] = r
+        }
+        resolver(st)
     }
 
     /// v12 — idle viewfinder for the decoupled arm.  Runs the arm's OWN
@@ -906,6 +1103,20 @@ public class PanoPlusBridge: NSObject, RCTInvalidating {
         // AR path uses.  Both are idempotent: a sweep whose lock was refused,
         // or that ran with `lockCamera=false`, restores nothing and merges a
         // benign report.
+        // M5 — THE VISION-CAMERA ARM, taken like the AVF one: disarm the
+        // plugin (waiting out a frame inside the engine), stop CoreMotion and
+        // publish the pose block, then unlock vision-camera's device. The lock
+        // witness is the plugin's per-frame check, named as such.
+        if takeVcArm() {
+            RNISPanoVcArm.shared.stop()
+            RNISPanoCameraLock.shared.unlock()
+            var sweep = RNISPanoCameraLock.shared.sweepReport()
+            sweep["framesObservedUnlocked"] =
+                RNISPanoVcArm.pluginReport()?["framesObservedUnlocked"] ?? NSNull()
+            sweep["witness"] = "vc-plugin"
+            RNISPanoCore.mergeCameraLock(sweep)
+            return
+        }
         if takeAvfArm() {
             RNISPanoAvfSource.shared.stop()
             RNISPanoCameraLock.shared.unlock()

@@ -1,0 +1,1 @@
+../../../ios/PanoPlus/RNISPanoVcRules.swift

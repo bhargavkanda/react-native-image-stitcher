@@ -1,191 +1,67 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // RNISPanoSweepFrameProcessor — the sweep engine, fed from the camera
-// `<Camera>` already owns (S6).
+// `<Camera>` already owns (M5).
 //
-// The iOS half of direction A's non-AR arm. pano+ opens its own
-// AVCaptureSession in `RNISPanoAvfSource`; this plugin is the path in which
-// it does not — vision-camera owns the device, hands the pixels over per
-// frame, and `RNISPanoCore` is unchanged behind it.
+// The iOS half of the vision-camera arm. vision-camera owns the device and
+// hands the pixels over per frame; `RNISPanoCore` is unchanged behind it, and
+// nothing in pano+ opens an `AVCaptureSession`.
 //
-// Shaped exactly like `KeyframeGateFrameProcessor.mm`: `__has_include`
-// guard so the file is a no-op translation unit without vision-camera,
-// `+load` registration, and a callback that does the smallest possible
-// amount of work on vc's frame-processor queue.
+// Shaped like `KeyframeGateFrameProcessor.mm`: `__has_include` guard so the
+// file is a no-op translation unit without vision-camera, `+load`
+// registration, and a callback that does the smallest possible amount of work
+// on vision-camera's frame-processor queue.
 //
-// ══════════════════════════════════════════════════════════════════════
-//  ⚠ THIS ARM HAS NO iOS START PATH YET, SO THE PLUGIN IS DISARMED.
-//    ONE REASON REMAINS, AND IT IS NOT THE ONE THIS FILE USED TO GIVE.
-// ══════════════════════════════════════════════════════════════════════
+// ── WHO ARMS IT ─────────────────────────────────────────────────────────
 //
-// INTRINSICS ARE NO LONGER THE BLOCKER — see below; this arm derives them.
-// What is still missing is a start mode: `PanoPlusBridge` must configure
-// `RNISPanoAttitude`, start CoreMotion via the existing `startMotion()` seam
-// (RNISPanoAvfSource.swift:1154) and open NO `AVCaptureSession`.
+// `RNISPanoVcArm` (Swift), from `PanoPlusBridge.start` with `poseSource:
+// 'imu'` + `vcPluginArm` + `vcCameraId`. It resolves the device vision-camera
+// mounted, refuses what the sweep cannot run on, derives the device-to-camera
+// basis (D3), starts CoreMotion (`RNISPanoImuArm`), locks exposure on the
+// device, and then posts `kArmNotification` with the camera id, the format
+// width and whether the lock took. Disarm is the same notification with
+// `armed: NO`, and it is SYNCHRONOUS: the observer waits out a frame already
+// inside the engine before it returns, so nothing ingests after the sweep
+// has ended. The arm's report is read back through `+report`, by name
+// (`NSClassFromString`), so the Swift side links on a build without this file.
 //
-// ⚠ AND THAT NEEDS ONE DESIGN ANSWER THIS CODE CANNOT SUPPLY. τ is stored
-// under `model | lens | W×H | fps` (RNISPanoCalibStore.swift:19, :78) — the
-// rolling-shutter constant is part of the FORMAT. On this arm
-// VISION-CAMERA picks the format, so which stored τ applies, and whether a
-// τ measured under our own 60 fps 4:3 plan may be reused under vc's, is a
-// decision about measurement validity rather than a refactor. Guessing it
-// would reintroduce exactly the class of error the old intrinsics reasoning
-// was: a number that looks right and is silently for something else.
+// ⚠ `[RNISPanoCore isRunning]` IS NOT AN OWNERSHIP TEST — it is true on every
+// arm. Ownership is the explicit arm flag; a plugin gated only on `isRunning`
+// beside a live AVF or ARKit arm would be a second producer into one engine.
 //
-// An adversarial review of the first version of this file found that its
-// header led with the SECOND reason it is inert and never stated the first.
-// The first is this: there is nothing on iOS that arms it.
+// ── INTRINSICS ──────────────────────────────────────────────────────────
 //
-// Android has a fourth start mode — `PanoPlusAndroidRecorder.startVcPluginArm`,
-// chosen by `vcPluginArm` in the start bag — in which the recorder opens no
-// Camera2 client at all and waits to be fed. iOS has no equivalent:
-// `PanoPlusBridge.start` reads `poseSource` and knows two producers, "ar" and
-// "imu", and "imu" unconditionally starts `RNISPanoAvfSource`, which opens its
-// OWN `AVCaptureSession` on a physical back device. `vcPluginArm` and
-// `vcCameraId` are read by no Swift or Objective-C in this package.
+// vision-camera 4.7.3 never enables `isCameraIntrinsicMatrixDeliveryEnabled`
+// (measured: zero occurrences of `IntrinsicMatrix` in its iOS tree), so the
+// ordinary path DERIVES fx from the device's published horizontal field of
+// view — the arithmetic `RNISPanoAvfSource` runs on its own device — and marks
+// the pack (`intrinsicsFovDerived`). Measured offline on 48 iPhone packs: the
+// derived focal length reads 0.4–3.1% low, and replay shows the canvas within
+// 0.6%. A delivered matrix, when present, is always preferred.
 //
-// ⚠ AND `[RNISPanoCore isRunning]` IS NOT AN OWNERSHIP TEST. It is true on
-// EVERY arm — `PanoPlusBridge` starts the core before the AVF source opens
-// anything. So a plugin gated only on `isRunning`, running beside a live AVF
-// arm, is a SECOND producer interleaving into one engine. In the first version
-// of this file the only thing preventing that was the intrinsics refusal
-// below, i.e. an accident: satisfy the intrinsics precondition and the
-// double-feed begins, silently. Ownership is now an explicit flag
-// (`kArmNotification`) that only a real vc-arm start path can set, exactly as
-// Android gates on `PanoPlusVcFrameSink.isArmed` rather than on "is a sweep
-// running".
+// The device vision-camera mounts is PHYSICAL on iOS in practice (its minZoom
+// is ≥1, so `<Camera>`'s multicam branch never fires there), or a virtual
+// device with exactly ONE colour constituent (the LiDAR depth camera a depth
+// build mounts at 1×). `RNISPanoVcArm` refuses multi-lens virtual devices by
+// name before arming, because their active constituent changes under zoom;
+// this file refuses any frame taken at a zoom other than 1× for the same
+// reason.
 //
-// Nothing posts that notification today. That is the honest state and it is
-// deliberately visible: the plugin refuses with `"not armed"` rather than
-// looking like a sensor that went quiet.
+// ── D3: THE BUFFER MUST BE THE RAW SENSOR RASTER ─────────────────────────
 //
-// ── THE SECOND REASON: THERE IS NO FOCAL LENGTH TO BE HAD ──────────────
+// The basis was derived for the back camera's native landscape raster, read
+// unrotated and unmirrored. A mirrored buffer, a buffer taller than wide, or
+// a frame whose orientation differs from the sweep's first frame is REFUSED
+// and named (`deviceRefusal` in `+report`, surfaced live through the bridge's
+// status so the host discards the sweep by name). Painting on a basis that no
+// longer describes the pixels is a confidently wrong canvas.
 //
-// Even once armed, the engine needs an fx. There are two sources on iOS and
-// a Frame Processor can reach NEITHER:
+// ── WHAT IS OBSERVABLE ──────────────────────────────────────────────────
 //
-//  1. THE DELIVERED INTRINSIC MATRIX, attached to the sample buffer as
-//     `kCMSampleBufferAttachmentKey_CameraIntrinsicMatrix`. It is attached
-//     ONLY when the session owner sets
-//     `isCameraIntrinsicMatrixDeliveryEnabled` on the video connection.
-//     pano+ does that on its own connection (RNISPanoAvfSource.swift:830).
-//     vision-camera 4.7.3 NEVER does — measured: zero occurrences of
-//     `IntrinsicMatrix` anywhere in its iOS tree. So the attachment is
-//     absent on the session this plugin runs on.
-//
-//  2. AN FOV DERIVATION off `AVCaptureDevice.activeFormat.videoFieldOfView`.
-//     ⚠ THIS IS REACHABLE, AND AN EARLIER VERSION OF THIS HEADER SAID IT WAS
-//     NOT. It argued that vc's `Frame` carries no device, so there was
-//     "nothing here to derive FROM". True about `Frame`, and irrelevant: we
-//     do not need vision-camera to hand us the device. JS already sends the
-//     id it mounted (`vcCameraId` — on iOS that IS the
-//     `AVCaptureDevice.uniqueID`), and `+[AVCaptureDevice deviceWithUniqueID:]`
-//     resolves it. That is exactly how the ANDROID arm gets its intrinsics
-//     (`CameraCharacteristics` for `vcCameraId`), and the arithmetic is the
-//     one `RNISPanoAvfSource` already runs on its own device (:729-735),
-//     marking the pack with `fovDerivedFx`.
-//
-//     So this arm now DERIVES AND MARKS when no matrix is delivered, which
-//     is the established policy in this subspec rather than a new one. The
-//     old reasoning failed by asking only what vc hands the plugin and never
-//     asking whether the plugin could get it another way.
-//
-// ⚠ AND THE FIRST VERSION OF THIS HEADER GOT THE ARGUMENT WRONG, in a way
-// worth correcting rather than quietly deleting. It said a guessed focal
-// length "is the one failure the engine's own `fx > 0` guard cannot catch,
-// and this codebase has already paid for a confidently-wrong canvas once",
-// which reads as a house rule against derivation. It is not one:
-// `RNISPanoAvfSource.swift:1261-1272` DERIVES fx from FOV on every frame
-// where the matrix is absent, and marks the pack with the delivered/derived
-// split (`framesIntrinsicsFovDerived`). Derive-and-mark is the established
-// policy in this very subspec.
-//
-// The AVF arm may do that because it OWNS the device: it opened one, it
-// refuses virtual containers BY CONSTRUCTION (:508-517), and it therefore
-// knows which physical camera the FOV belongs to. A plugin owns nothing. And
-// if vision-camera did hand over a device it would be the wrong kind —
-// `<Camera>` mounts a VIRTUAL multi-camera container (Triple / Dual Wide) on
-// real iPhones and does 0.5× by `zoom`, so the ACTIVE CONSTITUENT changes
-// under zoom with no notification. An fx from the wrong constituent mid-sweep
-// is not a refused frame; it is a canvas that keeps painting at the wrong
-// scale and reports success.
-//
-// So the rule is: DERIVE WHERE YOU KNOW WHICH DEVICE IT IS; REFUSE WHERE YOU
-// DO NOT. This arm CAN know — JS is meant to tell it, over
-// `kCameraIdNotification`.
-//
-// ⚠ AND NOTHING POSTS THAT NOTIFICATION YET, WHICH AN EARLIER VERSION OF
-// THIS HEADER FAILED TO SAY. `RNISPanoSweepVcCameraIdDidChange` has exactly
-// ONE occurrence in either repository — its own declaration below. So the
-// derivation this file gained is REACHABLE CODE THAT CANNOT RUN: `cameraId`
-// is empty on every frame, `RNISSweepFovFxForCamera()` is never consulted,
-// and a sweep on this arm would refuse 100% of frames with
-// `intrinsicsFovDerived: 0`. The commit that added it said the start mode
-// was "precisely" what still blocked the iOS arm; that was one blocker
-// short, and the word `precisely` is what would stop the next reader
-// looking for the second.
-//
-// The genuine hazard is narrower than
-// the old header claimed: a VIRTUAL multi-camera container switches its
-// active constituent under zoom unannounced, so an fx read from the
-// container is wrong at 0.5×. That is a question about WHICH DEVICE IS
-// MOUNTED, not about a frame, and it is guarded where it belongs —
-// `sweepHostOwnsCamera` refuses the arm on a multicam body away from 1×.
-//
-// WHAT MAKES IT WORK. The arm needs ALL THREE, and the third is the one
-// this header used to omit:
-//   * an iOS start path that arms this plugin and opens no AVCaptureSession
-//     (factor the attitude-configure + CoreMotion half out of
-//     `RNISPanoAvfSource.start`, and post `kArmNotification`); AND
-//   * intrinsics: vision-camera enabling delivery on its video connection (a
-//     one-line change upstream, and vc 5.x already ships it as
-//     `enableCameraMatrixDelivery`), or a host enabling it on a session it
-//     owns, or `<Camera>` mounting a PHYSICAL device — which would remove the
-//     constituent hazard too; AND
-//   * ⚠ A PUBLISHER FOR `kCameraIdNotification`, carrying `cameraId` and a
-//     `frameWidth` that matches the delivered buffer. Without it the FOV
-//     fallback above is dead code and the second bullet becomes mandatory
-//     rather than an alternative. The natural site is wherever `vcCameraId`
-//     and `vcPluginArm` are handed to native — JS already sends both
-//     (`Camera.tsx` passes `vcCameraId` into the surface, and the surface
-//     puts it in `start`'s options bag), so this is a wire, not a design.
-//     It is deliberately NOT added here: a poster no device has ever fired
-//     is a sixth inert knob, and this subspec's rule is that a flag is wired
-//     only when an OUTCOME proves it. The counters that would prove it
-//     (`intrinsicsDelivered` / `intrinsicsFovDerived`) already exist.
-//
-// ── WHAT IS AND IS NOT OBSERVABLE ──────────────────────────────────────
-//
-// An earlier version of this header claimed the inert state "is
-// distinguishable in the pack from 'it ran and painted nothing'". That was
-// FALSE and is removed. What is true now:
-//
-//   * ATTITUDE work is now COUNTED, because this arm calls `align` (the
-//     counted overload) rather than `probe`.
-//     One counted alignment per delivered frame is the documented contract
-//     (`RNISPanoAttitude.h:115-129`); `probe` exists for a HOLD LOOP, which
-//     this plugin does not have. The old comment justified `probe` by saying
-//     it "does not consume the sample" — neither call consumes anything, the
-//     ring is written only by `push`, and the real difference is counting.
-//
-//     ⚠ AND ON STOCK VISION-CAMERA THEY ARE WRITTEN ON **NO** FRAME, which
-//     an earlier version of this bullet got wrong twice over — it first
-//     claimed they reach the pack, then that they are "written every frame
-//     and read by nobody". Both are false. `align` sits BELOW the intrinsics
-//     gate, and that gate returns on every frame here (vc 4.7.3 attaches no
-//     matrix), which is below the arm gate nothing sets. So the honest
-//     statement is: this arm currently produces no attitude rows at all, and
-//     `RNISPanoAttitude.report()` has exactly ONE caller in the package —
-//     inside `RNISPanoAvfSource`'s teardown — which this arm exists to keep
-//     from running. Counted becomes true when the arm is armed AND
-//     intrinsics arrive; PUBLISHED needs the start path below.
-//   * THIS PLUGIN'S OWN counters are reachable only via `+report`. Nothing
-//     calls it yet, because the thing that would — the iOS start path —
-//     does not exist. When it lands it must publish BOTH `+report` AND
-//     `RNISPanoAttitude.report()` at teardown, the way `RNISPanoAvfSource`
-//     publishes the latter (:1431) — shipping only the first leaves the pack
-//     with no `alignment` block at all. Until then, say "unobservable", not
-//     "distinguishable".
+// `seen` is the denominator: every frame vision-camera offered books exactly
+// one bucket (`ingested` or one `refused*`). The attitude work is COUNTED
+// (`align`, one call per delivered frame — `RNISPanoAttitude.h`), and the
+// aligner's report reaches the pack through `RNISPanoImuArm.publish`.
 
 #import <Foundation/Foundation.h>
 
@@ -209,20 +85,19 @@
 #import "RNISPanoAttitude.h"
 #import "RNISPanoCore.h"
 
-/// Posted by a vc-arm start path to arm/disarm this plugin;
-/// `userInfo[@"armed"]` is an `NSNumber` BOOL.
+/// Posted by `RNISPanoVcArm` to arm/disarm this plugin. `userInfo`:
+///   armed       NSNumber BOOL
+///   cameraId    NSString — the `AVCaptureDevice.uniqueID` vision-camera mounted
+///   frameWidth  NSNumber — the active format's LONG edge, for the FOV focal length
+///   lockArmed   NSNumber BOOL — the exposure lock took, so a frame whose device
+///               reports a non-locked exposure mode is counted as unlocked
 ///
-/// A NOTIFICATION RATHER THAN A CLASS METHOD, deliberately. This whole file
-/// is inside `#if __has_include(<VisionCamera/…>)`, so a `+setArmed:`
-/// declared in a header would be a symbol that vanishes on builds without
-/// vision-camera and takes its caller's link down with it — the exact class
-/// of defect `32a4231` was written to fix on Android. A notification name is
-/// a string: the poster compiles and runs whether or not this plugin exists.
+/// A NOTIFICATION RATHER THAN A CLASS METHOD, deliberately. This whole file is
+/// inside `#if __has_include(<VisionCamera/…>)`, so a `+setArmed:` declared in
+/// a header would be a symbol that vanishes on builds without vision-camera
+/// and takes its caller's link down with it. A notification name is a string:
+/// the poster compiles and runs whether or not this plugin exists.
 static NSString *const kArmNotification = @"RNISPanoSweepVcArmDidChange";
-
-/// Posted with `userInfo[@"cameraId"]` — the `AVCaptureDevice.uniqueID` of
-/// the device vision-camera mounted, which JS already sends as `vcCameraId`.
-static NSString *const kCameraIdNotification = @"RNISPanoSweepVcCameraIdDidChange";
 
 /// ⚠ CLASS-LEVEL, NOT PER-INSTANCE — and the reason is NOT the one an earlier
 /// version of this comment gave.
@@ -273,6 +148,34 @@ static atomic_ullong g_ingestedDegraded    = ATOMIC_VAR_INIT(0);
 static atomic_ullong g_ingested            = ATOMIC_VAR_INIT(0);
 static atomic_ullong g_fovDerived          = ATOMIC_VAR_INIT(0);
 static atomic_ullong g_intrinsicsDelivered = ATOMIC_VAR_INIT(0);
+// M5 — the device-level refusals (D3 buffer checks and the zoom guard), the
+// lock witness, and the frames currently inside the callback.
+static atomic_ullong g_refusedZoom          = ATOMIC_VAR_INIT(0);
+static atomic_ullong g_refusedMirrored      = ATOMIC_VAR_INIT(0);
+static atomic_ullong g_refusedRotated       = ATOMIC_VAR_INIT(0);
+static atomic_ullong g_refusedOrientation   = ATOMIC_VAR_INIT(0);
+static atomic_ullong g_observedUnlocked     = ATOMIC_VAR_INIT(0);
+static atomic_ullong g_exposureRead         = ATOMIC_VAR_INIT(0);
+static atomic_bool   g_lockArmed            = ATOMIC_VAR_INIT(false);
+/// Frames currently inside `callback:`. Incremented BEFORE the arm gate so a
+/// disarm that has cleared the flag can wait for every frame that might have
+/// read it as set (see the disarm observer).
+static atomic_int    g_inFlight             = ATOMIC_VAR_INIT(0);
+/// The sweep's first frame orientation (UIImageOrientation), −1 until seen.
+static atomic_int    g_firstOrientation     = ATOMIC_VAR_INIT(-1);
+/// The FIRST device-level refusal of the sweep, by name — surfaced live by the
+/// bridge's status so the host can discard the sweep by name. Guarded by
+/// `g_fovLock`.
+static NSString *g_deviceRefusal = nil;
+
+namespace {
+/// Balanced on every return path of `callback:` by scope, including the early
+/// ones — which is what makes the disarm drain exact.
+struct RNISInFlight {
+  RNISInFlight() { atomic_fetch_add(&g_inFlight, 1); }
+  ~RNISInFlight() { atomic_fetch_sub(&g_inFlight, 1); }
+};
+}  // namespace
 
 /// The FOV-derived focal length for the device vision-camera mounted, and
 /// the id it was derived from. Guarded by `g_fovLock` — written on the arm
@@ -282,7 +185,7 @@ static double  g_fovFx = 0.0;
 /// The buffer width `g_fovFx` was baked FROM. `fx` scales linearly with image
 /// width at a fixed field of view, so an fx baked at one width and applied at
 /// another is wrong by exactly that ratio — and it is not a hypothetical: the
-/// width arrives over `kCameraIdNotification` from the AVCaptureDevice format
+/// width arrives over `kArmNotification` from the AVCaptureDevice format
 /// while the frame processor is handed vision-camera's VIDEO buffer, which is
 /// a different resolution on most bodies, and a rotation swaps w/h on top.
 /// Kept so the fx can be rescaled to the buffer actually delivered.
@@ -292,6 +195,16 @@ static size_t  g_fovWidth = 0;
 /// a wiring mistake, so it is COUNTED and reported.
 static atomic_int g_fovWidthRescaled;
 static NSString *g_fovCameraId = nil;
+/// The device the frames come from, resolved once per arm. Read on the frame
+/// queue for the per-frame exposure / ISO / zoom; guarded by `g_fovLock`.
+static AVCaptureDevice *g_device = nil;
+
+/// Record the sweep's first device-level refusal. Later ones only count.
+static void RNISSweepNoteDeviceRefusal(NSString *name) {
+  [g_fovLock lock];
+  if (g_deviceRefusal == nil) g_deviceRefusal = [name copy];
+  [g_fovLock unlock];
+}
 
 /// Derive fx from a device's published horizontal field of view.
 ///
@@ -332,6 +245,13 @@ static double RNISSweepFovFxForCamera(NSString *cameraId, size_t frameWidth) {
 
 /// The counters, for a start path to publish into `meta.json` at teardown.
 /// Nothing calls this yet — see the header.
+static NSString *RNISSweepDeviceRefusal(void) {
+  [g_fovLock lock];
+  NSString *r = [g_deviceRefusal copy];
+  [g_fovLock unlock];
+  return r;
+}
+
 + (NSDictionary<NSString *, id> *)report {
   return @{
     @"armed":                @(atomic_load(&g_armed)),
@@ -354,12 +274,29 @@ static double RNISSweepFovFxForCamera(NSString *cameraId, size_t frameWidth) {
     // this cannot be compared with a Camera2-arm pack.
     @"intrinsicsDelivered":  @(atomic_load(&g_intrinsicsDelivered)),
     @"intrinsicsFovDerived": @(atomic_load(&g_fovDerived)),
-    // Non-zero means the width JS sent over `kCameraIdNotification` did not
+    // Non-zero means the width the arm sent over `kArmNotification` did not
     // match the buffer vision-camera delivered. The fx was rescaled and the
     // sweep is geometrically sound — but a persistently non-zero count is a
     // WIRING report: the publisher is sending the format width where it
     // should send the video one. Counted rather than silently corrected.
     @"intrinsicsFovWidthRescaled": @(atomic_load(&g_fovWidthRescaled)),
+    // M5 — the device-level refusals: a zoom other than 1×, and the D3
+    // buffer checks. `deviceRefusal` is the FIRST one's name (or null).
+    @"refusedZoom":              @(atomic_load(&g_refusedZoom)),
+    @"refusedMirrored":          @(atomic_load(&g_refusedMirrored)),
+    @"refusedRotated":           @(atomic_load(&g_refusedRotated)),
+    @"refusedOrientationChanged": @(atomic_load(&g_refusedOrientation)),
+    @"deviceRefusal":            RNISSweepDeviceRefusal() ?: (id)[NSNull null],
+    @"firstOrientation":         @(atomic_load(&g_firstOrientation)),
+    // The lock witness: frames whose device reported a non-locked exposure
+    // mode while the start-time lock claimed success. The AVF arm's delegate
+    // made the same check; nothing else drives it on this arm.
+    @"lockArmed":                @(atomic_load(&g_lockArmed)),
+    @"framesObservedUnlocked":   @(atomic_load(&g_observedUnlocked)),
+    // Frames that carried the device's exposure duration and ISO to the
+    // engine — its exposure normalisation used to run on zeros here.
+    @"framesWithExposure":       @(atomic_load(&g_exposureRead)),
+    @"accelSource":              @"RNISPanoAttitude.latestAccelMagMps2 (the IMU arm's CoreMotion)",
   };
 }
 
@@ -373,10 +310,15 @@ static double RNISSweepFovFxForCamera(NSString *cameraId, size_t frameWidth) {
   // `refusedNotArmed` is one of them. Booking `seen` after this gate put
   // that refusal structurally outside the total, which makes the identity
   // false on the ONLY state this arm can currently be in.
+  //
+  // ⚠ IN FLIGHT FIRST, BEFORE THE ARM GATE: the disarm observer clears the
+  // flag and then waits for this count to reach zero, so every frame that
+  // could have read the flag as set is waited out.
+  RNISInFlight inFlight;
   atomic_fetch_add(&g_seen, 1);
   if (!atomic_load(&g_armed)) {
     atomic_fetch_add(&g_refusedNotArmed, 1);
-    return @{@"ingested": @NO, @"why": @"not armed — no iOS vc-arm start path"};
+    return @{@"ingested": @NO, @"why": @"not armed — no vision-camera sweep is running"};
   }
   // Every refusal from here books a bucket too. Two of these returns used
   // to book nothing, so `ingested + the buckets` did not account for the
@@ -411,6 +353,61 @@ static double RNISSweepFovFxForCamera(NSString *cameraId, size_t frameWidth) {
   if (pixelBuffer == NULL) {
     atomic_fetch_add(&g_refusedNoPixelBuf, 1);
     return @{@"ingested": @NO, @"why": @"no pixel buffer"};
+  }
+
+  // ── D3: THE RAW SENSOR RASTER, OR REFUSE BY NAME ─────────────────────
+  // The basis was derived for the back camera's landscape raster, read
+  // unrotated and unmirrored. Anything else is a basis that no longer
+  // describes these pixels — refused, counted, and the first one named.
+  if (frame.isMirrored) {
+    atomic_fetch_add(&g_refusedMirrored, 1);
+    RNISSweepNoteDeviceRefusal(@"mirrored-buffer");
+    return @{@"ingested": @NO, @"why": @"the buffer is mirrored"};
+  }
+  {
+    const size_t bw = CVPixelBufferGetWidth(pixelBuffer);
+    const size_t bh = CVPixelBufferGetHeight(pixelBuffer);
+    if (bh >= bw) {
+      atomic_fetch_add(&g_refusedRotated, 1);
+      RNISSweepNoteDeviceRefusal(@"rotated-buffer");
+      return @{@"ingested": @NO, @"why": @"the buffer is not the landscape sensor raster"};
+    }
+  }
+  {
+    // The orientation vision-camera reports is RECORDED, and must not change
+    // within a sweep: a change means vision-camera re-oriented its outputs
+    // under the sweep.
+    const int o = (int)frame.orientation;
+    int expected = -1;
+    if (!atomic_compare_exchange_strong(&g_firstOrientation, &expected, o) && expected != o) {
+      atomic_fetch_add(&g_refusedOrientation, 1);
+      RNISSweepNoteDeviceRefusal(@"orientation-changed");
+      return @{@"ingested": @NO, @"why": @"the frame orientation changed mid-sweep"};
+    }
+  }
+
+  // ── THE DEVICE: ZOOM GUARD, EXPOSURE, AND THE LOCK WITNESS ────────────
+  [g_fovLock lock];
+  AVCaptureDevice *dev = g_device;
+  [g_fovLock unlock];
+  double expDur = 0.0, expISO = 0.0;
+  if (dev != nil) {
+    // The focal length is the UNZOOMED lens's; a zoomed frame would paint at
+    // the wrong scale and report success.
+    const double z = (double)dev.videoZoomFactor;
+    if (!(fabs(z - 1.0) <= 1e-3)) {
+      atomic_fetch_add(&g_refusedZoom, 1);
+      RNISSweepNoteDeviceRefusal(@"zoom-not-1");
+      return @{@"ingested": @NO, @"why": @"the camera is zoomed"};
+    }
+    const double sec = CMTimeGetSeconds(dev.exposureDuration);
+    if (isfinite(sec) && sec > 0.0) expDur = sec;
+    const double iso = (double)dev.ISO;
+    if (isfinite(iso) && iso > 0.0) expISO = iso;
+    if (expDur > 0.0 && expISO > 0.0) atomic_fetch_add(&g_exposureRead, 1);
+    if (atomic_load(&g_lockArmed) && dev.exposureMode != AVCaptureExposureModeLocked) {
+      atomic_fetch_add(&g_observedUnlocked, 1);
+    }
   }
 
   // THE PRESENTATION TIMESTAMP IN SECONDS, at full CMTime precision.
@@ -473,7 +470,7 @@ static double RNISSweepFovFxForCamera(NSString *cameraId, size_t frameWidth) {
     // it is a question about which device is mounted, not about a frame.
     // ⚠ ONE CRITICAL SECTION FOR BOTH, because they are ONE fact. Reading
     // the fx and the width it was baked from under separate locks lets a
-    // `kCameraIdNotification` land in between and pair camera A's fx with
+    // an arm notification land in between and pair camera A's fx with
     // camera B's width — a ratio built from two different cameras, which is
     // worse than either alone and would look like a plausible number.
     double fovFx = 0.0;
@@ -573,14 +570,11 @@ static double RNISSweepFovFxForCamera(NSString *cameraId, size_t frameWidth) {
   // COUNTED alignment per delivered frame (`RNISPanoAttitude.h:115-129`), and
   // counting is what puts this arm's attitude work in the pack at all.
   //
-  // ⚠ `accelMagMps2: NAN`, NOT 0.0. Both contracts say non-finite means "not
-  // available" and is recorded as NOT-EVALUATED. `0.0` is FINITE, so the
-  // lurch cage evaluates it, compares zero against the threshold, and can
-  // never exceed it — the pack would then show a cage that ran and passed on
-  // every frame of a sweep where it never ran at all. This arm has no
-  // accelerometer of its own; saying so is the whole point of the NaN.
-  const RNISPanoAlignResult att = [RNISPanoAttitude alignPtsS:ptsS
-                                                 accelMagMps2:NAN];
+  // The acceleration magnitude from the IMU arm's CoreMotion stream (M5) —
+  // the same quantity the AVF arm cages. NaN until the first motion sample,
+  // which the cage records as NOT EVALUATED, never as a pass.
+  const RNISPanoAlignResult att = [RNISPanoAttitude
+      alignPtsS:ptsS accelMagMps2:[RNISPanoAttitude latestAccelMagMps2]];
   if (!att.ok && att.fatal) {
     // A configuration fault cannot improve frame by frame — the same
     // reasoning, and the same policy, as RNISPanoAvfSource.swift:1246-1252.
@@ -619,12 +613,11 @@ static double RNISSweepFovFxForCamera(NSString *cameraId, size_t frameWidth) {
                                     : (att.tracking == 2 ? @"normal"
                                         : (att.tracking == 1 ? @"limited"
                                             : @"notAvailable")))
-                // vision-camera surfaces no per-frame exposure, and the AE
-                // lock is the session owner's. Zeros turn the engine's
-                // radiometric normalisation OFF rather than feeding it a
-                // guess — the same trade the Android vc arm records.
-                exposureDurationS:0.0
-                      exposureISO:0.0
+                // M5 — the device's own exposure, read per frame: the
+                // engine's exposure normalisation runs on the camera
+                // rather than on zeros. Zero only when unreadable.
+                exposureDurationS:expDur
+                      exposureISO:expISO
               arExposureDurationS:0.0
                arExposureOffsetEV:0.0
                    arExposureHave:NO];
@@ -646,8 +639,9 @@ static double RNISSweepFovFxForCamera(NSString *cameraId, size_t frameWidth) {
                                                             withOptions:options];
             }];
 
-  // Arming, from whatever start path eventually exists. Registered at image
-  // load so it cannot be missed by a poster that runs early.
+  // Arming, from `RNISPanoVcArm`. Registered at image load so it cannot be
+  // missed by a poster that runs early.
+  if (g_fovLock == nil) g_fovLock = [[NSLock alloc] init];
   [[NSNotificationCenter defaultCenter]
       addObserverForName:kArmNotification
                   object:nil
@@ -655,8 +649,8 @@ static double RNISSweepFovFxForCamera(NSString *cameraId, size_t frameWidth) {
               usingBlock:^(NSNotification *note) {
     const BOOL armed = [note.userInfo[@"armed"] boolValue];
     if (armed) {
-      // RESET ON ARM, not on disarm: a teardown path that wants to publish
-      // `+report` must be able to read it AFTER disarming.
+      // RESET ON ARM, not on disarm: the stop path publishes `+report` AFTER
+      // disarming.
       atomic_store(&g_seen, 0);
       atomic_store(&g_refusedNotArmed, 0);
       atomic_store(&g_refusedNotRunning, 0);
@@ -672,27 +666,39 @@ static double RNISSweepFovFxForCamera(NSString *cameraId, size_t frameWidth) {
       atomic_store(&g_fovDerived, 0);
       atomic_store(&g_fovWidthRescaled, 0);
       atomic_store(&g_intrinsicsDelivered, 0);
+      atomic_store(&g_refusedZoom, 0);
+      atomic_store(&g_refusedMirrored, 0);
+      atomic_store(&g_refusedRotated, 0);
+      atomic_store(&g_refusedOrientation, 0);
+      atomic_store(&g_observedUnlocked, 0);
+      atomic_store(&g_exposureRead, 0);
+      atomic_store(&g_firstOrientation, -1);
+      atomic_store(&g_lockArmed, [note.userInfo[@"lockArmed"] boolValue] ? true : false);
+      // The device and its FOV focal length, ONCE per arm: a
+      // `deviceWithUniqueID:` lookup does not belong on the frame queue.
+      NSString *camId = note.userInfo[@"cameraId"];
+      NSNumber *w = note.userInfo[@"frameWidth"];
+      [g_fovLock lock];
+      g_deviceRefusal = nil;
+      g_fovCameraId = [camId copy];
+      g_fovWidth = (size_t)[w unsignedLongValue];
+      g_device = camId.length > 0 ? [AVCaptureDevice deviceWithUniqueID:camId] : nil;
+      g_fovFx = RNISSweepFovFxForCamera(camId, g_fovWidth);
+      [g_fovLock unlock];
+      atomic_store(&g_armed, true);
+      return;
     }
-    atomic_store(&g_armed, armed);
-  }];
-
-  // The device vision-camera mounted, from the id JS already sends. Derived
-  // ONCE per arm rather than per frame: `deviceWithUniqueID:` is a lookup,
-  // and this runs on whatever thread the start path uses, not on vc's
-  // frame-processor queue.
-  if (g_fovLock == nil) g_fovLock = [[NSLock alloc] init];
-  [[NSNotificationCenter defaultCenter]
-      addObserverForName:kCameraIdNotification
-                  object:nil
-                   queue:nil
-              usingBlock:^(NSNotification *note) {
-    NSString *camId = note.userInfo[@"cameraId"];
-    NSNumber *w = note.userInfo[@"frameWidth"];
+    // DISARM, AND WAIT. Clearing the flag stops NEW frames; a frame already
+    // past the gate may be inside `ingestPixelBuffer`. The stop path finalizes
+    // the engine next, so every such frame is waited out here (bounded — a
+    // wedged frame queue must not wedge the bridge).
+    atomic_store(&g_armed, false);
+    const CFAbsoluteTime deadline = CFAbsoluteTimeGetCurrent() + 1.0;
+    while (atomic_load(&g_inFlight) > 0 && CFAbsoluteTimeGetCurrent() < deadline) {
+      usleep(1000);
+    }
     [g_fovLock lock];
-    g_fovCameraId = [camId copy];
-    g_fovWidth = (size_t)[w unsignedLongValue];
-    atomic_store(&g_fovWidthRescaled, 0);
-    g_fovFx = RNISSweepFovFxForCamera(camId, g_fovWidth);
+    g_device = nil;
     [g_fovLock unlock];
   }];
 }

@@ -361,7 +361,7 @@ Pod::Spec.new do |s|
   s.subspec 'PanoPlus' do |pp|
     # ⚠ AN EXPLICIT LIST, NOT A GLOB. A glob over ios/PanoPlus would silently
     # pick up anything dropped in that directory later, including a file
-    # meant for a test target or a private overlay. Each of the 21 appears
+    # meant for a test target or a private overlay. Each of the 24 appears
     # exactly once — and the count is part of the guard, so it moves with
     # the list. A stale count is the one thing a hand-audited list must not
     # carry: it tells the next reader the audit was done when it was not.
@@ -385,12 +385,15 @@ Pod::Spec.new do |s|
                           'ios/PanoPlus/RNISPanoCameraLock.swift',
                           'ios/PanoPlus/RNISPanoCore.h',
                           'ios/PanoPlus/RNISPanoCore.mm',
+                          'ios/PanoPlus/RNISPanoImuArm.swift',
                           'ios/PanoPlus/RNISPanoImuSidecar.swift',
                           'ios/PanoPlus/RNISPanoLensRequest.swift',
                           'ios/PanoPlus/RNISPanoPlusPlugin.swift',
                           'ios/PanoPlus/RNISPanoSourceView.swift',
                           'ios/PanoPlus/RNISPanoSourceViewManager.m',
                           'ios/PanoPlus/RNISPanoSweepFrameProcessor.mm',
+                          'ios/PanoPlus/RNISPanoVcArm.swift',
+                          'ios/PanoPlus/RNISPanoVcRules.swift',
                           'cpp/panoplus/*.{hpp,cpp}']
 
     # Only the three Obj-C headers, and only because each imports nothing but

@@ -10,10 +10,12 @@
 
 #include <algorithm>
 
+#include <atomic>
 #include <cmath>
 #include <memory>
 
 #include "rnis_pano_attitude.hpp"
+#include "rnis_pano_android_basis.hpp"
 
 namespace {
 
@@ -328,6 +330,48 @@ id jnum(double v) {
 + (NSString *)basisProvenanceForSource:(NSString *)source {
     return @(P::basisProvenanceName(
         P::basisProvenanceForSource(source != nil ? source.UTF8String : nullptr)));
+}
+
+// M5 — the newest |userAcceleration|, m/s², published by the IMU arm's
+// CoreMotion callback and read by the vision-camera plugin. An atomic rather
+// than the aligner's lock: the plugin reads it once per frame on vision-
+// camera's queue, the arm writes it at 200 Hz, and neither may wait.
+static std::atomic<double> gLatestAccelMagMps2{NAN};
+
++ (void)noteAccelMagMps2:(double)accelMagMps2 {
+    gLatestAccelMagMps2.store(accelMagMps2, std::memory_order_relaxed);
+}
+
++ (double)latestAccelMagMps2 {
+    return gLatestAccelMagMps2.load(std::memory_order_relaxed);
+}
+
++ (void)clearAccelMagMps2 {
+    gLatestAccelMagMps2.store(NAN, std::memory_order_relaxed);
+}
+
++ (NSDictionary<NSString *, id> *)deriveBackBasisForMountingAngleDeg:(NSInteger)mountingAngleDeg
+                                                            mirrored:(BOOL)mirrored {
+    namespace A = rnis::pano::android;
+    A::BasisRequest req;
+    req.sensorOrientationDeg = (int)mountingAngleDeg;
+    req.facing = A::LensFacing::Back;
+    req.recorder = A::RecorderRotation::RawSensorBuffer;
+    req.mirrored = mirrored ? true : false;
+    const A::BasisDerivation d = A::deriveBasis(req);
+    return @{
+        @"ok": @(d.ok),
+        @"index": @(d.index),
+        @"label": @(d.label ? d.label : "invalid"),
+        @"refusal": @(d.refusal ? d.refusal : "unknown"),
+        @"mountingAngleDeg": @(mountingAngleDeg),
+        @"mirrored": @(mirrored),
+        @"residualRotationCwDeg": @(d.residualRotationCwDeg),
+    };
+}
+
++ (NSString *)derivedBasisProvenanceName {
+    return @(rnis::pano::android::derivedBasisProvenanceName());
 }
 
 + (NSDictionary<NSString *, id> *)report {

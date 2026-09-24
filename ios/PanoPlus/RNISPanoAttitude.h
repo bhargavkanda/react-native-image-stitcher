@@ -187,6 +187,41 @@ typedef struct {
 + (NSString *)basisProvenanceForSource:(nullable NSString *)source
     NS_SWIFT_NAME(basisProvenance(source:));
 
+/// ── M5: THE ACCELEROMETER, HANDED ACROSS TO A FRAME PROCESSOR ────────────
+///
+/// The lurch cage needs `|userAcceleration|` at each frame.  The AVF arm read
+/// it off its own CoreMotion callback; the vision-camera plugin has no
+/// CoreMotion of its own and passed NaN ("not evaluated") on every frame.
+/// The IMU arm now publishes the newest magnitude here and the plugin reads
+/// it, so both arms cage the same quantity.  NaN until the first sample of a
+/// sweep, and after `+clearAccelMagMps2`.
++ (void)noteAccelMagMps2:(double)accelMagMps2
+    NS_SWIFT_NAME(noteAccelMag(mps2:));
++ (double)latestAccelMagMps2;
++ (void)clearAccelMagMps2;
+
+/// ── M5 / D3: THE BACK CAMERA'S BASIS, DERIVED FROM ITS MOUNTING ─────────
+///
+/// A thin marshalling of `rnis::pano::android::deriveBasis` — the SAME pure,
+/// host-tested derivation the Android recorder runs on `SENSOR_ORIENTATION`.
+/// The input here is Apple's own statement of the mounting: the clockwise
+/// rotation that makes the camera's raw buffer upright with the phone held in
+/// portrait (`videoRotationAngleRelativeToDeviceOrientation(.portrait)` on
+/// iOS 27, `videoRotationAngleForHorizonLevelCapture` in a confirmed portrait
+/// hold before it).  That is exactly `SENSOR_ORIENTATION`'s meaning, and the
+/// buffer reaches the engine unrotated (`RawSensorBuffer`) on both arms.
+///
+/// Returns `ok`, `index` (−1 on refusal), `label`, `refusal`, and the
+/// `mountingAngleDeg` / `mirrored` it was asked about.  Refuses by name for an
+/// angle that is not a multiple of 90 and for a mirrored buffer.
++ (NSDictionary<NSString *, id> *)deriveBackBasisForMountingAngleDeg:(NSInteger)mountingAngleDeg
+                                                            mirrored:(BOOL)mirrored
+    NS_SWIFT_NAME(deriveBackBasis(mountingAngleDeg:mirrored:));
+
+/// The pack's word for a DERIVED basis — `"derived"` — from the shared C++,
+/// never a local literal.  Not `measured`: nothing on the phone measured it.
++ (NSString *)derivedBasisProvenanceName;
+
 /// The counters plus the resolved configuration, for the pack.  This is the
 /// The derive-never-hardcode surface: with `t ≡ 0` the engine's own `rejectedPoseSpeed` and
 /// `maxTranslationJump` read zero, and without these a reader concludes those

@@ -192,7 +192,16 @@ public class PanoPlusCalibBridge: NSObject, RCTInvalidating {
     ) {
         var planOpts = (options as? [String: Any]) ?? [:]
         if let f = options["fps"] as? NSNumber { planOpts["targetFps"] = f }
-        var out = RNISPanoAvfSource.plannedFormatReport(options: planOpts)
+        // M5 — KEYED BY THE DEVICE vision-camera opened when the caller names
+        // it: that arm runs on vision-camera's ACTIVE format, so a τ key built
+        // from the AVF arm's 60 fps plan would describe a format this sweep
+        // never runs in.
+        var out: [String: Any]
+        if let deviceId = options["deviceId"] as? String, !deviceId.isEmpty {
+            out = RNISPanoVcArm.formatReport(cameraId: deviceId)
+        } else {
+            out = RNISPanoAvfSource.plannedFormatReport(options: planOpts)
+        }
         // The KEY itself, assembled here so no JS caller has to know the
         // `model | lens | WxH | fps` grammar.
         if let lens = out["lens"] as? String,

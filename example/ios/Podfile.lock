@@ -2218,7 +2218,7 @@ SPEC CHECKSUMS:
   ReactCodegen: dc552cb22dfc45c73c99f8c4bdf55ae941a39bb3
   ReactCommon: 309419492d417c4cbb87af06f67735afa40ecb9d
   ReactNativeDependencies: 440d3f4892905a33eaceca42c3fb2a528f903bc8
-  RNImageStitcher: 533136532ded0038e19be952f18592ee33c247df
+  RNImageStitcher: 8be23b7699cfd998e15d5a6499909268d96ade80
   RNSensors: 117ba71c7eeeea0407ea0c0bb79e3495d602049b
   VisionCamera: 47f10351a1b6a8d251b90986ae72ca5f52331954
   Yoga: c0b3f2c7e8d3e327e450223a2414ca3fa296b9a2
