@@ -23,7 +23,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `<Camera>`'s own `<ARCameraView>` for AR (the sweep mounts no AR view of its
   own). `engine` changes only what the HOLD runs:
   - the built-in shutter's hold and `startPanorama`/`stopPanorama` go through
-    one dispatch, so a press on the sweep engine runs the sweep;
+    ONE dispatcher, so a press on the sweep engine runs the sweep, under the
+    keyframe engine's own guards: panorama on, shutter enabled, no capture in
+    flight, **the `panMode` gate** (a host that sweeps in portrait passes
+    `panMode="both"`; the default `'vertical'` is a landscape hold) and no
+    camera transition in flight. A sweep hold before its frame-processor
+    plugin lands is deferred and resumed, not refused; if the plugin never
+    lands (1.5 s) it is refused as `ENGINE_UNAVAILABLE`. A release while a
+    hold is deferred abandons it;
+  - `takePhoto()` while a panorama is recording or finishing, on either
+    engine, is refused with the new `CAPTURE_IN_PROGRESS` code (D7);
   - switching the engine at idle no longer unmounts the camera;
   - the camera stays mounted behind the review on both engines (the sweep
     engine itself is deselected there);

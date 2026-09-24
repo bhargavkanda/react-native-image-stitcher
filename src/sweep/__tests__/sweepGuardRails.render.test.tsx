@@ -293,19 +293,112 @@ describe('the rotation guard STOPS THE SWEEP, not just the host callback', () =>
   });
 });
 
+/** Settle mount AND let `<Camera>`'s AR transition finish: a hold inside it
+ *  is (correctly) deferred by the dispatcher. */
+async function settleAr(): Promise<void> {
+  await settle();
+  await act(async () => { jest.advanceTimersByTime(1000); await Promise.resolve(); });
+}
+/** A steady upright phone, so the orientation guard sees portrait. */
+async function upright(): Promise<void> {
+  await act(async () => { sensorsMock.__emitAccelerometer({ x: 0, y: 9.8, z: 0 }); });
+}
+
 describe('M8 — the built-in shutter\'s hold runs the SELECTED engine', () => {
   it('a press-and-hold on <Camera>\'s own shutter reaches the sweep, and its release ends it', async () => {
     // One shutter for both engines: its hold goes through the same dispatch
     // as `startPanorama`, so on the sweep engine it is the sweep's hold.
     const { CameraShutter } = require('../../camera/CameraShutter');
-    const tree = render({});
-    await settle();
+    // The AR arm (no plugin to wait for) and `panMode="both"` (the pan-mode
+    // gate applies to the sweep too — see the dispatcher's own cases).
+    const tree = render({ captureSources: 'both', defaultCaptureSource: 'ar', panMode: 'both' });
+    await settleAr();
     const shutter = tree.root.findByType(CameraShutter);
     await act(async () => { shutter.props.onHoldStart(); });
     expect(calls).toContain('holdStart');
     await act(async () => { shutter.props.onHoldComplete(); });
     expect(calls).toContain('holdEnd');
     act(() => { tree.unmount(); });
+  });
+});
+
+describe('M8 — ONE hold dispatcher: the keyframe engine\'s guards apply to the sweep', () => {
+  const AR = { captureSources: 'both', defaultCaptureSource: 'ar' };
+
+  it('the pan-mode gate: a portrait hold under the default "vertical" is DEFERRED, not started', async () => {
+    const ref = React.createRef<any>();
+    let tree!: ReactTestRenderer;
+    act(() => { tree = create(<Camera ref={ref} engine="sweep" {...(AR as any)} />); });
+    await settleAr();
+    await upright();
+    await act(async () => { ref.current.startPanorama(); });
+    expect(calls).not.toContain('holdStart');
+    // …and the rotate prompt says why, as it does for a keyframe capture.
+    const { RotateToLandscapePrompt } = require('../../camera/RotateToLandscapePrompt');
+    expect(tree.root.findAllByType(RotateToLandscapePrompt)
+      .some((n: any) => n.props.visible === true)).toBe(true);
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ NEGATIVE CONTROL: panMode="both" starts the same hold at once', async () => {
+    const ref = React.createRef<any>();
+    let tree!: ReactTestRenderer;
+    act(() => { tree = create(<Camera ref={ref} engine="sweep" panMode="both" {...(AR as any)} />); });
+    await settleAr();
+    await act(async () => { ref.current.startPanorama(); });
+    expect(calls).toContain('holdStart');
+    act(() => { tree.unmount(); });
+  });
+
+  it('a release while the hold is still DEFERRED abandons it — it never starts later', async () => {
+    const ref = React.createRef<any>();
+    let tree!: ReactTestRenderer;
+    act(() => { tree = create(<Camera ref={ref} engine="sweep" {...(AR as any)} />); });
+    await settleAr();
+    await upright();
+    await act(async () => { ref.current.startPanorama(); });
+    await act(async () => { await ref.current.stopPanorama(); });
+    // Rotating now would have resumed a still-pending hold.
+    await act(async () => { sensorsMock.__emitAccelerometer({ x: 9.8, y: 0, z: 0 }); });
+    await act(async () => { jest.advanceTimersByTime(1500); });
+    expect(calls).not.toContain('holdStart');
+    act(() => { tree.unmount(); });
+  });
+
+  it('D7: takePhoto() during a sweep is refused BY NAME, even in the same tick as the start', async () => {
+    const errors: string[] = [];
+    const ref = React.createRef<any>();
+    let tree!: ReactTestRenderer;
+    act(() => {
+      tree = create(
+        <Camera ref={ref} engine="sweep" panMode="both" {...(AR as any)}
+          onError={(e: { code: string }) => { errors.push(e.code); }} />,
+      );
+    });
+    await settleAr();
+    await act(async () => {
+      ref.current.startPanorama();
+      await ref.current.takePhoto();          // same tick: no state has landed
+    });
+    expect(calls).toContain('holdStart');
+    expect(errors).toEqual(['CAPTURE_IN_PROGRESS']);
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ the shutter\'s hold stays ENABLED on the sweep whatever the engine says — a long press is never a tap', async () => {
+    // `holdEnabled` false turns a release into `onTap`, so a hold the sweep
+    // would refuse must still arrive as a HOLD and be refused by name, never
+    // become a silent photo.
+    const { CameraShutter } = require('../../camera/CameraShutter');
+    for (const engine of ['sweep', 'keyframe'] as const) {
+      let tree!: ReactTestRenderer;
+      act(() => { tree = create(<Camera engine={engine} />); });
+      // eslint-disable-next-line no-await-in-loop
+      await settleAr();
+      expect({ engine, holdEnabled: tree.root.findByType(CameraShutter).props.holdEnabled })
+        .toEqual({ engine, holdEnabled: true });
+      act(() => { tree.unmount(); });
+    }
   });
 });
 

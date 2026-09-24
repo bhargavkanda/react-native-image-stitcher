@@ -82,6 +82,7 @@ import {
   _sweepCameraHandoffForTests as handoff,
   _sweepPreviewLiveForTests as previewLive,
   _sweepShouldSettleForTests as shouldSettle,
+  cameraKindFor,
 } from '../Camera';
 
 /** The state in which the host owns the camera: non-AR, no hatch (M5: both platforms). */
@@ -407,5 +408,19 @@ describe('sweepEffectiveLens', () => {
     for (const arm of [AR, IMU, PENDING_AR, null]) {
       expect(sweepEffectiveLens('1x', arm)).toBe('1x');
     }
+  });
+});
+
+describe('cameraKindFor — M8: the camera is <Camera>\'s state, never the engine\'s', () => {
+  it('the table', () => {
+    expect(cameraKindFor(true, true)).toBe('none');
+    expect(cameraKindFor(true, false)).toBe('none');
+    expect(cameraKindFor(false, true)).toBe('ar');
+    expect(cameraKindFor(false, false)).toBe('vc');
+  });
+  it('⚑ has NO engine input — flipping the engine cannot change the camera', () => {
+    // Two parameters, both camera state. An engine argument added here is
+    // the regression this pins.
+    expect(cameraKindFor.length).toBe(2);
   });
 });

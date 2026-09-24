@@ -516,6 +516,13 @@ export type CameraErrorCode =
    * camera that had stopped delivering frames.
    */
   | 'CAPTURE_INTERRUPTED'
+  /**
+   * M8 (D7) — `takePhoto()` while a panorama is recording or finishing, on
+   * either engine: refused, never taken. A photo has never run while the
+   * sweep ingests (it would be taken with the capture's exposure lock held),
+   * so the answer is a name rather than an unknown.
+   */
+  | 'CAPTURE_IN_PROGRESS'
   | 'UNKNOWN';
 
 
@@ -2859,15 +2866,24 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // functions, so a host that hides the shutter and drives holds itself runs
   // exactly what a press runs, on either engine.
   const holdStartDispatchRef = useRef<() => void>(() => undefined);
-  holdStartDispatchRef.current = () => {
-    if (engineRef.current === 'sweep') { sweepRef.current?.holdStart?.(); return; }
-    handleHoldStartRef.current?.();
-  };
+  holdStartDispatchRef.current = () => { handleHoldStartRef.current?.(); };
   const holdEndDispatchRef = useRef<() => void>(() => undefined);
   holdEndDispatchRef.current = () => {
-    if (engineRef.current === 'sweep') { sweepRef.current?.holdEnd?.(); return; }
+    if (engineRef.current === 'sweep') {
+      // A release while the hold is still DEFERRED abandons it, exactly as
+      // `handleHoldEnd` does for the keyframe engine.
+      setPendingPanStart(false);
+      sweepRef.current?.holdEnd?.();
+      return;
+    }
     handleHoldEndRef.current?.();
   };
+  // D7 — is a capture in flight, for the imperative `takePhoto`? Recomputed
+  // every render, and raised SYNCHRONOUSLY by the dispatcher, so a
+  // `takePhoto()` issued in the same tick as `startPanorama()` is refused too.
+  const captureBusyRef = useRef(false);
+  const onErrorRef = useRef(onError);
+  onErrorRef.current = onError;
   const holdStartDispatch = useCallback(() => { holdStartDispatchRef.current(); }, []);
   const holdEndDispatch = useCallback(() => { holdEndDispatchRef.current(); }, []);
   /** The sweep surface's shutter handle, when `engine="sweep"`. */
@@ -2891,7 +2907,17 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     removeOverlay: (id) => arViewRef.current?.removeOverlay(id),
     clearOverlays: () => arViewRef.current?.clearOverlays(),
     raycast: () => arViewRef.current?.raycast() ?? Promise.resolve(null),
-    takePhoto: () => handleTapRef.current?.() ?? Promise.resolve(),
+    takePhoto: () => {
+      if (captureBusyRef.current) {
+        onErrorRef.current?.(new CameraError(
+          'CAPTURE_IN_PROGRESS',
+          'takePhoto() was refused: a panorama is recording or finishing. '
+            + 'Take the photo after the capture ends.',
+        ));
+        return Promise.resolve();
+      }
+      return handleTapRef.current?.() ?? Promise.resolve();
+    },
     // ⚠ THE HANDLE IS ENGINE-AWARE. A host that hides the built-in shutter
     // and drives capture itself must reach the SWEEP when that engine is
     // selected; routing to `handleHoldStartRef` would start the keyframe
@@ -3875,15 +3901,36 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // decides WHETHER to start now.  Under Mode A in portrait it latches
   // `pendingPanStart` instead (item 1/2) and the resume effect below
   // starts the capture once the user rotates to landscape.
+  // M8 — the sweep's hold-only readiness defer: see the dispatcher below.
+  const sweepHoldShouldDefer = engine === 'sweep'
+    && !isAR
+    && sweep?.frameSourceOverride !== 'own'
+    && ((!sweepDriver.isReady && !sweepDriver.unavailable)
+      || (capture.device?.id ?? '') === '');
   const handleHoldStart = useCallback(() => {
     // Gate symmetrically with handleTap (shutterDisabled) AND guard
     // re-entrancy: the built-in shutter's phase machine prevents a
     // double-start, but the imperative startPanorama() has no such machine, so
     // a repeat call — or one while a capture is recording/stitching — would
     // re-enter incremental.start() on a live engine.
-    if (!enablePanoramaMode || shutterDisabled) return;
+    // ── M8: ONE DISPATCHER, BOTH ENGINES ─────────────────────────────────
+    // The shutter's hold and the handle's `startPanorama` both land here, and
+    // every guard below applies to the sweep as it does to a keyframe capture:
+    // panorama on, shutter enabled, no capture in flight, the pan-mode gate,
+    // and no camera transition in flight. Only the engine's own readiness and
+    // the start itself differ.
+    if (shutterDisabled) return;
+    if (!enablePanoramaMode) {
+      // The sweep refuses BY NAME (its hold refusal is
+      // `panoplus-panorama-disabled`); the keyframe engine keeps its silence.
+      if (engine === 'sweep') sweepRef.current?.holdStart?.();
+      return;
+    }
     if (statusPhase === 'recording' || statusPhase === 'stitching') return;
-    if (!incrementalStitcherIsAvailable()) {
+    if (engine === 'sweep') {
+      // Re-entrancy: a sweep is starting, running or finishing.
+      if (sweepRunning) return;
+    } else if (!incrementalStitcherIsAvailable()) {
       // Say WHICH of the two it is. "Not available" covered both "the module
       // is not registered at all" (a linking problem) and "it is registered
       // but a method is missing" (a native-export problem), and those send
@@ -3931,12 +3978,26 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       setPendingPanStart(true);
       return;
     }
+    // M8 — THE SWEEP'S OWN READINESS, hold-only: on the vision-camera kind its
+    // frame-processor plugin is still being looked up, or the device is not
+    // known yet. Deferred like the gates above; bounded, because the lookup
+    // gives up at 1.5 s and the resumed hold is then refused by name
+    // (`panoplus-plugin-unavailable` → ENGINE_UNAVAILABLE).
+    if (sweepHoldShouldDefer) {
+      setPendingPanStart(true);
+      return;
+    }
+    captureBusyRef.current = true;   // D7 — before any state lands
+    if (engine === 'sweep') { sweepRef.current?.holdStart?.(); return; }
     void startCapture();
   }, [
     enablePanoramaMode,
     shutterDisabled,
     statusPhase,
     onError,
+    engine,
+    sweepRunning,
+    sweepHoldShouldDefer,
     panMode,
     arSupportPending,
     // v0.25 — read by holdShouldDeferForCamera above; without it this
@@ -3962,9 +4023,13 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       && !holdShouldDeferForCamera(
         inFlightTransition || cameraHandoffPending, arSupportPending,
       )
+      && !sweepHoldShouldDefer
     ) {
       setPendingPanStart(false);
-      startCaptureRef.current?.();
+      // M8 — resume the SELECTED engine's start.
+      captureBusyRef.current = true;
+      if (engineRef.current === 'sweep') sweepRef.current?.holdStart?.();
+      else startCaptureRef.current?.();
     }
   }, [
     pendingPanStart,
@@ -3973,6 +4038,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     arSupportPending,
     inFlightTransition,
     cameraHandoffPending,
+    sweepHoldShouldDefer,
   ]);
 
   const handleHoldEnd = useCallback(async () => {
@@ -5772,6 +5838,17 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   const sweepEngine = useSweepEngine(sweepSurfaceProps, sweepRef, {
     enabled: engine === 'sweep' && cropPending == null,
   });
+  const cameraKind = cameraKindFor(
+    cameraShouldUnmount(inFlightTransition, arSupportPending, statusPhase, cameraHandoffPending),
+    isAR,
+  );
+  // D7 — the per-render answer (the dispatcher raises it synchronously before
+  // any of this state lands). The sweep's own phase counts from 'starting':
+  // `sweepRunning` arrives one effect later.
+  captureBusyRef.current = captureRecording
+    || sweepRunning
+    || statusPhase === 'stitching'
+    || (engine === 'sweep' && sweepEngine.phase !== 'idle');
 
   // ── M8 (D15): ONE AR VIEW, ONE SESSION CONFIG, BOTH ENGINES ───────────────
   // Any change to these props pauses ARCore, re-selects its camera config and
@@ -6004,12 +6081,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           only ONE camera component is alive at a time; matches the
           monorepo's working pattern and avoids the Camera2-in-use
           conflict that "always mount both" caused on Android. */}
-      {cameraShouldUnmount(
-        inFlightTransition,
-        arSupportPending,
-        statusPhase,
-        cameraHandoffPending,
-      ) ? (
+      {cameraKind === 'none' ? (
         // statusPhase==='stitching' UNMOUNTS the camera so vision-camera
         // frees the AVCaptureSession + preview buffers during the stitch
         // (V12.14.8 OOM fix).  The CaptureStatusOverlay renders the
@@ -6020,7 +6092,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             <Text style={styles.transitionLabel}>Switching camera…</Text>
           )}
         </View>
-      ) : isAR ? (
+      ) : cameraKind === 'ar' ? (
         <ARCameraView
           ref={arViewRef}
           style={StyleSheet.absoluteFill}
@@ -6464,6 +6536,17 @@ export const _isSideEdgeForTests = isSideEdge;
  * Pure + exported for test — the lib's jest config can't mount <Camera>,
  * so this boolean is the unit-testable core of the OOM render gate.
  */
+/**
+ * M8 — WHICH camera `<Camera>` has on screen: none (a transition, a handoff,
+ * the stitch), its AR view, or its vision-camera preview. A pure function of
+ * `<Camera>`'s own state and deliberately NOT of the engine: flipping `engine`
+ * can never change the camera (DR-2 I3/A7). The camera slot renders from it.
+ */
+export function cameraKindFor(unmounting: boolean, isAR: boolean): 'none' | 'ar' | 'vc' {
+  if (unmounting) return 'none';
+  return isAR ? 'ar' : 'vc';
+}
+
 function cameraShouldUnmount(
   inFlightTransition: boolean,
   arSupportPending: boolean,
