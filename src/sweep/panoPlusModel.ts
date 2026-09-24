@@ -3170,8 +3170,10 @@ function exposureOf(raw: unknown): PanoPlusExposure {
  *  the only honest state for a pack that predates the block: it is neither
  *  "the lock held on ARKit's pixels" nor "it did not". */
 function arExposureOf(raw: unknown): PanoPlusArExposure {
+  const present = rec(raw) != null;
   const a = rec(raw) ?? {};
   return {
+    present,
     frames: num(a.frames),
     minDurationS: num(a.minDurationS),
     maxDurationS: num(a.maxDurationS),
@@ -3787,7 +3789,14 @@ export function panoPlusIntegrity(summary: PanoPlusSummary): PanoPlusIntegrity {
   // settles both. `frames === 0` is UNKNOWN and says so; it is neither a pass
   // nor a fail, which is exactly the state the pack could not express before.
   const ar = summary.exposure.ar;
-  const arExposureLine = ar.frames === 0
+  // ⚠ NOT ON A PRODUCER THAT HAS NO ARKIT. Android emits no `exposure.ar` and
+  // no camera-lock report, and printing "ARKit exposure: NOT READ … circular"
+  // on its results named a measurement that platform cannot make. An iOS pack
+  // that predates the block still carries its lock report, so it keeps the
+  // UNKNOWN line.
+  const arExposureLine = !ar.present && exp.lock == null
+    ? null
+    : ar.frames === 0
     ? (exp.metaFrames > 0 || exp.lock != null
       ? 'ARKit exposure: NOT READ on this run — the device numbers above are '
         + 'therefore still circular (they are the object we locked, read back)'

@@ -1612,6 +1612,12 @@ export interface PanoPlusExposure {
  *    large delta is the finding that the lock was asserted on the wrong one.
  */
 export interface PanoPlusArExposure {
+  /**
+   * The producer emitted this block at all. Absent on Android (no ARKit) and
+   * on iOS packs that predate it — which the integrity line must not report as
+   * an ARKit read that failed.
+   */
+  present: boolean;
   /** Frames carrying a usable `ARCamera.exposureDuration`. */
   frames: number;
   minDurationS: number;

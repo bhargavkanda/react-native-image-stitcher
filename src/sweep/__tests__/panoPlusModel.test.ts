@@ -3309,6 +3309,25 @@ describe('panoPlusIntegrity — v11 non-circular exposure evidence', () => {
     expect(line).toContain('No probe report in this pack.');
   });
 
+  it('⚑ prints NO ARKit line on a producer that has no ARKit (Android: no block, no lock report)', () => {
+    // An Android summary carries neither `exposure.ar` nor a camera-lock
+    // report; "ARKit exposure: NOT READ … circular" named a measurement that
+    // platform cannot make.
+    const android = coercePanoPlusSummary({
+      counts: { seen: 100, painted: 80 },
+      width: 1200, height: 400,
+      exposure: {
+        normalize: true, gainClamp: 4, metaFrames: 90, clampedFrames: 0,
+        refValue: 1, minValue: 1, maxValue: 1, rangeRatio: 1,
+      },
+    });
+    expect(android.exposure.ar.present).toBe(false);
+    expect(panoPlusIntegrity(android).arExposureLine).toBeNull();
+    // …while an iOS pack that predates the block keeps its UNKNOWN line (it
+    // carries the lock report) — the case above.
+    expect(panoPlusIntegrity(withAr(undefined)).arExposureLine ?? '').toContain('NOT READ');
+  });
+
   it('reports WHY the probe came back empty when it did report', () => {
     const v = panoPlusIntegrity(withAr({
       frames: 0, minDurationS: 0, maxDurationS: 0, rangeRatio: 1,

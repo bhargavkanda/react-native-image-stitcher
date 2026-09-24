@@ -745,6 +745,10 @@ class PanoPlusLiveModule(
                 // is a panorama.
                 val info = WritableNativeMap()
                 copyString(m, info, "packDir")
+                // `panoPlusErrorInfo` reads `userInfo.sessionDir` (iOS rejects
+                // with the whole summary, which carries it); without it this
+                // Android rejection lost the pack's location.
+                optStr(m, "packDir", null)?.let { info.putString("sessionDir", it) }
                 copyString(m, info, "liveStartError")
                 copyString(m, info, "reason")
                 inner.reject(
@@ -761,6 +765,10 @@ class PanoPlusLiveModule(
             if (obj == null || !obj.optBoolean("ok", false)) {
                 val info = WritableNativeMap()
                 copyString(m, info, "packDir")
+                // `panoPlusErrorInfo` reads `userInfo.sessionDir` (iOS rejects
+                // with the whole summary, which carries it); without it this
+                // Android rejection lost the pack's location.
+                optStr(m, "packDir", null)?.let { info.putString("sessionDir", it) }
                 info.putString("summaryJson", summaryJson)
                 inner.reject(
                     "panoplus-io",
