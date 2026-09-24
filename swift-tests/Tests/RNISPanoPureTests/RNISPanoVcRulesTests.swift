@@ -78,6 +78,15 @@ final class RNISPanoVcRulesTests: XCTestCase {
         XCTAssertNil(RNISPanoVcRules.quarterTurn(.nan))
     }
 
+    func testAHoldDisagreementIsRetryableAndNeverSendsTheOperatorToCalibrate() {
+        let r = RNISPanoVcRules.holdRefusal()
+        XCTAssertEqual(r.code, "panoplus-vc-hold-not-portrait")
+        XCTAssertTrue(r.detail.contains("portrait"))
+        XCTAssertFalse(r.detail.lowercased().contains("calibrat"))
+        XCTAssertFalse(RNISPanoVcRules.basisRefusal(derivedIndex: 9, mountingAngleDeg: 270, method: "m",
+                                                     refusal: nil)!.detail.contains("calibration tool"))
+    }
+
     func testOnlyTheMeasuredBasisRuns() {
         XCTAssertNil(RNISPanoVcRules.basisRefusal(derivedIndex: 8, mountingAngleDeg: 90, method: "m", refusal: nil))
         let r = RNISPanoVcRules.basisRefusal(derivedIndex: 9, mountingAngleDeg: 270, method: "m", refusal: nil)

@@ -180,6 +180,28 @@ public final class RNISPanoVcArm: NSObject {
                 let coordinator = AVCaptureDevice.RotationCoordinator(device: device, previewLayer: nil)
                 angle = Double(coordinator.videoRotationAngleForHorizonLevelCapture)
                 method = "RotationCoordinator.videoRotationAngleForHorizonLevelCapture (portrait confirmed by gravity)"
+                // ⚠ M5 review — the coordinator follows its OWN orientation
+                // estimate, which can lag a phone just turned upright. A
+                // landscape answer (0/180) while gravity says portrait is a
+                // disagreement about the HOLD, not a mounting: read again after
+                // a beat, and if they still disagree say so as a hold refusal —
+                // never "measure this kind of device".
+                if let a = angle, let q = RNISPanoVcRules.quarterTurn(a), q == 0 || q == 180 {
+                    usleep(300_000)
+                    let g2 = sampleGravity(timeoutS: 0.2)
+                    let a2 = Double(coordinator.videoRotationAngleForHorizonLevelCapture)
+                    angle = a2
+                    gravity = g2 ?? gravity
+                    if let q2 = RNISPanoVcRules.quarterTurn(a2), q2 == 0 || q2 == 180 {
+                        return [
+                            "ok": false, "index": -1, "method": method,
+                            "readAngleDeg": a2, "gravityAtStart": (g2 ?? g) as Any,
+                            "refusal": "hold-disagrees-with-orientation",
+                            "holdRefusal": true,
+                            "provenance": RNISPanoAttitude.derivedBasisProvenanceName(),
+                        ]
+                    }
+                }
             } else {
                 method = "constant (the hold was not confirmed portrait at start)"
             }

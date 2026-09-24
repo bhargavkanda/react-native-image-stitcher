@@ -4176,6 +4176,9 @@ export function panoPlusFailureCopy(f: PanoPlusFailure): string {
       return `The sweep cannot run on this camera. ${f.message}`;
     case 'panoplus-vc-format-below-30fps':
       return `The camera is running too slowly for a sweep. ${f.message}`;
+    case 'panoplus-vc-hold-not-portrait':
+      // Retryable, and about the HOLD — never "measure this device".
+      return `Hold the phone upright in portrait and start the sweep again. ${f.message}`;
     case 'panoplus-vc-zoom-not-1':
       return `Zoom back to 1× for the sweep. ${f.message}`;
     case 'panoplus-plugin-unavailable':

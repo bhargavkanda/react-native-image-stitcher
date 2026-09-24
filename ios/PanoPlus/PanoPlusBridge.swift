@@ -168,47 +168,58 @@ public class PanoPlusBridge: NSObject, RCTInvalidating {
     /// race leaves `claimed == false`, and the start path checks that after the
     /// source is up and stops it rather than orphaning it.
     private static let armLock = NSLock()
-    private static var avfArmClaimed = false
 
-    /// Claim the decoupled arm.  Called on the bridge queue, before any async.
-    private static func claimAvfArm() {
-        armLock.lock(); avfArmClaimed = true; armLock.unlock()
-    }
-    /// Release the claim without acting on it (a start that refused).
-    private static func releaseAvfArm() {
-        armLock.lock(); avfArmClaimed = false; armLock.unlock()
-    }
-    /// TAKE the claim: returns whether it was held, and clears it, atomically.
-    /// Exactly one caller can ever get `true` for a given claim.
-    private static func takeAvfArm() -> Bool {
-        armLock.lock(); defer { armLock.unlock() }
-        let held = avfArmClaimed
-        avfArmClaimed = false
-        return held
-    }
-    /// Is the claim still standing?  Used by the start path to notice that a
-    /// concurrent teardown took it while the camera was opening.
-    private static func avfArmIsClaimed() -> Bool {
-        armLock.lock(); defer { armLock.unlock() }
-        return avfArmClaimed
-    }
+    /// ── ONE CLAIM, TAKEN ONCE, WITH A GENERATION (M5 review) ─────────────
+    ///
+    /// The two camera arms that pano+ drives itself — the AVF source and the
+    /// vision-camera arm — share ONE claim. It is a TEST-AND-SET on the bridge
+    /// queue: a start that finds either arm claimed is refused `panoplus-busy`
+    /// AT ONCE, before going async, and never touches the claim it found.
+    ///
+    /// It used to be two blind Bools. A second start during a live sweep set
+    /// the flag (a no-op), was refused busy inside its async block — and its
+    /// refusal CLEARED the live sweep's claim. The live sweep's stop then took
+    /// nothing, fell into the ARKit teardown, and left CoreMotion running and
+    /// the plugin armed for the rest of the process.
+    ///
+    /// Each claim carries a generation, so only the start that took it can
+    /// release it, and a start's post-open re-check asks "is MY claim still
+    /// standing", not "is some claim standing".
+    private enum ArmClaim { case none, avf(UInt64), vc(UInt64) }
+    private static var armClaim: ArmClaim = .none
+    private static var armClaimGen: UInt64 = 0
 
-    /// M5 — the SAME claim discipline for the vision-camera arm: claimed on
-    /// the bridge queue before start goes async, TAKEN by exactly one
-    /// teardown, and re-checked by start after arming, so a stop racing the
-    /// start can neither miss the arm nor be missed by it.
-    private static var vcArmClaimed = false
-    private static func claimVcArm() { armLock.lock(); vcArmClaimed = true; armLock.unlock() }
-    private static func releaseVcArm() { armLock.lock(); vcArmClaimed = false; armLock.unlock() }
-    private static func takeVcArm() -> Bool {
+    /// Test-and-set. Nil when any arm is already claimed.
+    private static func claimArm(vc: Bool) -> UInt64? {
         armLock.lock(); defer { armLock.unlock() }
-        let held = vcArmClaimed
-        vcArmClaimed = false
-        return held
+        guard case .none = armClaim else { return nil }
+        armClaimGen += 1
+        armClaim = vc ? .vc(armClaimGen) : .avf(armClaimGen)
+        return armClaimGen
     }
-    private static func vcArmIsClaimed() -> Bool {
+    /// Release the claim `gen` — and only that one (a start that refused).
+    private static func releaseArm(_ gen: UInt64) {
         armLock.lock(); defer { armLock.unlock() }
-        return vcArmClaimed
+        switch armClaim {
+        case .avf(let g) where g == gen, .vc(let g) where g == gen: armClaim = .none
+        default: break
+        }
+    }
+    /// Is the claim `gen` still standing? The start path's check that a
+    /// concurrent teardown did not take it while the arm was opening.
+    private static func armIsClaimed(_ gen: UInt64) -> Bool {
+        armLock.lock(); defer { armLock.unlock() }
+        switch armClaim {
+        case .avf(let g), .vc(let g): return g == gen
+        case .none: return false
+        }
+    }
+    /// TAKE whatever is claimed, atomically. Exactly one caller ever gets it.
+    private static func takeArm() -> ArmClaim {
+        armLock.lock(); defer { armLock.unlock() }
+        let c = armClaim
+        armClaim = .none
+        return c
     }
 
     /// How long `start` will wait for ARKit to acknowledge a stop before it
@@ -341,11 +352,18 @@ public class PanoPlusBridge: NSObject, RCTInvalidating {
         // below.  A `stop()` / `cancel()` / bundle reload that reaches teardown
         // while start is still in flight must find the arm claimed, or it takes
         // the ARKit branch and orphans a live 60 fps session for the rest of
-        // the process.  See `avfArmClaimed`.
-        if poseSource == "imu" { Self.claimAvfArm() }
+        // the process.  See `armClaim`.
+        var avfGen: UInt64 = 0
+        if poseSource == "imu" {
+            guard let g = Self.claimArm(vc: false) else {
+                rejecter("panoplus-busy", "A pano+ sweep is already running.", nil)
+                return
+            }
+            avfGen = g
+        }
         DispatchQueue.global(qos: .userInitiated).async {
             if RNISPanoCore.isRunning() {
-                if poseSource == "imu" { Self.releaseAvfArm() }
+                if poseSource == "imu" { Self.releaseArm(avfGen) }
                 rejecter("panoplus-busy", "A pano+ sweep is already running.", nil)
                 return
             }
@@ -375,7 +393,7 @@ public class PanoPlusBridge: NSObject, RCTInvalidating {
             do {
                 try RNISPanoCore.start(options: opts)
             } catch let nsError as NSError {
-                if poseSource == "imu" { Self.releaseAvfArm() }
+                if poseSource == "imu" { Self.releaseArm(avfGen) }
                 let key = nsError.code == 409 ? "panoplus-busy"
                         : (nsError.code == 400 ? "invalid-options" : "panoplus-io")
                 rejecter(key,
@@ -623,7 +641,7 @@ public class PanoPlusBridge: NSObject, RCTInvalidating {
                     // already taken the claim and gone home believing there
                     // was nothing to stop.  Without this check the session it
                     // could not see would run for the life of the process.
-                    guard Self.avfArmIsClaimed() else {
+                    guard Self.armIsClaimed(avfGen) else {
                         RNISPanoAvfSource.shared.stop()
                         // v12 REVIEW FIX (major) — the racing teardown's own
                         // unlock() ran BEFORE this start's lock existed (the
@@ -660,11 +678,11 @@ public class PanoPlusBridge: NSObject, RCTInvalidating {
                     // or the next start would reject with `panoplus-busy` and
                     // the operator would chase the wrong fault.  The arm claim
                     // goes with it — a refused start owns no producer.
-                    Self.releaseAvfArm()
+                    Self.releaseArm(avfGen)
                     RNISPanoCore.cancel()
                     rejecter(f.code, f.detail, nil)
                 } catch {
-                    Self.releaseAvfArm()
+                    Self.releaseArm(avfGen)
                     RNISPanoCore.cancel()
                     rejecter("panoplus-io", "\(error)", nil)
                 }
@@ -786,10 +804,13 @@ public class PanoPlusBridge: NSObject, RCTInvalidating {
         resolver: @escaping RCTPromiseResolveBlock,
         rejecter: @escaping RCTPromiseRejectBlock
     ) {
-        Self.claimVcArm()
+        guard let vcGen = Self.claimArm(vc: true) else {
+            rejecter("panoplus-busy", "A pano+ sweep is already running.", nil)
+            return
+        }
         DispatchQueue.global(qos: .userInitiated).async {
             func refuse(_ code: String, _ detail: String) {
-                Self.releaseVcArm()
+                Self.releaseArm(vcGen)
                 rejecter(code, detail, nil)
             }
             if RNISPanoCore.isRunning() {
@@ -854,6 +875,10 @@ public class PanoPlusBridge: NSObject, RCTInvalidating {
             } else {
                 let der = RNISPanoVcArm.deriveBasis(device: dev.device)
                 opts["basisDerivation"] = der
+                if (der["holdRefusal"] as? Bool) == true {
+                    let r = RNISPanoVcRules.holdRefusal()
+                    refuse(r.code, r.detail); return
+                }
                 let idx = (der["index"] as? NSNumber)?.intValue ?? -1
                 if let r = RNISPanoVcRules.basisRefusal(
                     derivedIndex: idx,
@@ -872,15 +897,6 @@ public class PanoPlusBridge: NSObject, RCTInvalidating {
             // colour lens, never a virtual container's type.
             opts["lensDeviceLens"] = dev.colourLens
 
-            // The second attitude channel is an ARKit-arm instrument.
-            if imuSidecar {
-                RNISPanoCore.recordImuSidecar([
-                    "ran": false, "requested": true, "reason": "not-applicable-on-vc-arm",
-                    "detail": "the sweep ran on vision-camera's camera with CoreMotion as its "
-                        + "only attitude source; there is no ARKit channel to compare.",
-                ])
-            }
-
             do {
                 try RNISPanoCore.start(options: opts)
             } catch let nsError as NSError {
@@ -890,12 +906,22 @@ public class PanoPlusBridge: NSObject, RCTInvalidating {
                              ?? "Could not start the pano+ sweep.")
                 return
             }
+            // The second attitude channel is an ARKit-arm instrument. Recorded
+            // AFTER the engine starts (M5 review): before it there is no
+            // session to record into, and the refusal was dropped silently.
+            if imuSidecar {
+                RNISPanoCore.recordImuSidecar([
+                    "ran": false, "requested": true, "reason": "not-applicable-on-vc-arm",
+                    "detail": "the sweep ran on vision-camera's camera with CoreMotion as its "
+                        + "only attitude source; there is no ARKit channel to compare.",
+                ])
+            }
             do {
                 let report = try RNISPanoVcArm.shared.start(
                     sessionDir: sessionDir, device: dev, options: opts)
                 // A teardown that landed while the arm was starting has taken
                 // the claim and found nothing to stop.
-                guard Self.vcArmIsClaimed() else {
+                guard Self.armIsClaimed(vcGen) else {
                     RNISPanoVcArm.shared.stop()
                     RNISPanoCameraLock.shared.unlock()
                     RNISPanoCore.cancel()
@@ -917,11 +943,11 @@ public class PanoPlusBridge: NSObject, RCTInvalidating {
                     "cameraLock": (lockReport as Any?) ?? NSNull(),
                 ])
             } catch let f as RNISPanoVcArm.StartFailure {
-                Self.releaseVcArm()
+                Self.releaseArm(vcGen)
                 RNISPanoCore.cancel()
                 rejecter(f.code, f.detail, nil)
             } catch {
-                Self.releaseVcArm()
+                Self.releaseArm(vcGen)
                 RNISPanoCore.cancel()
                 rejecter("panoplus-io", "\(error)", nil)
             }
@@ -1070,7 +1096,7 @@ public class PanoPlusBridge: NSObject, RCTInvalidating {
         // has an exit that skips everything below it, and a recorder reachable
         // from only one of two exits is a 200 Hz CoreMotion service running
         // for the life of the process the first time the arms are confused —
-        // which is the leak this file's own `avfArmClaimed` doc-comment was
+        // which is the leak this file's own `armClaim` doc-comment was
         // written about.  The sidecar arms on the ARKit arm ONLY, so today the
         // decoupled path cannot have one; placing the call where that fact is
         // not load-bearing costs one uncontended lock and removes the class.
@@ -1107,7 +1133,8 @@ public class PanoPlusBridge: NSObject, RCTInvalidating {
         // plugin (waiting out a frame inside the engine), stop CoreMotion and
         // publish the pose block, then unlock vision-camera's device. The lock
         // witness is the plugin's per-frame check, named as such.
-        if takeVcArm() {
+        let claim = takeArm()
+        if case .vc = claim {
             RNISPanoVcArm.shared.stop()
             RNISPanoCameraLock.shared.unlock()
             var sweep = RNISPanoCameraLock.shared.sweepReport()
@@ -1117,7 +1144,7 @@ public class PanoPlusBridge: NSObject, RCTInvalidating {
             RNISPanoCore.mergeCameraLock(sweep)
             return
         }
-        if takeAvfArm() {
+        if case .avf = claim {
             RNISPanoAvfSource.shared.stop()
             RNISPanoCameraLock.shared.unlock()
             // v12 REVIEW FIX (major) — the shared lock's own counters are

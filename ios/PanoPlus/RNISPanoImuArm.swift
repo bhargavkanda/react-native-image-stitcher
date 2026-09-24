@@ -330,7 +330,13 @@ public final class RNISPanoImuArm: NSObject {
             ? RNISPanoAttitude.derivedBasisProvenanceName()
             : RNISPanoAttitude.basisProvenance(source: basisSource)
         report["basisProvenance"] = basisProv
-        report["basisNote"] = basisNote(provenance: basisProv)
+        // M5 review — a derivation that READ nothing from the device (iOS < 17,
+        // or a hold not confirmed portrait) is the assumed 90° mounting, and
+        // the note must say so rather than credit Apple's angle.
+        let derivation = report["basisDerivation"] as? [String: Any]
+        let angleWasRead = derivation?["readAngleDeg"] is NSNumber
+        report["basisNote"] = basisNote(
+            provenance: basisProv, derivedFromReadAngle: angleWasRead)
 
         writeSidecar(report, sessionDir: sessionDir)
         // ── M7: THE MARKER GOES IN meta.json TOO ───────────────────────
@@ -364,14 +370,15 @@ public final class RNISPanoImuArm: NSObject {
         switch provenance {
         case "uncorrected":
             return "THIS SWEEP APPLIED NO TIMING CORRECTION. tau was held at 0 and "
-                 + "was NOT measured — attitude was sampled at each frame's "
-                 + "presentation timestamp exactly, with no camera-to-IMU offset of "
-                 + "any kind. The device's tau calibration resolved on 8 of 12 runs "
-                 + "and scattered 5.03 ms, wider than the 3.08 ms budget the "
-                 + "correction is meant to buy back, so no tau was ever persisted; "
-                 + "tau = 0 is the library default on the vision-camera arm (D2). "
-                 + "Do not compare its residuals with a corrected pack's without "
-                 + "saying which is which. See basisProvenance for the basis half."
+                 + "was NOT measured for this device, lens or format — attitude was "
+                 + "sampled at each frame's presentation timestamp exactly, with no "
+                 + "camera-to-IMU offset of any kind. tau = 0 is the library default "
+                 + "on the vision-camera arm (D2) and a declared experiment on the "
+                 + "AVF arm. The default rests on a calibration on iPhone17,1 that "
+                 + "resolved on 8 of 12 runs and scattered 5.03 ms, wider than the "
+                 + "3.08 ms the correction would buy back. Do not compare this pack's "
+                 + "residuals with a corrected pack's without saying which is which. "
+                 + "See basisProvenance for the basis half."
         case "from-store":
             return "tau was MEASURED for this (device, lens, format) and read from the "
                  + "on-device calibration store, then applied: attitude was sampled at "
@@ -387,7 +394,7 @@ public final class RNISPanoImuArm: NSObject {
     }
 
     /// THE BASIS HALF'S SENTENCE, chosen by where the basis came from.
-    static func basisNote(provenance: String) -> String {
+    static func basisNote(provenance: String, derivedFromReadAngle: Bool = true) -> String {
         switch provenance {
         case "measured":
             return "the device→camera basis C was MEASURED and validated on this "
@@ -396,15 +403,23 @@ public final class RNISPanoImuArm: NSObject {
                  + "calibration store. It is a real calibration, whatever "
                  + "tauProvenance says: the two numbers have different scopes and do "
                  + "not expire together."
+        case "derived" where !derivedFromReadAngle:
+            return "the device→camera basis C is the ASSUMED back-camera mounting "
+                 + "(90°), NOT read from this device: iOS published no mounting angle "
+                 + "here, or the hold was not confirmed portrait when the sweep "
+                 + "started (see basisDerivation.method). It gives basis #8, measured "
+                 + "on iPhone17,1; nothing on this phone measured or read it. Read "
+                 + "basisImageCheck in host_verdict.json before trusting the geometry."
         case "derived":
             return "the device→camera basis C was DERIVED at the start of this sweep "
-                 + "from the camera that was actually open — its position (back), "
-                 + "Apple's mounting angle for it (see basisDerivation), and the "
-                 + "buffer's own orientation checks — by the same shared "
-                 + "derivation the Android recorder runs on SENSOR_ORIENTATION. "
-                 + "Nothing on this phone MEASURED it. It agrees with basis #8, "
-                 + "which was measured on iPhone17,1; any other derived value is "
-                 + "refused until that kind of device has been measured."
+                 + "from Apple's mounting angle for the camera that was actually open "
+                 + "(see basisDerivation) through the same shared derivation the "
+                 + "Android recorder runs on SENSOR_ORIENTATION. Nothing on this phone "
+                 + "MEASURED it. The frame checks confirm the buffer was unmirrored, "
+                 + "landscape and constant in orientation for the whole sweep — not "
+                 + "that its rotation matches the derivation (firstOrientation is "
+                 + "recorded for that). It agrees with basis #8, measured on "
+                 + "iPhone17,1; any other derived value is refused."
         case "caller-supplied":
             return "the device→camera basis C was HANDED IN BY THE CALLER. This build "
                  + "did NOT measure or validate it — nothing here certifies it, and it "

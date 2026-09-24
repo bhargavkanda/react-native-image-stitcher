@@ -148,7 +148,18 @@ public enum RNISPanoVcRules {
             detail: "This camera's mounting (\(angle), read by \(method)) gives device-to-"
                   + "camera basis #\(derivedIndex)\(why). Only basis #8 has been measured "
                   + "(iPhone 16 Pro), so the sweep refuses rather than paint on a basis "
-                  + "nobody has checked. Measure this kind of device with the basis "
-                  + "calibration tool first.")
+                  + "nobody has checked. This kind of device needs its basis measured "
+                  + "before the sweep can run on it.")
+    }
+
+    /// M5 review — the mounting read disagreed with gravity TWICE: the phone
+    /// was not held upright in portrait as the hold began. Retryable, and
+    /// never "measure this device".
+    public static func holdRefusal() -> RNISPanoVcRefusal {
+        return RNISPanoVcRefusal(
+            code: "panoplus-vc-hold-not-portrait",
+            detail: "The phone's orientation could not be confirmed as upright portrait "
+                  + "when the sweep started. Hold the phone upright in portrait and "
+                  + "start again.")
     }
 }

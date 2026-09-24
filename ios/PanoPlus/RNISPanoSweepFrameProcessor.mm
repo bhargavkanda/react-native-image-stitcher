@@ -56,6 +56,13 @@
 // status so the host discards the sweep by name). Painting on a basis that no
 // longer describes the pixels is a confidently wrong canvas.
 //
+// ⚠ WHAT THESE CHECKS DO NOT PROVE (M5 review): that the raster's rotation
+// matches the derivation. A buffer rotated 180° for the whole sweep is
+// unmirrored, landscape and constant, and passes. The first frame's
+// orientation is RECORDED (`firstOrientation`) so device round DR-1a can
+// confirm the value an unrotated back camera reports; only then can it be
+// enforced — a wrong constant enforced blind would refuse every frame.
+//
 // ── WHAT IS OBSERVABLE ──────────────────────────────────────────────────
 //
 // `seen` is the denominator: every frame vision-camera offered books exactly
@@ -198,6 +205,17 @@ static NSString *g_fovCameraId = nil;
 /// The device the frames come from, resolved once per arm. Read on the frame
 /// queue for the per-frame exposure / ISO / zoom; guarded by `g_fovLock`.
 static AVCaptureDevice *g_device = nil;
+
+/// `RNISPanoCameraLock.shared.currentExposure()` — which RE-ASSERTS a lost
+/// lock (rate-limited, off-thread, and only while the lock is still ours).
+/// Declared here as a protocol and reached by NAME (M5 review): on this arm
+/// nothing else calls it, so a lock vision-camera reset to continuous stayed
+/// lost for the rest of the sweep with only a counter to say so.
+@protocol RNISSweepCameraLockReassert <NSObject>
+- (nullable NSArray<NSNumber *> *)currentExposure;
+@end
+/// Resolved once per arm; guarded by `g_fovLock`.
+static id<RNISSweepCameraLockReassert> g_cameraLock = nil;
 
 /// Record the sweep's first device-level refusal. Later ones only count.
 static void RNISSweepNoteDeviceRefusal(NSString *name) {
@@ -389,6 +407,7 @@ static NSString *RNISSweepDeviceRefusal(void) {
   // ── THE DEVICE: ZOOM GUARD, EXPOSURE, AND THE LOCK WITNESS ────────────
   [g_fovLock lock];
   AVCaptureDevice *dev = g_device;
+  id<RNISSweepCameraLockReassert> lockAgent = g_cameraLock;
   [g_fovLock unlock];
   double expDur = 0.0, expISO = 0.0;
   if (dev != nil) {
@@ -407,6 +426,9 @@ static NSString *RNISSweepDeviceRefusal(void) {
     if (expDur > 0.0 && expISO > 0.0) atomic_fetch_add(&g_exposureRead, 1);
     if (atomic_load(&g_lockArmed) && dev.exposureMode != AVCaptureExposureModeLocked) {
       atomic_fetch_add(&g_observedUnlocked, 1);
+      // Re-assert it. `currentExposure` rate-limits itself and dispatches the
+      // re-lock off this queue, so this costs one call on the frame thread.
+      [lockAgent currentExposure];
     }
   }
 
@@ -683,6 +705,17 @@ static NSString *RNISSweepDeviceRefusal(void) {
       g_fovCameraId = [camId copy];
       g_fovWidth = (size_t)[w unsignedLongValue];
       g_device = camId.length > 0 ? [AVCaptureDevice deviceWithUniqueID:camId] : nil;
+      {
+        Class lc = NSClassFromString(@"RNISPanoCameraLock");
+        id agent = nil;
+        if (lc != nil && [lc respondsToSelector:@selector(shared)]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+          agent = [lc performSelector:@selector(shared)];
+#pragma clang diagnostic pop
+        }
+        g_cameraLock = [agent respondsToSelector:@selector(currentExposure)] ? agent : nil;
+      }
       g_fovFx = RNISSweepFovFxForCamera(camId, g_fovWidth);
       [g_fovLock unlock];
       atomic_store(&g_armed, true);
@@ -699,6 +732,7 @@ static NSString *RNISSweepDeviceRefusal(void) {
     }
     [g_fovLock lock];
     g_device = nil;
+    g_cameraLock = nil;
     [g_fovLock unlock];
   }];
 }
