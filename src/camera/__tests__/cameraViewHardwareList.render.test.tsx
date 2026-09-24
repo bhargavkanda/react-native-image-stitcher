@@ -113,3 +113,47 @@ describe('<CameraView> mounted before its device arrives (the keyframe tree, the
     act(() => { tree.unmount(); });
   });
 });
+
+describe('<CameraView latched> — the hold starts on a render that mounts the camera (M5 review)', () => {
+  it('FAILS BEFORE: a latch raised while the probe is pending holds the POST-probe format', async () => {
+    let resolveProbe!: (r: unknown) => void;
+    (NativeModules as Record<string, unknown>).RNSSweepProbe = {
+      probeCapabilities: () => new Promise((res) => { resolveProbe = res; }),
+    };
+    let tree!: ReactTestRenderer;
+    act(() => { tree = create(<CameraView device={DEVICE as never} keyframeQualityCapture />); });
+    expect(inner(tree)).toHaveLength(0);                 // held for the probe
+    // A capture starts in the probe window: the latch rises on a placeholder.
+    act(() => { tree.update(<CameraView device={DEVICE as never} keyframeQualityCapture latched />); });
+    await act(async () => { resolveProbe(HW_REPORT); await Promise.resolve(); await Promise.resolve(); });
+    expect([innerFormat(tree).videoWidth, innerFormat(tree).videoHeight]).toEqual([1440, 1080]);
+    // …and the fall is not a format change mid-drain.
+    act(() => { tree.update(<CameraView device={DEVICE as never} keyframeQualityCapture latched={false} />); });
+    expect([innerFormat(tree).videoWidth, innerFormat(tree).videoHeight]).toEqual([1440, 1080]);
+    act(() => { tree.unmount(); });
+  });
+
+  it('a new frame-processor identity reaches vision-camera while latched — it is a JSI swap, not a rebind', () => {
+    const a = { frameProcessor: () => undefined, type: 'readonly' };
+    const b = { frameProcessor: () => undefined, type: 'readonly' };
+    let tree!: ReactTestRenderer;
+    act(() => { tree = create(<CameraView device={DEVICE as never} latched cameraProps={{ frameProcessor: a } as never} />); });
+    expect(inner(tree)[0].props.frameProcessor).toBe(a);
+    act(() => { tree.update(<CameraView device={DEVICE as never} latched cameraProps={{ frameProcessor: b } as never} />); });
+    expect(inner(tree)[0].props.frameProcessor).toBe(b);
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ POSITIVE CONTROL: a zoom change while latched on a READY camera is still held', () => {
+    let tree!: ReactTestRenderer;
+    act(() => { tree = create(<CameraView device={DEVICE as never} zoom={1} />); });
+    expect(inner(tree)[0].props.zoom).toBe(1);
+    act(() => { tree.update(<CameraView device={DEVICE as never} zoom={1} latched />); });
+    act(() => { tree.update(<CameraView device={DEVICE as never} zoom={2} latched />); });
+    expect(inner(tree)[0].props.zoom).toBe(1);           // held
+    act(() => { tree.update(<CameraView device={DEVICE as never} zoom={2} latched={false} />); });
+    expect(inner(tree)[0].props.zoom).toBe(2);           // released
+    act(() => { tree.unmount(); });
+  });
+
+});

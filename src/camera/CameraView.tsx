@@ -75,13 +75,23 @@ export interface CameraViewProps {
   /** Output of ``useCapture().device``.  If null, a placeholder is shown. */
   device: CameraDevice | null | undefined;
   /**
-   * M5 — while true, everything vision-camera REBUILDS its session for is
-   * held at its value from the moment this became true: the format, the fps,
-   * the zoom, the torch, the output orientation and the frame processor's
-   * identity. vision-camera resets AE and focus to continuous on a format,
-   * fps or orientation change and rebinds its outputs on a new frame
-   * processor — mid-capture that voids an exposure lock and can hand the
-   * capture a different buffer. `<Camera>` sets it for the life of a capture.
+   * M5 — while true, what vision-camera REBUILDS its session for is held at
+   * its value from the moment this became true: the format, the fps, the
+   * zoom, the torch and the output orientation. vision-camera resets AE and
+   * focus to continuous on a format, fps or orientation change — mid-capture
+   * that voids an exposure lock and can hand the capture a different buffer.
+   * `<Camera>` sets it for the life of a capture.
+   *
+   * ⚠ THE FRAME PROCESSOR IS NOT HELD. A new identity is a JSI swap in
+   * vision-camera 4.7.3 (`setFrameProcessor`, a field assignment); outputs
+   * follow only `frameProcessor != null`. Holding it froze the worklet a
+   * capture began with — including one whose plugin had not been acquired
+   * yet, which then ingested nothing for the whole capture (M5 review).
+   *
+   * ⚠ AND THE HOLD STARTS ON A RENDER THAT MOUNTS THE CAMERA. Rising while
+   * the device has not arrived or the Android hardware-size probe is still
+   * pending would freeze the pick from vision-camera's incomplete list
+   * (640x480 on the A35) for the whole capture.
    */
   latched?: boolean;
   /** Flash / torch state from ``useCapture().flash``. */
@@ -489,16 +499,16 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
         : { width: size.h * contentAspect, height: size.h };
   }
 
-  // ── THE LATCH (M5) — see `latched`. The snapshot is taken on the render
-  // the latch rises and returned unchanged until it falls; the live values
-  // take over again on the render it falls.
-  const held = useLatchedWhile(latched, {
+  // ── THE LATCH (M5) — see `latched`. The snapshot is taken on the first
+  // READY render with the latch up (never on a placeholder render, whose
+  // format pick may be the pre-probe one) and returned unchanged until it
+  // falls; the live values take over again on the render it falls.
+  const held = useLatchedWhile(latched && ready, {
     format,
     fps,
     zoom,
     torch: (flash === 'on' ? 'on' : 'off') as 'on' | 'off',
     outputOrientation: (highResCapture ? 'preview' : 'device') as 'preview' | 'device',
-    frameProcessor: cameraProps?.frameProcessor,
   });
 
   if (!ready) {
@@ -572,11 +582,6 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
         torch={held.torch}
         onError={handleVcError}
         {...cameraProps}
-        // AFTER the spread: while latched, the processor vision-camera runs is
-        // the one it had when the capture began.
-        {...(latched && held.frameProcessor != null
-          ? { frameProcessor: held.frameProcessor }
-          : {})}
       />
       {guidance ? (
         <View style={styles.guidance} pointerEvents="none" accessible accessibilityRole="text">

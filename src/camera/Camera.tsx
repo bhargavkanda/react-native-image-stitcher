@@ -5062,10 +5062,11 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         isActive={appActive}
         // M5 — THE CAMERA'S CONFIGURATION IS HELD FOR THE LIFE OF A CAPTURE.
         // vision-camera rebuilds its session — and resets AE and focus to
-        // continuous — on any format, fps or orientation change, and a new
-        // frame-processor identity rebinds its outputs. Mid-capture that
-        // voids the exposure lock and can hand the sweep a different buffer.
-        // Engine-neutral: the keyframe capture gets the same stability.
+        // continuous — on any format, fps or orientation change. Mid-capture
+        // that voids the exposure lock and can hand the sweep a different
+        // buffer. Engine-neutral: the keyframe capture gets the same
+        // stability. The frame processor is NOT held (a new identity is a
+        // JSI swap, not a rebind) — see `CameraViewProps.latched`.
         latched={captureRecording}
         // iOS depth sidecar for tap photos (non-AR only): turns on
         // vision-camera depth delivery + the depth-capable format bias;

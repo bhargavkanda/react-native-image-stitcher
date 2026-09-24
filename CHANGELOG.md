@@ -31,8 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     lenses, an unmeasured basis, a mirrored/rotated buffer mid-sweep),
     `SWEEP_FORMAT_BELOW_30FPS`, `SWEEP_ZOOM_NOT_1`, and `ENGINE_UNAVAILABLE`
     for a native build that predates the arm (`vcArmSupported`);
-  - the camera's configuration (format, fps, zoom, torch, orientation, frame
-    processor) **held while any capture records**, on both engines, and a
+  - the camera's configuration (format, fps, zoom, torch, orientation)
+    **held while any capture records**, on both engines — from the first
+    render that mounts the camera, never from a placeholder — and a
     capture the camera stopped under (the app backgrounded) discarded with
     `CAPTURE_INTERRUPTED`.
   A host that needs pano+'s own AVF camera for a reference capture uses the
