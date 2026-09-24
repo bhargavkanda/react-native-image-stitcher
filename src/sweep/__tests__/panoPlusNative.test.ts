@@ -552,10 +552,34 @@ describe('the portrait lock has ONE owner — <Camera> (M8)', () => {
 describe('the AR camera view is asked for keyframe-quality capture', () => {
   const src = surfaceAndEngineSrc();
 
+  /**
+   * The attributes of every JSX `<ARCameraView` ELEMENT, comments stripped.
+   *
+   * ⚠ NOT `indexOf('<ARCameraView')` (M7 review). That found the header
+   * JSDoc's "mount `<ARCameraView>`" first, sliced 748 lines to the next
+   * `/>`, and passed on a DOC COMMENT that mentions the prop — deleting the
+   * real attribute left this green.
+   */
+  const arViewAttrs = (text: string): string[] => {
+    const code = text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+    const out: string[] = [];
+    const re = /<ARCameraView\s*\n/g;
+    for (let m = re.exec(code); m != null; m = re.exec(code)) {
+      out.push(code.slice(m.index, code.indexOf('/>', m.index)));
+    }
+    return out;
+  };
+  const bare = /\n\s*keyframeQualityCapture(\s*\n|=\{true\})/;
+
   it('sets keyframeQualityCapture on the AR view', () => {
-    const i = src.indexOf('<ARCameraView');
-    expect(i).toBeGreaterThan(-1);
-    const el = src.slice(i, src.indexOf('/>', i));
-    expect(el).toContain('keyframeQualityCapture');
+    const els = arViewAttrs(src);
+    expect(els.length).toBeGreaterThan(0);
+    for (const el of els) expect(el).toMatch(bare);
+  });
+
+  it('⚑ NEGATIVE CONTROL: deleting the attribute fails it', () => {
+    const mutant = src.replace(/\n(\s*)keyframeQualityCapture\n/, '\n');
+    expect(mutant).not.toBe(src);
+    expect(arViewAttrs(mutant).some((el) => !bare.test(el))).toBe(true);
   });
 });

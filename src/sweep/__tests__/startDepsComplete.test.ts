@@ -204,6 +204,21 @@ describe("useSweepEngine start()'s deps", () => {
     expect(missing).toEqual([]);
   });
 
+  // ⚠ M7 REVIEW: `props.x` IS INVISIBLE TO THE CHECK ABOVE. Since M7 the
+  // hook takes `props` whole and destructures it, so `props` is in scope in
+  // start(). A read spelled `props.hostChromeTopPt` compiles, skips the name
+  // matcher (a name after '.' is deliberately not a read of that prop), and
+  // would send the value from whichever render start() was last built in.
+  it('⚑ start() never reads the whole-props binding (unless it depends on it)', () => {
+    // The binding this checks IS the hook's first parameter.
+    expect(src).toMatch(/export function useSweepEngine\(\s*props:/);
+    const readsProps = (b: string) => /(^|[^\w$.])props\s*(\?\.|[.[])/.test(b);
+    if (!deps.includes('props')) expect(readsProps(body)).toBe(false);
+    // NEGATIVE CONTROL — the same body with one read respelled fails.
+    expect(body).toContain('hostChromeTopPt');
+    expect(readsProps(body.replace('hostChromeTopPt', 'props.hostChromeTopPt'))).toBe(true);
+  });
+
   it('⚑ NEGATIVE CONTROL: the check can actually fail', () => {
     // Without this, a broken extraction (empty `props`, or a `body` that
     // matched nothing) passes the case above for free — which is exactly how
