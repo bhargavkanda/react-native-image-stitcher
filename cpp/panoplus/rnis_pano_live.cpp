@@ -715,6 +715,9 @@ void Session::appendStatus(std::string& s, const FrameOutcome* row) const {
     kvInt(s, "seamPhotoSamples", st.seamPhotoSamples);
     kvNum(s, "photoDriftLocalPct", st.seamPhotoDriftLocalPct);
     kvNum(s, "photoDriftTotalPct", st.seamPhotoDriftTotalPct);
+    // The applied photometric field's band (as on iOS's live status).
+    kvNum(s, "photoLocalP2PPct", st.photoLocalP2PPct);
+    kvNum(s, "photoScaleRangePct", st.photoScaleRangePct);
     // 1.00 with exposureMetaFrames > 0 is the live proof the AE lock held.
     // 1.00 with exposureMetaFrames == 0 is UNKNOWN, and the HUD must be able
     // to tell those apart.
@@ -1086,35 +1089,118 @@ std::string Session::finalizeSweep(bool* empty) {
     jnum(s, st.latchTotPx[1]); s += "]";
     s += "}";
 
+    // ⚠ THE SAME KEYS iOS EMITS (RNISPanoCore.mm's `projection`, `seam`,
+    // `gain` and `lens`), from the same `SessionStats`. Every key below is read
+    // by the TypeScript (panoPlusModel.ts), and one this producer omits is not
+    // an error anywhere: the reader substitutes a default and the result looks
+    // complete. The parity gate is PanoLiveSession.KeyParityFixtureMatchesThe-
+    // Producer + src/sweep/__tests__/panoPlusKeyParity.test.ts.
     kv(s, "projection"); s += "{";
     kvInt(s, "mode", st.projection);
     kvNum(s, "maxAreaScalePainted", st.maxAreaScalePainted);
     kvNum(s, "maxCrossRectifyDeg", st.maxCrossRectifyDeg);
     kvNum(s, "sweepDeg", st.sweepDeg);
+    kvNum(s, "crossScaleEnd", st.crossScaleEnd);
+    kvInt(s, "crossScaleCagedFrames", st.crossScaleCagedFrames);
+    kvInt(s, "crossScaleLeakedFrames", st.crossScaleLeakedFrames);
+    kvNum(s, "subjectDistanceUsedM", st.subjectDistanceUsedM);
+    kvNum(s, "subjectDistanceConfiguredM", st.subjectDistanceConfiguredM);
+    kvNum(s, "subjectDistanceFitM", st.subjectDistanceFitM);
+    kvBool(s, "subjectDistanceFitSaturated", st.subjectDistanceFitSaturated);
+    kvBool(s, "subjectDistanceFitDegenerate", st.subjectDistanceFitDegenerate);
+    kvNum(s, "subjectDistanceFitRawM", st.subjectDistanceFitRawM);
+    kv(s, "subjectDistanceFit"); s += "{";
+    kvNum(s, "rawM", st.subjectDistanceFitRawM);
+    kvNum(s, "clampLoM", 0.3);
+    kvNum(s, "clampHiM", 6.0);
+    kvBool(s, "saturated", st.subjectDistanceFitSaturated);
+    kvInt(s, "clampedUpdates", st.subjectDistanceFitClampedUpdates);
+    kvInt(s, "refusedUpdates", st.subjectDistanceFitRefusedUpdates);
+    kvNum(s, "den", st.subjectDistanceFitDen);
+    kvNum(s, "num", st.subjectDistanceFitNum);
+    kvInt(s, "samples", st.subjectDistanceFitSamples);
+    kvNum(s, "fwdSpanM", st.subjectDistanceFitFwdSpanM);
+    kvNum(s, "perpSpanM", st.subjectDistanceFitPerpSpanM);
+    kvNum(s, "leverRatio", st.subjectDistanceFitLeverRatio);
+    kvNum(s, "leverBar", kSubjectDistanceFitLeverBar);
+    kvNum(s, "perpFloorM", kSubjectDistanceFitPerpFloorM);
+    kvBool(s, "degenerate", st.subjectDistanceFitDegenerate);
+    kvBool(s, "inForce", st.subjectDistanceFitInForce);
+    s += "}";
+    kvInt(s, "switchSeq", st.projectionSwitchSeq);
+    kvNum(s, "switchStepPx", st.projectionSwitchStepPx);
     s += "}";
 
     kv(s, "seam"); s += "{";
+    kvNum(s, "worstBandP50Px", st.seamWorstBandP50Px);
     kvNum(s, "worstBandP95Px", st.seamWorstBandP95Px);
     kvNum(s, "worstBandMaxPx", st.seamWorstBandMaxPx);
+    kvNum(s, "bandSpreadP95Px", st.seamBandSpreadP95Px);
     kvNum(s, "crossBandDivergencePx", st.crossBandDivergencePx);
     kvNum(s, "crossBandDivergenceNormPx", st.crossBandDivergenceNormPx);
-    kvNum(s, "canvasJogP95Px", st.seamCanvasJogP95Px);
-    kvNum(s, "canvasJogMaxPx", st.seamCanvasJogMaxPx);
+    kvNum(s, "lumaStepP50DN", st.seamLumaStepP50DN);
+    kvNum(s, "lumaStepP95DN", st.seamLumaStepP95DN);
     kvNum(s, "lumaStepMaxDN", st.seamLumaStepMaxDN);
+    kvNum(s, "photoStepP50DN", st.seamPhotoStepP50DN);
     kvNum(s, "photoStepP95DN", st.seamPhotoStepP95DN);
     kvNum(s, "photoStepMaxDN", st.seamPhotoStepMaxDN);
     kvInt(s, "photoSamples", st.seamPhotoSamples);
     kvInt(s, "photoStepOverBar", st.seamPhotoStepOverBar);
     kvInt(s, "photoNonUniform", st.seamPhotoNonUniform);
     kvInt(s, "photoUniformUnknown", st.seamPhotoUniformUnknown);
+    kvNum(s, "photoUniStepP95DN", st.seamPhotoUniStepP95DN);
     kvNum(s, "photoUniStepMaxDN", st.seamPhotoUniStepMaxDN);
     kvInt(s, "photoUniSamples", st.seamPhotoUniSamples);
+    kvNum(s, "photoSpreadP95DN", st.seamPhotoSpreadP95DN);
     kvNum(s, "photoSpreadMaxDN", st.seamPhotoSpreadMaxDN);
     kvNum(s, "photoDriftLocalPct", st.seamPhotoDriftLocalPct);
     kvNum(s, "photoDriftTotalPct", st.seamPhotoDriftTotalPct);
+    kvInt(s, "photoDriftWorstU", st.seamPhotoDriftWorstU);
+    kvInt(s, "boundaries", st.seamBoundaries);
+    kvNum(s, "coverageFrac", st.seamCoverageFrac);
+    kvNum(s, "canvasJogP50Px", st.seamCanvasJogP50Px);
+    kvNum(s, "canvasJogP95Px", st.seamCanvasJogP95Px);
+    kvNum(s, "canvasJogMaxPx", st.seamCanvasJogMaxPx);
+    kvInt(s, "canvasJogSamples", st.seamCanvasJogSamples);
+    kvNum(s, "jogDriftPx", st.seamJogDriftPx);
+    kvNum(s, "jogDriftEndPx", st.seamJogDriftEndPx);
+    kvInt(s, "jogDriftSamples", st.seamJogDriftSamples);
     kvBool(s, "bandSelfScored", st.seamBandSelfScored);
     kvBool(s, "measured", st.seamMeasured);
-    kvInt(s, "boundaries", st.seamBoundaries);
+    kvBool(s, "integrityFailed", st.integrityFailed);
+    kvStr(s, "integrityReason", st.integrityReason);
+    s += "}";
+
+    // The chained exposure and the applied photometric field.
+    kv(s, "gain"); s += "{";
+    kvNum(s, "cumEnd", st.gainCumEnd);
+    kvNum(s, "leak", S.cfg.gainLeak);
+    kvNum(s, "cumClamp", S.cfg.gainCumClamp);
+    kvNum(s, "localP2PPct", st.photoLocalP2PPct);
+    kvInt(s, "localWorstU", st.photoLocalWorstU);
+    kvNum(s, "localWindowPx", S.cfg.photoLocalWindowPx);
+    kvNum(s, "rangePct", st.photoScaleRangePct);
+    kvNum(s, "scaleMin", st.photoScaleMin);
+    kvNum(s, "scaleMax", st.photoScaleMax);
+    kvInt(s, "columns", st.photoColumns);
+    s += "}";
+
+    // THE LENS GATE'S VERDICT, whatever it decided — an uncorrected pack must
+    // say so, and on what evidence.
+    kv(s, "lens"); s += "{";
+    kvBool(s, "applied", st.lensApplied);
+    kvStr(s, "gate", st.lensGate);
+    kvStr(s, "device", st.lensDevice);
+    kvStr(s, "deviceLens", st.lensDeviceLens);
+    kvNum(s, "k1", st.lensK1);
+    kvNum(s, "k2", st.lensK2);
+    kvStr(s, "source", st.lensSource);
+    kvNum(s, "fxOverWidth", st.lensFxOverWidth);
+    kvNum(s, "expectedFxOverWidth", st.lensExpectedFxOverWidth);
+    kvNum(s, "peakRadialPx", st.lensPeakRadialPx);
+    kvNum(s, "peakResidualPx", st.lensPeakResidualPx);
+    kvInt(s, "correctedStrips", st.lensCorrectedStrips);
+    kvInt(s, "skippedStrips", st.lensSkippedStrips);
     s += "}";
 
     kv(s, "exposure"); s += "{";

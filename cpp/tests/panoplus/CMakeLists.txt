@@ -448,6 +448,11 @@ add_executable(rnis_pano_live_tests
   ${RNIS_TESTS_DIR}/rnis_pano_live_test.cpp
 )
 target_link_libraries(rnis_pano_live_tests rnis_pano_live GTest::gtest_main)
+# The key-parity fixtures (M1): the gtest snapshots the key paths this producer
+# emits, and the jest suite checks every key the TypeScript reads against them.
+target_compile_definitions(rnis_pano_live_tests PRIVATE
+  RNIS_PANO_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
+)
 
 add_executable(rnis_pano_android_preview_tests
   ${RNIS_TESTS_DIR}/rnis_pano_android_preview_test.cpp

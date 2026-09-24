@@ -325,6 +325,11 @@ struct PackOptions {
 struct SessionState {
     rnis::pano::Config cfg;
     PackOptions pack;
+    /// THE ARM THIS SWEEP RUNS ON — 'ar' (ARKit) or 'imu' — as the live status
+    /// reports it (`poseSourceRan`, the same key Android's recorder emits).
+    /// Set once at start from the bridge's resolved `poseSource`: on iOS the
+    /// arm is chosen before the sweep and never changes during it.
+    NSString *poseSourceRan = @"ar";
     /// THE PHYSICAL HOLD, RECORDED — the one link in the portrait chain that
     /// was an INFERENCE rather than a measurement.
     ///
@@ -839,6 +844,10 @@ static NSDictionary *panoConfigDict(const rnis::pano::Config& c,
                                                       cfgErr.c_str()]);
     }
     S->cfg = c;
+    {
+        NSString *ps = strOr(options, @"poseSource", @"ar");
+        S->poseSourceRan = [ps isEqualToString:@"imu"] ? @"imu" : @"ar";
+    }
 
     // Recorded, never acted on.  See SessionState::hold.
     S->hold = strOr(options, @"hold", @"") ?: @"";
@@ -1548,6 +1557,7 @@ static void panoDrainOneBody(const std::shared_ptr<SessionState>& S,
         @"outcome":             [NSString stringWithUTF8String:rnis::pano::outcomeName(row.outcome)],
         @"speed":               speed,
         @"tracking":            @((NSInteger)slot->tracking),
+        @"poseSourceRan":       S->poseSourceRan,
         @"stalled":             @(st.stalled),
         @"axisLatched":         @(st.axisLatched),
         @"axis":                @((NSInteger)st.axis),
