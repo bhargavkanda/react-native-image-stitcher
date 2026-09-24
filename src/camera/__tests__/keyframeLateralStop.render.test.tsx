@@ -38,6 +38,8 @@ jest.mock('../../stitching/useIncrementalStitcher', () => {
     start: async (args: unknown) => {
       (globalThis as any).__kf.calls.push('start');
       (globalThis as any).__kf.startArgs.push(args);
+      // M9 review T11 — a native start refusal on demand.
+      if ((globalThis as any).__kf.startFails) throw new Error('native start refused');
       return { ok: true };
     },
     finalize: () => {
@@ -146,6 +148,7 @@ beforeEach(() => {
   g.__kf.calls = [];
   g.__kf.startArgs = [];
   g.__kf.finalizeImpl = async () => OK_RESULT;
+  g.__kf.startFails = false;
   g.__pm.lateralExceeded = false;
   g.__pm.opts = [];
   g.__drift.on = false;
@@ -178,6 +181,10 @@ describe('keyframe lateral stop — never two modals at once', () => {
     expect(vis(t, LateralMotionModal)).toBe(true);
     expect(vis(t, RectCropPreview)).toBe(false);
     expect(seen[0].warnings.map((w: any) => w.code)).toContain('LATERAL_DRIFT_FINALIZE');
+    // M9 review T11 — the result NAMES its engine, as a sweep's does.
+    // MUTATION: drop `engine` from the success result. Killed.
+    expect(seen[0].ok).toBe(true);
+    expect(seen[0].engine).toBe('keyframe');
     act(() => t.unmount());
   });
 
@@ -201,6 +208,10 @@ describe('keyframe lateral stop — never two modals at once', () => {
     expect(errors).toHaveLength(1);
     expect(seen[0].ok).toBe(false);
     expect(seen[0].warnings.map((w: any) => w.code)).toContain('LATERAL_DRIFT_FINALIZE');
+    // M9 review T11 — ok:false names its engine too.
+    // MUTATION: drop `engine` from the stitch-failure onCapture. Killed.
+    expect(seen[0].engine).toBe('keyframe');
+    expect(seen[0].type).toBe('panorama');
     act(() => t.unmount());
   });
 
@@ -370,6 +381,78 @@ describe('the crop editor owns cropping at the native boundary', () => {
   it('with rectCrop={false}, the recipe reaches native untouched', async () => {
     const { t } = await setup({ rectCrop: false, stitcher: { enableMaxInscribedRectCrop: true } });
     expect(nativeAutoCrop()).toBe(true);
+    act(() => t.unmount());
+  });
+});
+
+/**
+ * M9 review T11 — `engine="batch-keyframe"`, the DEPRECATED synonym, names
+ * ITSELF on every result: a host that asked for `'batch-keyframe'` and
+ * branches on `result.engine` must not be handed `'keyframe'` on one exit and
+ * `'batch-keyframe'` on another. (It is `'batch-keyframe'` on the wire either
+ * way — the synonym changes nothing native does.)
+ */
+describe('M9 review T11 — engine="batch-keyframe" is named on success AND on failure', () => {
+  it('success: engine "batch-keyframe"', async () => {
+    // MUTATION: `engine: 'keyframe'` literal on the success result. Killed.
+    const seen: any[] = [];
+    const { t, rerender, ref } = await setup({
+      engine: 'batch-keyframe', rectCrop: false, onCapture: (r: any) => seen.push(r),
+    });
+    expect(g.__kf.calls).toContain('start');
+    g.__kf.state = { acceptedCount: 3 };
+    await rerender();
+    await act(async () => { ref.current.stopPanorama(); });
+    await act(async () => { await sleep(120); });
+    expect(seen.map((r) => [r.ok, r.type, r.engine])).toEqual([[true, 'panorama', 'batch-keyframe']]);
+    act(() => t.unmount());
+  });
+
+  it('a stitch failure: ok:false, engine "batch-keyframe"', async () => {
+    // MUTATION: `engine: 'keyframe'` literal on the stitch-failure onCapture.
+    // Killed.
+    g.__kf.finalizeImpl = async () => { throw new Error('boom'); };
+    const seen: any[] = [];
+    const { t, rerender, ref } = await setup({
+      engine: 'batch-keyframe', rectCrop: false, onCapture: (r: any) => seen.push(r),
+      onError: () => undefined,
+    });
+    g.__kf.state = { acceptedCount: 3 };
+    await rerender();
+    await act(async () => { ref.current.stopPanorama(); });
+    await act(async () => { await sleep(120); });
+    expect(seen.map((r) => [r.ok, r.type, r.engine])).toEqual([[false, 'panorama', 'batch-keyframe']]);
+    act(() => t.unmount());
+  });
+
+  it('a START failure: ok:false, engine "batch-keyframe", on both channels', async () => {
+    // MUTATION: `engine: 'keyframe'` literal on the start-failure onCapture.
+    // Killed.
+    g.__kf.startFails = true;
+    const seen: any[] = [];
+    const errors: Array<{ code: string }> = [];
+    const { t } = await setup({
+      engine: 'batch-keyframe', rectCrop: false,
+      onCapture: (r: any) => seen.push(r), onError: (e: { code: string }) => errors.push(e),
+    });
+    await act(async () => { await sleep(20); });
+    expect(g.__kf.calls).toContain('start');
+    expect(errors.map((e) => e.code)).toEqual(['PANORAMA_START_FAILED']);
+    expect(seen.map((r) => [r.ok, r.type, r.engine, r.error?.code]))
+      .toEqual([[false, 'panorama', 'batch-keyframe', 'PANORAMA_START_FAILED']]);
+    act(() => t.unmount());
+  });
+
+  it('⚑ NEGATIVE CONTROL: the default engine is named "keyframe", not the synonym', async () => {
+    // Without it the three cases above pass for a result that always says
+    // 'batch-keyframe' (the WIRE value) whatever the host asked for.
+    const seen: any[] = [];
+    const { t, rerender, ref } = await setup({ rectCrop: false, onCapture: (r: any) => seen.push(r) });
+    g.__kf.state = { acceptedCount: 3 };
+    await rerender();
+    await act(async () => { ref.current.stopPanorama(); });
+    await act(async () => { await sleep(120); });
+    expect(seen.map((r) => [r.ok, r.engine])).toEqual([[true, 'keyframe']]);
     act(() => t.unmount());
   });
 });

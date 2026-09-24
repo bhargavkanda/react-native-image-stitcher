@@ -166,13 +166,13 @@ function App(): React.JSX.Element {
    *
    * `'keyframe'` is the shipped path: vision-camera frames, a keyframe gate,
    * cv::Stitcher at the end. `'sweep'` is the slit-scan engine — it paints
-   * strips continuously off an AR session's pose and writes a pack rather
-   * than a single JPEG, so it has its own on-screen surface and its own
-   * result shape (`type: 'panoplus'`).
+   * strips continuously during the hold and also writes a pack. Since M8–M10
+   * it runs on `<Camera>`'s own camera, shutter and chrome, and its result is
+   * a panorama with `engine: 'sweep'`: the engine changes only what the hold
+   * runs.
    *
-   * ⚠ A REMOUNT, not a prop flip, hence the `key` on <Camera>. The two
-   * engines own different camera sessions; swapping them in place would have
-   * both alive for a commit.
+   * A PROP FLIP, not a remount: `engine` is deliberately NOT in <Camera>'s
+   * `key` (see the key below) — one camera session serves both engines.
    */
   const [engine, setEngine] = useState<'keyframe' | 'sweep'>('keyframe');
 
@@ -430,14 +430,12 @@ function App(): React.JSX.Element {
         result.warnings.map((w) => `${w.code}: ${w.message}`),
       );
     }
-    // A SWEEP is the third result kind. It writes a PACK; `sessionDir` is
-    // where the strips, the poses and the meta live, and that is what a host
-    // wants. `tailFlushColumns` is printed because it is the ONLY channel
-    // this app has for the lead-out's extent — `panoPlusResidualLines`'s
-    // LEAD-OUT sentence renders through `PanoPlusResultView`, which
-    // `<Camera>` no longer mounts, and `host_verdict.json` needs
-    // `expo-file-system`, which this example does not depend on.
-    if (result.type === 'panoplus') {
+    // A SWEEP is a panorama with `engine: 'sweep'` (M9), and it also writes a
+    // PACK: `sessionDir` is where the strips, the poses and the meta live.
+    // `tailFlushColumns` is printed because it is the ONLY channel this app
+    // has for the lead-out's extent (`host_verdict.json` needs
+    // `expo-file-system`, which this example does not depend on).
+    if (result.type === 'panorama' && result.engine === 'sweep') {
       // eslint-disable-next-line no-console
       console.log(
         `[example] sweep complete · ${result.width}×${result.height} · `
@@ -561,14 +559,9 @@ function App(): React.JSX.Element {
       title:
         preview.type === 'photo'
           ? `Photo · ${preview.width}×${preview.height}`
-          : preview.type === 'panoplus'
-            // Unreachable today — a sweep is reviewed in its own surface and
-            // never parks here — but the discriminant has three members now
-            // and narrowing that ignores one is how a third kind reaches a
-            // branch written for two.
-            ? `Sweep · ${preview.width}×${preview.height}`
-            : `Panorama · ${preview.framesIncluded}/${preview.framesRequested} frames`
-              + (preview.stitchModeResolved
+          : `Panorama · ${preview.framesIncluded}/${preview.framesRequested} frames`
+              // Keyframe-only: a sweep has no stitch mode, so it narrows first.
+              + (preview.engine !== 'sweep' && preview.stitchModeResolved
                 ? ` · ${preview.stitchModeResolved}`
                 : ''),
     };
@@ -857,11 +850,9 @@ function App(): React.JSX.Element {
           </Text>
         </Pressable>
 
-        {/* The ENGINE the hold runs. `sweep` replaces the whole preview with
-            the slit-scan surface — that is expected: the two engines own
-            different camera sessions and only one can be mounted. A sweep
-            completes on the same `onCapture` as a panorama, discriminated by
-            `type: 'panoplus'`. */}
+        {/* The ENGINE the hold runs. Same camera, same screen, same
+            controls; a sweep completes on the same `onCapture` as a keyframe
+            panorama, with `engine: 'sweep'`. */}
         <Pressable
           style={[styles.devToggle, { top: 310 }]}
           onPress={() => setEngine((e) => (e === 'sweep' ? 'keyframe' : 'sweep'))}

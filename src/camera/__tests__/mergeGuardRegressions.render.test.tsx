@@ -29,6 +29,7 @@ const g = globalThis as any;
 g.__kf = { state: { acceptedCount: 0 }, calls: [] as string[] };
 g.__sw = { calls: [] as string[], props: {} as any };
 g.__ar = { props: {} as any, exceed: false };
+g.__fp = { failed: false };
 
 jest.mock('../../stitching/useIncrementalStitcher', () => {
   const obj: any = {
@@ -52,11 +53,26 @@ jest.mock('../../stitching/useIncrementalStitcher', () => {
     useIncrementalStitcher: () => { obj.state = (globalThis as any).__kf.state; return obj; },
   };
 });
+// `__kf.moduleMissing` stands in for a build whose incremental stitcher module
+// is not registered at all (M9 review T7b); every other case sees it linked.
 jest.mock('../../stitching/incremental', () => ({
   ...jest.requireActual('../../stitching/incremental'),
-  incrementalStitcherIsAvailable: () => true,
+  incrementalStitcherIsAvailable: () => !(globalThis as any).__kf.moduleMissing,
   incrementalMissingMethods: () => null,
 }));
+// The REAL frame-processor driver, with `acquisitionFailed` forced when
+// `__fp.failed` is set: a build without the `cv_flow_gate_process_frame`
+// vision-camera plugin (M9 review T7a). Every other case sees the real value.
+jest.mock('../../stitching/useFrameProcessorDriver', () => {
+  const actual = jest.requireActual('../../stitching/useFrameProcessorDriver');
+  return {
+    ...actual,
+    useFrameProcessorDriver: (o: unknown) => {
+      const d = actual.useFrameProcessorDriver(o);
+      return (globalThis as any).__fp.failed ? { ...d, acquisitionFailed: true } : d;
+    },
+  };
+});
 // The pose guard latches on the first armed frame whenever `__ar.exceed` is set.
 jest.mock('../arLateralDrift', () => {
   const actual = jest.requireActual('../arLateralDrift');
@@ -146,6 +162,8 @@ beforeEach(() => {
   g.__kf.state = { acceptedCount: 0 };
   g.__kf.calls = [];
   g.__kf.startFails = false;
+  g.__kf.moduleMissing = false;
+  g.__fp.failed = false;
   g.__sw.calls = [];
   g.__sw.props = {};
   g.__ar.props = {};
@@ -526,6 +544,99 @@ describe('M9 — ONE failure contract: a keyframe START failure reaches onCaptur
     expect(seen.map((r) => [r.ok, r.type, r.engine, r.error?.code])).toEqual([
       [false, 'panorama', 'keyframe', 'PANORAMA_START_FAILED'],
     ]);
+    act(() => t.unmount());
+  });
+});
+
+/**
+ * M9 review T7 — the two keyframe START refusals that returned before the
+ * shared catch, and so reached `onError` ONLY: a host on the one-channel
+ * contract (`onCapture({ ok: false })`) heard nothing, and one of them also
+ * left the D7 capture latch raised behind it.
+ */
+describe('M9 review T7 — every keyframe start failure reaches BOTH channels', () => {
+  async function mountKeyframe(errs: Array<{ code: string; message: string }>,
+    seen: Array<Record<string, any>>) {
+    const ref = React.createRef<any>();
+    let t!: ReactTestRenderer;
+    await act(async () => {
+      t = create(el({
+        engine: 'keyframe', defaultCaptureSource: 'non-ar', rectCrop: false,
+        onError: (e: { code: string; message: string }) => { errs.push(e); },
+        onCapture: (r: Record<string, any>) => { seen.push(r); },
+      }, ref));
+    });
+    await act(async () => { await sleep(400); });
+    return { t, ref };
+  }
+
+  it('(a) the frame-processor plugin missing: both channels, and takePhoto() right after is NOT refused as busy', async () => {
+    // Pins, in `startCapture`'s `fpDriver.acquisitionFailed` branch:
+    //   · `onCapture({ ok: false, type: 'panorama', engine, … })` (MUTATION:
+    //     delete it → onError only. Killed);
+    //   · `captureBusyRef.current = false` (MUTATION: delete it → the
+    //     dispatcher's D7 latch stays up — this refusal changes no state, so
+    //     no render recomputes it — and the takePhoto() below is refused as
+    //     "a panorama is recording". Killed).
+    g.__fp.failed = true;
+    const errs: Array<{ code: string; message: string }> = [];
+    const seen: Array<Record<string, any>> = [];
+    const { t, ref } = await mountKeyframe(errs, seen);
+    await act(async () => {
+      ref.current.startPanorama();
+      // SAME TICK: no render in between that could recompute the latch and
+      // hide a leaked one.
+      void ref.current.takePhoto();
+      await Promise.resolve();
+    });
+    await act(async () => { await sleep(20); });
+    expect(g.__kf.calls).not.toContain('start');
+    expect(errs.filter((e) => e.code === 'PANORAMA_START_FAILED')).toHaveLength(1);
+    expect(errs.find((e) => e.code === 'PANORAMA_START_FAILED')!.message)
+      .toContain('frame-processor');
+    const panoramas = seen.filter((r) => r.type === 'panorama');
+    expect(panoramas.map((r) => [r.ok, r.type, r.engine, r.error?.code])).toEqual([
+      [false, 'panorama', 'keyframe', 'PANORAMA_START_FAILED'],
+    ]);
+    expect(panoramas[0].warnings).toEqual([]);
+    expect(errs.map((e) => e.code)).not.toContain('CAPTURE_IN_PROGRESS');
+    act(() => t.unmount());
+  });
+
+  it('⚑ NEGATIVE CONTROL (a): with the plugin present the same hold starts the engine', async () => {
+    // Without it case (a) passes for a hold that never reached `startCapture`.
+    const errs: Array<{ code: string; message: string }> = [];
+    const seen: Array<Record<string, any>> = [];
+    const { t, ref } = await mountKeyframe(errs, seen);
+    await act(async () => {
+      ref.current.startPanorama(); await Promise.resolve(); await Promise.resolve();
+    });
+    expect(g.__kf.calls).toContain('start');
+    expect(errs.map((e) => e.code)).not.toContain('PANORAMA_START_FAILED');
+    act(() => t.unmount());
+  });
+
+  it('(b) the native incremental module missing: onError AND onCapture({ ok: false, engine: "keyframe" })', async () => {
+    // Pins the `!incrementalStitcherIsAvailable()` refusal in the dispatcher.
+    // MUTATION: delete its `onCapture` → onError only. Killed.
+    g.__kf.moduleMissing = true;
+    const errs: Array<{ code: string; message: string }> = [];
+    const seen: Array<Record<string, any>> = [];
+    const { t, ref } = await mountKeyframe(errs, seen);
+    await act(async () => {
+      ref.current.startPanorama(); await Promise.resolve(); await Promise.resolve();
+    });
+    await act(async () => { await sleep(20); });
+    expect(g.__kf.calls).not.toContain('start');
+    expect(errs.map((e) => e.code)).toEqual(['PANORAMA_START_FAILED']);
+    expect(errs[0].message).toContain('not registered');
+    expect(seen.map((r) => [r.ok, r.type, r.engine, r.error?.code])).toEqual([
+      [false, 'panorama', 'keyframe', 'PANORAMA_START_FAILED'],
+    ]);
+    expect(seen[0].error).toBe(errs[0]);
+    // …and it raised no latch: a photo right after is taken, not refused.
+    await act(async () => { void ref.current.takePhoto(); await Promise.resolve(); });
+    expect(errs.map((e) => e.code)).not.toContain('CAPTURE_IN_PROGRESS');
     act(() => t.unmount());
   });
 });

@@ -439,6 +439,15 @@ export function useSweepEngine(
    */
   const stopOnStartRef = useRef(false);
   /**
+   * M9 review — the engine was DESELECTED (the host switched `engine`, or
+   * the review opened) while native was still starting. Not `stopOnStartRef`:
+   * that is the operator's release, which finalizes and REPORTS the
+   * near-empty pack. A deselect is an unmount without the unmount — the
+   * session is stopped (the pack kept) and nothing is reported, on either
+   * channel, exactly as a deselect mid-sweep and an unmount mid-start are.
+   */
+  const deselectOnStartRef = useRef(false);
+  /**
    * The same latch for a GUARD RAIL that fires in the start window.
    *
    * ⚠ AND IT IS NOT `stopOnStartRef`. That one FINALIZES — it is the
@@ -1367,8 +1376,8 @@ export function useSweepEngine(
     prevEnabledRef.current = enabled;
     if (!was || enabled) return;
     if (phaseRef.current === 'starting') {
-      // The start resolves into a stop (see `stopOnStartRef`).
-      stopOnStartRef.current = true;
+      // The start resolves into a SILENT stop (see `deselectOnStartRef`).
+      deselectOnStartRef.current = true;
     } else if (sweepLiveRef.current) {
       sweepLiveRef.current = false;
       liveSessionRef.current = null;
@@ -1807,6 +1816,7 @@ export function useSweepEngine(
     busyRef.current = true;
     stopOnStartRef.current = false;
     abandonOnStartRef.current = null;
+    deselectOnStartRef.current = false;
     setError(null);
     const { dirPath } = panoPlusSessionPaths(
       documentDirectory,
@@ -2280,6 +2290,30 @@ export function useSweepEngine(
           );
           return;
         }
+        // M9 review — DESELECTED while starting: stop silently, pack kept, as
+        // the unmount case above does, and as a deselect mid-sweep does. No
+        // `finish()` (which would REPORT a near-empty pack to a host that has
+        // already left the sweep) and no `onFailure`.
+        if (deselectOnStartRef.current) {
+          deselectOnStartRef.current = false;
+          stopOnStartRef.current = false;
+          abandonOnStartRef.current = null;
+          void stopPanoPlus().then(
+            (s) => {
+              // eslint-disable-next-line no-console
+              console.log('[pano+] deselected while starting — finalized', s.sessionDir);
+            },
+            (e: unknown) => {
+              const info = panoPlusErrorInfo(e);
+              if (info.code === 'panoplus-not-running') void cancelPanoPlus();
+            },
+          );
+          setRunningArm(null);
+          setPhase('idle');
+          setCameraLock(null);
+          liveSessionRef.current = null;
+          return;
+        }
         // ⚠ A GUARD RAIL FIRED WHILE THE CAMERA WAS OPENING — DISCARD, and
         // do it BEFORE ownership is taken. Raising `sweepLiveRef` first
         // would make this a live sweep that something else has to stop, and
@@ -2320,6 +2354,9 @@ export function useSweepEngine(
         busyRef.current = false;
         // A release that landed during the failed start has nothing to end.
         stopOnStartRef.current = false;
+        // …and a deselect in the same window hears nothing (M9 review).
+        const deselected = deselectOnStartRef.current;
+        deselectOnStartRef.current = false;
         const info = panoPlusErrorInfo(e);
         // eslint-disable-next-line no-console
         console.error('[pano+] start failed —', info.code, info.message);
@@ -2334,6 +2371,7 @@ export function useSweepEngine(
         // to. Released here rather than left dangling: a claim with no session
         // behind it would let a straggler paint an idle screen.
         liveSessionRef.current = null;
+        if (deselected) return;
         setError(panoPlusFailureCopy(info));
         onFailure?.(info);
       },

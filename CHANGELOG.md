@@ -29,17 +29,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     output, so the crop editor crops in place on the copy, and the sweep's
     crop-to-sibling rule is gone;
   - `framesRequested` = frames the engine saw, `framesIncluded` = frames on
-    the canvas, `framesDropped` = frames it refused; `durationMs`;
+    the canvas (painted strips + the latch seed), `framesDropped` = frames it
+    refused (duplicate deliveries excluded); `durationMs`;
   - `liveness: 'unavailable'`, the one named difference;
   - frames the engine refused fire `onFramesDropped`, and the canvas is
-    written at JPEG quality 90, like a keyframe panorama.
+    written at JPEG quality 90, like a keyframe panorama. The review's crop
+    seed is measured on the pack's canvas (its coverage sidecar), and the
+    output copy carries the sidecar beside it.
+  **`PanoramaCaptureResult` is now the keyframe member only** (`engine:
+  'keyframe' | 'batch-keyframe'`): a handler typed with it no longer accepts
+  a value narrowed only on `type === 'panorama'`. Narrow on `engine` too, or
+  type the sweep with the new `SweepPanoramaResult`. **`FramesDroppedInfo`
+  gains `dropped`**, and on both engines its numbers are the result's own.
+  `PanoPlusCounts` gains `skippedNonmonotonicTs`.
   Failures follow ONE contract on both engines: `onError` AND
   `onCapture({ ok: false, type, engine, error })`. The `ok: false` member
   drops `'panoplus'` and gains `engine`. A sweep that fails to finish is
   `PANORAMA_FINALIZE_FAILED` (a start refusal keeps its own code), and an
   output that cannot be written is `OUTPUT_WRITE_FAILED`. **A keyframe START
   failure now reaches `onCapture` as `ok: false` too**; before, only `onError`
-  heard it. `PanoPlusFailure.stage` says where a sweep failed.
+  heard it (every keyframe start refusal: the native start, a missing
+  frame-processor plugin, a missing native module). `PanoPlusFailure.stage`
+  says where a sweep failed; a failure after the sweep (the canvas never
+  written, the output copy failing) carries the pack's `sessionDir` on the
+  error's `cause`. A failed sweep carries its `HIGH_PAN_SPEED` /
+  `LATERAL_DRIFT_FINALIZE` warnings like a failed stitch. A sweep hold while the
+  previous panorama is still in review is refused as `CAPTURE_IN_PROGRESS`
+  on both channels (the keyframe engine still lets a host start a capture
+  behind a pending review); a hold while a sweep's output is still
+  being written is ignored, as one during a stitch is. Switching the engine
+  away while a sweep is still starting stops it silently (pack kept), as a
+  switch mid-sweep does.
 - **`<Camera engine="sweep">` is one screen with the keyframe engine (M8).**
   The sweep no longer swaps in a screen of its own. It runs on `<Camera>`'s
   own camera, shutter and chrome: the vision-camera preview for non-AR, and

@@ -943,6 +943,12 @@ export interface PanoPlusCounts {
   rejectedTracking: number;
   rejectedRectify: number;
   rejectedInput: number;
+  /** A frame whose timestamp did not advance — a duplicate or a small
+   *  reordering under delivery pressure. BENIGN: the engine skips it. It is
+   *  ALSO counted in {@link rejectedInput} (the engine's row outcome), so a
+   *  consumer that wants frames the engine REFUSED subtracts this. Absent on
+   *  an older binary ⇒ 0. */
+  skippedNonmonotonicTs: number;
   warmingUp: number;
   bootstrap: number;
   gapExtended: number;

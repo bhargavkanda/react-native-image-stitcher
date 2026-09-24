@@ -3039,9 +3039,11 @@ struct SessionStats {
     /// session that was also dropping 77 and 59 pack writes, i.e. exactly the
     /// load where a repeat frame is expected.  A genuinely NEW timebase is
     /// still fatal and is caught by the backward-jump bound below (and by the
-    /// independent `session-restart` translation gate).  Counted separately
-    /// from `rejectedInput` so "the camera hiccupped" can never be read as
-    /// "the frame was malformed".
+    /// independent `session-restart` translation gate).  Counted HERE so "the
+    /// camera hiccupped" can be told apart from "the frame was malformed" —
+    /// but NOT instead of `rejectedInput`: the row's outcome is still
+    /// `RejectedInput`, so these frames are counted there too, and a reader
+    /// that wants frames the engine REFUSED subtracts this.
     int64_t skippedNonmonotonicTs = 0;
     // v13 — what the jog guard did.  `d8JogRefusals` strips were
     // refused over the bar; `d8JogForced` were painted anyway because the

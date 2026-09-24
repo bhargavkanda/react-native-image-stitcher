@@ -126,7 +126,10 @@ async function toStitching(ref: React.RefObject<any>): Promise<void> {
 
 async function resolveFinish(): Promise<void> {
   await act(async () => {
-    resolveStop?.({ width: 100, height: 50, sessionDir, counts: {}, abort: null });
+    resolveStop?.({
+      width: 100, height: 50, sessionDir, canvasPath: `${sessionDir}/canvas.jpg`,
+      counts: {}, abort: null,
+    });
     await Promise.resolve();
     await Promise.resolve();
   });
@@ -166,7 +169,10 @@ describe('M8 — a sweep\'s finish releases the camera natively BEFORE <Camera> 
 
     // the finish resolves: the camera comes back
     await act(async () => {
-      resolveStop?.({ width: 100, height: 50, sessionDir, counts: {}, abort: null });
+      resolveStop?.({
+      width: 100, height: 50, sessionDir, canvasPath: `${sessionDir}/canvas.jpg`,
+      counts: {}, abort: null,
+    });
       await Promise.resolve();
       await Promise.resolve();
     });

@@ -2908,6 +2908,7 @@ function countsOf(raw: unknown): PanoPlusCounts {
     rejectedTracking: num(c.rejectedTracking),
     rejectedRectify: num(c.rejectedRectify),
     rejectedInput: num(c.rejectedInput),
+    skippedNonmonotonicTs: num(c.skippedNonmonotonicTs),
     warmingUp: num(c.warmingUp),
     bootstrap: num(c.bootstrap),
     gapExtended: num(c.gapExtended),

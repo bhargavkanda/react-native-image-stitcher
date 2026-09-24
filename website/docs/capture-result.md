@@ -61,10 +61,11 @@ type CameraCaptureResult =
       depthPath?: string; // iOS-only, captureDepthData opt-in
       warnings: CaptureWarning[];
     }
-  // VARIANT 2 — panorama succeeded
+  // VARIANT 2 — panorama succeeded (keyframe engine)
   | {
       ok: true;
       type: 'panorama';
+      engine: 'keyframe' | 'batch-keyframe';
       uri: string;
       width: number;
       height: number;
@@ -84,22 +85,48 @@ type CameraCaptureResult =
       captureOrientation?: string; // iOS-only
       warnings: CaptureWarning[];
     }
-  // VARIANT 3 — the attempt failed (photo or panorama)
+  // VARIANT 3 — panorama succeeded (sweep engine, `engine="sweep"`)
+  | {
+      ok: true;
+      type: 'panorama';
+      engine: 'sweep';
+      uri: string;               // a copy of the canvas in outputDir
+      width: number;
+      height: number;
+      framesRequested: number;   // frames the engine saw
+      framesIncluded: number;    // frames on the canvas (strips + seed)
+      framesDropped: number;     // frames the engine refused
+      durationMs: number;
+      liveness: 'unavailable';
+      warnings: CaptureWarning[];
+      // …and the sweep's pack: kind: 'panoplus', sessionDir, summary,
+      // arms, capturedAt.
+    }
+  // VARIANT 4 — the attempt failed (photo or panorama, either engine)
   | {
       ok: false;
       type: 'photo' | 'panorama';
+      engine: 'keyframe' | 'sweep' | 'batch-keyframe';
       error: CameraError;
       warnings: CaptureWarning[];
     };
 ```
 
-:::note `PanoramaCaptureResult`
-The success-panorama variant is also exported on its own:
+:::note `PanoramaCaptureResult` and `SweepPanoramaResult`
+Both success-panorama variants are exported on their own:
 
 ```ts
-import type { PanoramaCaptureResult } from 'react-native-image-stitcher';
-// = Extract<CameraCaptureResult, { ok: true; type: 'panorama' }>
+import type {
+  PanoramaCaptureResult,  // the KEYFRAME engine's member
+  SweepPanoramaResult,    // the SWEEP engine's member
+} from 'react-native-image-stitcher';
+// PanoramaCaptureResult = Extract<CameraCaptureResult,
+//   { ok: true; type: 'panorama'; engine: 'keyframe' | 'batch-keyframe' }>
 ```
+
+Narrowing on `type === 'panorama'` alone gives the union of the two. Narrow on
+`engine` as well before reading a field only one engine has
+(`finalConfidenceThresh`, `stitchModeResolved`; or the sweep's pack).
 :::
 
 ### Field notes

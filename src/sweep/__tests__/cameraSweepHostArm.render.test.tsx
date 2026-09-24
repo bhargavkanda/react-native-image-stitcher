@@ -1037,7 +1037,9 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
       onFramesDropped: (d: { requested: number; included: number }) => { dropped.push(d); },
     });
     await completeSweep(tree, refused);
-    expect(dropped).toEqual([{ requested: 120, included: 110 }]);
+    // M9 review — the result's OWN numbers (framesIncluded is painted + seed,
+    // 96 here), plus the refused count; not `requested − dropped`.
+    expect(dropped).toEqual([{ requested: 120, included: 96, dropped: 10 }]);
     act(() => { tree.unmount(); });
   });
 
