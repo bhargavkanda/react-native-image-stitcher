@@ -73,12 +73,17 @@ jest.mock('../ARCameraView', () => {
   });
   return { __esModule: true, ARCameraView };
 });
-jest.mock('../../sweep/PanoPlusCaptureSurface', () => {
+// M8 — the engine is a hook `<Camera>` calls on every engine; the stub is the
+// hook, inert and unrecorded while not selected, as the unmounted surface was.
+jest.mock('../../sweep/useSweepEngine', () => {
   const R = require('react');
-  const actual = jest.requireActual('../../sweep/PanoPlusCaptureSurface');
-  const Stub = R.forwardRef((props: any, ref: any) => {
-    (globalThis as any).__sw.props = props;
-    R.useImperativeHandle(ref, () => ({
+  function useSweepEngine(props: any, ref: any, options: { enabled?: boolean } = {}) {
+    const enabled = options.enabled !== false;
+    if (enabled) (globalThis as any).__sw.props = props;
+    const inert = () => undefined;
+    R.useImperativeHandle(ref, () => (!enabled ? {
+      capture: inert, finalize: inert, holdStart: inert, holdEnd: inert, abandon: inert,
+    } : {
       capture: () => undefined,
       finalize: () => undefined,
       holdStart: () => {
@@ -96,10 +101,20 @@ jest.mock('../../sweep/PanoPlusCaptureSurface', () => {
         props.onPaintedChange?.(0);
         props.onSweepingChange?.(false);
       },
-    }), [props]);
-    return null;
-  });
-  return { __esModule: true, ...actual, PanoPlusCaptureSurface: Stub };
+    }), [props, enabled]);
+    const wasEnabled = R.useRef(enabled);
+    R.useEffect(() => {
+      const was = wasEnabled.current;
+      wasEnabled.current = enabled;
+      if (was && !enabled) props.onSweepingChange?.(false);
+    }, [enabled]);
+    return {};
+  }
+  return { __esModule: true, useSweepEngine };
+});
+jest.mock('../../sweep/PanoPlusCaptureSurface', () => {
+  const actual = jest.requireActual('../../sweep/PanoPlusCaptureSurface');
+  return { __esModule: true, ...actual, SweepScreenView: () => null };
 });
 
 // eslint-disable-next-line import/first

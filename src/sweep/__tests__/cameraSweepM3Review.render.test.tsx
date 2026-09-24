@@ -54,7 +54,7 @@ jest.mock('../../camera/CameraView', () => {
 
 import { ARToggle, Camera } from '../../camera/Camera';
 import { CameraView } from '../../camera/CameraView';
-import { PanoPlusCaptureSurface } from '../PanoPlusCaptureSurface';
+import { SweepScreenView } from '../PanoPlusCaptureSurface';
 
 const vc = require('react-native-vision-camera') as {
   useCameraDevice: unknown;
@@ -114,7 +114,7 @@ async function advance(ms: number, steps = 1): Promise<void> {
   }
 }
 const surface = (t: ReactTestRenderer): Record<string, unknown> =>
-  t.root.findByType(PanoPlusCaptureSurface).props as Record<string, unknown>;
+  t.root.findByType(SweepScreenView).props.surfaceProps as Record<string, unknown>;
 const cameraViews = (t: ReactTestRenderer) => t.root.findAllByType(CameraView);
 const fpOf = (t: ReactTestRenderer): unknown =>
   t.root.findAll((n) => n.type === vc.Camera)[0]?.props.frameProcessor;

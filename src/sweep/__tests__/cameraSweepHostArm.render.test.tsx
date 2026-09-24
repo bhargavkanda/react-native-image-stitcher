@@ -66,7 +66,7 @@ import { NativeModules } from 'react-native';
 import { ARToggle, Camera } from '../../camera/Camera';
 import { CameraView } from '../../camera/CameraView';
 import { __resetHardwareVideoSizesCache } from '../../camera/androidHardwareVideoSizes';
-import { PanoPlusCaptureSurface } from '../PanoPlusCaptureSurface';
+import { SweepScreenView } from '../PanoPlusCaptureSurface';
 import { selectCaptureDevice } from '../../camera/selectCaptureDevice';
 import {
   coercePanoPlusSummary,
@@ -211,7 +211,7 @@ async function setEngine(
   await act(async () => { await Promise.resolve(); });
 }
 const surfaceProps = (t: ReactTestRenderer): Record<string, unknown> =>
-  t.root.findByType(PanoPlusCaptureSurface).props as Record<string, unknown>;
+  t.root.findByType(SweepScreenView).props.surfaceProps as Record<string, unknown>;
 const cameraViews = (t: ReactTestRenderer) => t.root.findAllByType(CameraView);
 
 /**
@@ -682,7 +682,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
     expect(RESULT.uri).toBe(CANVAS);                       // bare, by contract
     expect(review(tree)[0].props.imageUri).toBe(`file://${CANVAS}`);
     // …and the surface is gone behind it, so two cameras cannot be open.
-    expect(tree.root.findAllByType(PanoPlusCaptureSurface)).toHaveLength(0);
+    expect(tree.root.findAllByType(SweepScreenView)).toHaveLength(0);
     act(() => { tree.unmount(); });
   });
 
@@ -716,7 +716,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
     expect(seen).toHaveLength(0);
     // …and the surface comes BACK, which is what makes a retake possible.
     expect(review(tree)).toHaveLength(0);
-    expect(tree.root.findAllByType(PanoPlusCaptureSurface)).toHaveLength(1);
+    expect(tree.root.findAllByType(SweepScreenView)).toHaveLength(1);
     act(() => { tree.unmount(); });
   });
 
@@ -1215,7 +1215,7 @@ describe('M3 — the frame processor vision-camera sees is one composed worklet'
     const host = { type: 'readonly', frameProcessor: () => { hostCalls.push('host'); } };
     const tree = await render({ engine: 'sweep', frameProcessor: host });
     await act(async () => { jest.advanceTimersByTime(700); await Promise.resolve(); });
-    const surface = tree.root.findByType(PanoPlusCaptureSurface);
+    const surface = { props: tree.root.findByType(SweepScreenView).props.surfaceProps };
     expect(surface.props.frameSource).toBe('host');
     expect(surface.props.hostArmRefusal).toBeNull();
     const fp = fpOf(tree) as { frameProcessor: (f: unknown) => void };
@@ -1230,7 +1230,7 @@ describe('M3 — the frame processor vision-camera sees is one composed worklet'
     const tree = await render({ engine: 'sweep', frameProcessor: host });
     await act(async () => { jest.advanceTimersByTime(700); await Promise.resolve(); });
     expect(fpOf(tree)).toBe(host);
-    const surface = tree.root.findByType(PanoPlusCaptureSurface);
+    const surface = { props: tree.root.findByType(SweepScreenView).props.surfaceProps };
     expect(surface.props.hostArmRefusal?.code).toBe('panoplus-refused-drawable-processor');
     act(() => { tree.unmount(); });
   });

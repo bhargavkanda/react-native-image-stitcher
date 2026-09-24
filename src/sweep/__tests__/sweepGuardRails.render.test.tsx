@@ -42,7 +42,6 @@ const sensorsMock = require('react-native-sensors') as {
 };
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 
-import type { SweepSurfaceHandle } from '../panoPlusTypes';
 import { coercePanoPlusSummary, panoPlusResultOf } from '../panoPlusModel';
 
 /** Every imperative call `<Camera>` made into the surface, in order. */
@@ -50,12 +49,23 @@ const calls: string[] = [];
 /** The props of the live stub, so a test can drive its callbacks. */
 let surfaceProps: Record<string, any> = {};
 
-jest.mock('../PanoPlusCaptureSurface', () => {
+// ⚠ M8: THE ENGINE IS A HOOK `<Camera>` CALLS, SO THE STUB IS THE HOOK. The
+// surface component this used to replace is no longer in `<Camera>`'s tree:
+// `<Camera>` calls `useSweepEngine` on every engine and renders
+// `SweepScreenView` from it. The stub keeps the contract the real hook keeps:
+//   · not SELECTED (`enabled: false`) → the handle is inert and nothing is
+//     recorded, as the unmounted surface was;
+//   · deselected → `onSweepingChange(false)`, which the real hook reports on
+//     every falling edge (M8a).
+jest.mock('../useSweepEngine', () => {
   const ReactLocal = require('react') as typeof React;
-  const actual = jest.requireActual('../PanoPlusCaptureSurface');
-  const Stub = ReactLocal.forwardRef<SweepSurfaceHandle, any>((props, ref) => {
-    surfaceProps = props;
-    ReactLocal.useImperativeHandle(ref, () => ({
+  function useSweepEngine(props: any, ref: any, options: { enabled?: boolean } = {}) {
+    const enabled = options.enabled !== false;
+    if (enabled) surfaceProps = props;
+    const inert = () => undefined;
+    ReactLocal.useImperativeHandle(ref, () => (!enabled ? {
+      capture: inert, finalize: inert, holdStart: inert, holdEnd: inert, abandon: inert,
+    } : {
       capture: () => { calls.push('capture'); },
       finalize: () => { calls.push('finalize'); },
       holdStart: () => {
@@ -92,15 +102,21 @@ jest.mock('../PanoPlusCaptureSurface', () => {
         calls.push(`abandon:${reason}`);
         props.onSweepingChange?.(false);
       },
-    }), [props]);
-    return null;
-  });
-  Stub.displayName = 'PanoPlusCaptureSurfaceStub';
-  return {
-    __esModule: true,
-    ...actual,
-    PanoPlusCaptureSurface: Stub,
-  };
+    }), [props, enabled]);
+    const wasEnabled = ReactLocal.useRef(enabled);
+    ReactLocal.useEffect(() => {
+      const was = wasEnabled.current;
+      wasEnabled.current = enabled;
+      if (was && !enabled) props.onSweepingChange?.(false);
+    }, [enabled]);
+    return {};
+  }
+  return { __esModule: true, useSweepEngine };
+});
+jest.mock('../PanoPlusCaptureSurface', () => {
+  const actual = jest.requireActual('../PanoPlusCaptureSurface');
+  const SweepScreenView = () => null;
+  return { __esModule: true, ...actual, SweepScreenView };
 });
 
 // eslint-disable-next-line import/first

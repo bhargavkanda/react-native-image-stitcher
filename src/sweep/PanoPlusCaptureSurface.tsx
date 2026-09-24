@@ -65,7 +65,7 @@ import {
 } from '../index';
 
 import { PanoArToggle, PanoLensChip } from './chrome';
-import { useSweepEngine } from './useSweepEngine';
+import { useSweepEngine, type SweepEngine } from './useSweepEngine';
 import { SweepHoldOverlay } from './SweepHoldOverlay';
 import { sweepSurfaceStyles as styles } from './sweepSurfaceStyles';
 import type {
@@ -594,11 +594,19 @@ export { panoBottomChromePt, panoLensChipBottomPt } from './sweepLayout';
 
 
 
-export const PanoPlusCaptureSurface = forwardRef<
-  SurfaceControlHandle,
-  PanoPlusCaptureSurfaceProps
->(function PanoPlusCaptureSurface(props, ref): React.JSX.Element {
-  // M7 — the ENGINE lives in `useSweepEngine`; this composite only draws.
+/**
+ * M8 — the sweep SCREEN, drawn from an engine someone else owns. The
+ * standalone surface below owns its engine; `<Camera>` calls
+ * `useSweepEngine` itself (so the engine outlives this view behind the review
+ * and is mounted on every engine) and renders this.
+ */
+export function SweepScreenView({
+  surfaceProps: props,
+  engine,
+}: {
+  surfaceProps: PanoPlusCaptureSurfaceProps;
+  engine: SweepEngine;
+}): React.JSX.Element {
   const {
     frameSource = 'own',
     hostPreviewLive = true,
@@ -660,7 +668,7 @@ export const PanoPlusCaptureSurface = forwardRef<
     sweeping,
     ultraWideOfferable,
     viewfinderNotice,
-  } = useSweepEngine(props, ref);
+  } = engine;
 
 
   if (!available) {
@@ -955,4 +963,13 @@ export const PanoPlusCaptureSurface = forwardRef<
       )}
     </View>
   );
+}
+
+// M7 — the ENGINE lives in `useSweepEngine`; this composite only draws.
+export const PanoPlusCaptureSurface = forwardRef<
+  SurfaceControlHandle,
+  PanoPlusCaptureSurfaceProps
+>(function PanoPlusCaptureSurface(props, ref): React.JSX.Element {
+  const engine = useSweepEngine(props, ref);
+  return <SweepScreenView surfaceProps={props} engine={engine} />;
 });

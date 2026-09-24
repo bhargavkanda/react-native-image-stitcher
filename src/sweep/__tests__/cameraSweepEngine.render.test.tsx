@@ -48,7 +48,7 @@ import type { CameraCaptureResult } from '../../camera/Camera';
 import { CameraView } from '../../camera/CameraView';
 import { CaptureStatusOverlay } from '../../camera/CaptureStatusOverlay';
 import { CaptureCountdownOverlay } from '../../camera/CaptureCountdownOverlay';
-import { PanoPlusCaptureSurface } from '../PanoPlusCaptureSurface';
+import { SweepScreenView } from '../PanoPlusCaptureSurface';
 import { SWEEP_ENGINE_DEFAULTS } from '../sweepDefaults';
 
 /** Composite component names in the tree — the host-string walker below
@@ -214,9 +214,9 @@ describe('<Camera engine="sweep">', () => {
   // the far side cannot see them. These read the props off the real surface
   // element — no mock, so the delegation under test is the one that ships.
 
-  /** The props `<Camera>` actually handed `PanoPlusCaptureSurface`. */
+  /** The props `<Camera>` actually handed the sweep engine and its screen. */
   function surfaceProps(tree: ReactTestRenderer): Record<string, unknown> {
-    return tree.root.findByType(PanoPlusCaptureSurface).props as Record<
+    return tree.root.findByType(SweepScreenView).props.surfaceProps as Record<
       string,
       unknown
     >;

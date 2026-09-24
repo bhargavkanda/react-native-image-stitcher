@@ -28,7 +28,7 @@ jest.mock('expo-file-system/legacy', () => ({
 
 import { Camera } from '../../camera/Camera';
 import { useLatchedWhile } from '../../camera/CameraView';
-import { PanoPlusCaptureSurface } from '../PanoPlusCaptureSurface';
+import { SweepScreenView } from '../PanoPlusCaptureSurface';
 
 const RN = require('react-native') as { __emitAppState: (s: string) => void };
 const vc = require('react-native-vision-camera') as {
@@ -70,7 +70,7 @@ async function flush(): Promise<void> {
 }
 const vcCamera = (t: ReactTestRenderer) =>
   t.root.findAll((n) => n.type === vc.Camera)[0]!;
-const surface = (t: ReactTestRenderer) => t.root.findByType(PanoPlusCaptureSurface);
+const surface = (t: ReactTestRenderer) => ({ props: t.root.findByType(SweepScreenView).props.surfaceProps });
 
 describe('useLatchedWhile', () => {
   function Probe({ latched, value, out }: { latched: boolean; value: number; out: number[] }) {
