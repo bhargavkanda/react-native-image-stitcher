@@ -25,6 +25,22 @@ internal enum class PanoStartMode {
     /** A live AR sweep asked for pano+'s own ARCore channel — refused by name. */
     REFUSE_OWN_ARCORE_ON_AR_ARM,
 
+    /**
+     * A live AR sweep on a phone where ARCore cannot run (unsupported, or
+     * Play Services for AR missing or too old). Before M2 this silently fell
+     * back to the IMU on pano+'s own Camera2 client; the AR-plugin arm has no
+     * such fallback, so without this the sweep would arm a plugin no frame
+     * will ever reach and paint nothing. Refused by name instead.
+     */
+    REFUSE_AR_UNAVAILABLE,
+
+    /**
+     * A vision-camera sweep that also asked for pano+'s own ARCore channel:
+     * vision-camera owns the camera, so a shared or standalone ARCore
+     * Session would be a second owner. Refused by name.
+     */
+    REFUSE_OWN_ARCORE_ON_VC_ARM,
+
     /** vision-camera's camera feeds the engine through the frame processor plugin. */
     VC_PLUGIN,
 
@@ -47,10 +63,15 @@ internal fun panoStartMode(
     arcoreReference: ArCoreRefMode,
     vcPluginArm: Boolean,
     allowOwnCamera: Boolean = false,
+    /** `readArCoreAvailability(...).supported`; null = not asked (non-AR). */
+    arcoreSupported: Boolean? = null,
 ): PanoStartMode = when {
     live && poseSource == "ar" && arcoreReference != ArCoreRefMode.OFF ->
         PanoStartMode.REFUSE_OWN_ARCORE_ON_AR_ARM
+    live && poseSource == "ar" && arcoreSupported == false -> PanoStartMode.REFUSE_AR_UNAVAILABLE
     live && poseSource == "ar" -> PanoStartMode.AR_PLUGIN
+    live && vcPluginArm && poseSource == "imu" && arcoreReference != ArCoreRefMode.OFF ->
+        PanoStartMode.REFUSE_OWN_ARCORE_ON_VC_ARM
     // Read WITH the pose arm, never alone (the 2026-09-10 regression: a flag
     // that selects an ARM read on its own sent an IMU sweep down the wrong one).
     vcPluginArm && poseSource == "imu" -> PanoStartMode.VC_PLUGIN

@@ -150,64 +150,63 @@ describe('the session defaults', () => {
 //      and not an outcome, because nothing in JS can know whether ARCore will
 //      open shared.
 // ═════════════════════════════════════════════════════════════════════════
-describe('the AR pill on Android — A REAL ARM SINCE 2026-09-02', () => {
-  // ⚠ THIS BLOCK USED TO ASSERT THE OPPOSITE, AND THE OPPOSITE USED TO BE
-  // TRUE. Until 2026-09-02 `PanoPlusLiveModule.start()` answered
-  // `poseSource: "imu"` unconditionally and nothing fed ARCore's poses to the
-  // engine, so the honest notice was "AR PILL IGNORED". The arm is now wired
-  // end to end — `arcoreReference:'shared'` in the recorder's bag,
-  // `ArCorePoseSink` into a live ring, the ingest solving against that ring
-  // with NO basis — and these tests pin the new truth. The old assertions are
-  // not softened; they are inverted, because the fact under them moved.
+describe('the AR pill on Android — the stitcher\'s ARCore session (M2)', () => {
+  // Since M2 the AR arm is the stitcher's own ARCore session feeding the engine
+  // through PanoPlusArFramePlugin. There is no IMU fallback, no exposure lock,
+  // no 0.5×; these tests pin what the notice now says and when it refuses.
   const n = panoPlusAndroidArmNotice({
     poseSource: 'ar',
     liveModule: true,
     basis: androidBasis(),
+    arcoreAvailable: true,
   });
 
-  it('resolves to the AR arm — the pill finally changes what runs', () => {
-    // THE ASSERTION THAT MATTERS. `effectivePoseSource` is what the surface
-    // puts in the start bag, and native reads it to decide whether to open the
-    // shared-camera ARCore channel at all.
+  it('resolves to the AR arm and can start once ARCore has said yes', () => {
     expect(n.effectivePoseSource).toBe('ar');
     expect(n.canStart).toBe(true);
-    // Nothing was downgraded: he asked for AR and is getting AR attempted.
     expect(n.fallbackToAr).toBe(false);
     expect(n.startLabel).toMatch(/ARCore/);
   });
 
-  it('states the price in the headline, not only in the paragraph', () => {
-    // The two costs that make an AR pack incomparable with an ultra-wide IMU
-    // pack. Burying them in the detail would let the comparison the operator
-    // asked for be run on two different cameras without either screen saying
-    // so.
+  it('⚑ cannot start while the ARCore probe is still in flight', () => {
+    const pending = panoPlusAndroidArmNotice({
+      poseSource: 'ar', liveModule: true, basis: androidBasis(), arcoreAvailable: null,
+    });
+    expect(pending.canStart).toBe(false);
+    expect(pending.headline).toMatch(/CHECKING/);
+  });
+
+  it('⚑ REFUSES BY NAME where ARCore cannot run — the old silent fallback is gone', () => {
+    const no = panoPlusAndroidArmNotice({
+      poseSource: 'ar', liveModule: true, basis: androidBasis(), arcoreAvailable: false,
+    });
+    expect(no.canStart).toBe(false);
+    expect(no.tone).toBe('stop');
+    expect(no.headline).toMatch(/ARCore CANNOT RUN/);
+    expect(no.detail).toMatch(/Turn AR off/);
+    // The AR view must not mount for it (a black view that never delivers).
+    expect(no.effectivePoseSource).toBe('imu');
+  });
+
+  it('states the price in the headline: no ultra-wide, no AE lock', () => {
     expect(n.headline).toMatch(/AR ARM/);
     expect(n.headline).toMatch(/ULTRA-WIDE/);
     expect(n.headline).toMatch(/AE LOCK/);
   });
 
-  it('names every measured cost: camera, exposure, rate', () => {
-    expect(n.detail).toMatch(/CameraConfig/);
-    expect(n.detail).toMatch(/69\.7/);          // the FOV ARCore forces
-    expect(n.detail).toMatch(/CONTROL_AE_LOCK/);
-    expect(n.detail).toMatch(/30 Hz/);
-    expect(n.detail).toMatch(/122 Hz/);
+  it('describes the plugin arm, not the deleted shared-camera one', () => {
+    expect(n.detail).toMatch(/stitcher/);
+    expect(n.detail).toMatch(/no pose ring/);
+    expect(n.detail).toMatch(/0\.5\u00d7 ultra-wide is NOT available/);
+    expect(n.detail).toMatch(/no exposure\s+lock/);
+    expect(n.detail).toMatch(/NO fallback/);
+    // None of the shared arm's costs survive.
+    expect(n.detail).not.toMatch(/CONTROL_AE_LOCK|69\.7|122 Hz|IMU arm instead of being lost/);
   });
 
-  it('promises an ATTEMPT and never an outcome', () => {
-    // Nothing in JS can know whether ARCore will open shared. A notice that
-    // said "runs on ARCore" would be a claim the SDK cannot keep, and the
-    // operator would read an IMU pack as an AR one.
-    expect(n.detail).toMatch(/ATTEMPTED, NOT PROMISED/);
-    expect(n.detail).toMatch(/runs on the IMU arm instead of being lost/);
-  });
-
-  it('says the arm uses NO basis, and why that is a fact not a shortcut', () => {
-    expect(n.detail).toMatch(/NO basis/);
+  it('says the arm uses no basis, and why', () => {
+    expect(n.detail).toMatch(/no basis/);
     expect(n.detail).toMatch(/Camera\.getPose\(\)/);
-    // The τ chip must be DARK here: τ is the camera↔IMU offset and this arm
-    // has no IMU in its pose path, so a τ warning would describe an
-    // approximation this sweep does not make.
     expect(n.tauUncorrectedRun).toBeFalsy();
   });
 
@@ -220,6 +219,7 @@ describe('the AR pill on Android — A REAL ARM SINCE 2026-09-02', () => {
       poseSource: 'ar',
       liveModule: true,
       basis: androidBasis({ basisIndex: 8, basisLabel: '(+Y,+Z,+X)' }),
+      arcoreAvailable: true,
     });
     expect(stored.tone).toBe('warn');
     expect(stored.effectivePoseSource).toBe('ar');

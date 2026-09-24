@@ -229,6 +229,15 @@ export interface PanoPlusAndroidArmInput {
    * hypothesis about the sensor mounting.
    */
   basis: PanoPlusBasisResolution;
+  /**
+   * M2 — can ARCore run on this phone (`RNSARSession.isSupported()`)? `null`
+   * while the one-shot probe is in flight. The AR arm has NO fallback since
+   * M2 (it runs only on the stitcher's ARCore session), so an ARCore that
+   * cannot run is a named refusal, and the AR view is not mounted until this
+   * says yes (mounting it on an unsupported phone is a black view that never
+   * delivers a frame).
+   */
+  arcoreAvailable?: boolean | null;
 }
 
 /**
@@ -288,86 +297,57 @@ export function panoPlusAndroidArmNotice(
     );
   }
 
-  // ── THE AR PILL ON ANDROID — A REAL ARM SINCE 2026-09-02 ────────────────
+  // ── THE AR PILL ON ANDROID ──────────────────────────────────────────────
   //
-  // ⚠ WHAT THIS BRANCH USED TO SAY, AND WHY THE CORRECTION MATTERS. Until
-  // today it returned "AR PILL IGNORED — NO ARCore ARM IN THIS BUILD", and
-  // that was TRUE: `PanoPlusLiveModule.start()` answered `poseSource: "imu"`
-  // unconditionally and `PanoPlusAndroidRecorder` fed the engine from
-  // TYPE_ROTATION_VECTOR through the derived basis on every sweep. Its only
-  // ARCore code was the optional `arcoreReference` LOG channel, written beside
-  // the pack and never read by the engine.
-  //
-  // The operator learned that on 2026-09-02, having asked for "the same
-  // capture done both via imu and ar and see the comparison" — possible on
-  // iPhone, impossible on the A35, and nothing on the screen had ever said so.
-  // The arm is now wired: `arcoreReference:'shared'` goes into the recorder's
-  // bag, `ArCorePoseSink` hands `Camera.getPose()` to a live ring, and the
-  // ingest solves against THAT ring with NO basis applied.
-  //
-  // ── THREE THINGS THIS COPY MUST NOT DO ──────────────────────────────────
-  //
-  // 1. IT MUST NOT PROMISE THE ARM WILL RUN. Nothing in JS can know whether
-  //    ARCore will open in SHARED mode: it needs the runtime in the APK, Play
-  //    Services for AR, a supported device, and a shared session that actually
-  //    configures. When it cannot, the recorder runs the IMU arm rather than
-  //    losing the sweep, and native answers `poseSource: "imu"` with the reason
-  //    attached. So this rung says ATTEMPTED, and the surface's own latch reads
-  //    what native answered.
-  // 2. IT MUST NOT HIDE THE PRICE. ARCore selects the camera (0 on this phone,
-  //    69.7° — NO ULTRA-WIDE) and the CPU image size from its own CameraConfig
-  //    list, `Session.resume()` installs its repeating request over the AE/AWB
-  //    lock the recorder asserted, and the pose series is the CAMERA's ~30 Hz
-  //    rather than the rotation vector's ~122 Hz. An AR pack silently compared
-  //    with an ultra-wide IMU pack would attribute the camera's difference to
-  //    the arm, which is the whole reason the comparison was wanted.
-  // 3. IT MUST NOT CLAIM THE BASIS PROBLEM AWAY QUIETLY. It genuinely does not
-  //    apply — `Camera.getPose()` is already `world<-camera` in the engine's
-  //    convention, which is exactly why `selectBasis()` fits the ROTATION
-  //    VECTOR onto this series — so this rung sits ABOVE the basis rungs and
-  //    says why in one sentence. A reader who has just been told the derivation
-  //    is unfalsified needs to know that this arm does not use it.
+  // Since M2 the AR arm is the stitcher's own ARCore session (RNSARSession)
+  // feeding the engine through PanoPlusArFramePlugin; pano+ opens no ARCore
+  // and no camera of its own for it. The copy must not promise what the arm
+  // cannot do: there is no IMU fallback (an ARCore that cannot run is a named
+  // refusal), no exposure lock (a normal ARCore session exposes none), and no
+  // 0.5× (ARCore chooses the camera). And it must not claim the basis problem
+  // applies — `Camera.getPose()` is already in the engine's convention, so
+  // this rung sits ABOVE the basis rungs.
   if (i.poseSource === 'ar') {
+    if (i.arcoreAvailable === false) {
+      // A NAMED REFUSAL, not a silent loss. Before M2 the recorder fell back
+      // to the IMU on its own Camera2 client; the AR-plugin arm cannot.
+      return {
+        tone: 'stop',
+        headline: 'AR ARM — ARCore CANNOT RUN ON THIS PHONE',
+        detail:
+          'The AR sweep runs on ARCore, and ARCore is not supported here, or '
+          + 'Google Play Services for AR is missing or too old. Turn AR off to '
+          + 'sweep on the phone\u2019s motion sensors instead.',
+        canStart: false,
+        effectivePoseSource: 'imu',
+        fallbackToAr: false,
+        startLabel: 'Start sweep (ARCore unavailable)',
+      };
+    }
     return {
-      // `warn`, not `ok`: the arm is real and the costs are real, and a rung
-      // that read `ok` would put an ultra-wide IMU pack and a 69.7° AR pack
-      // side by side under the same colour.
+      // `warn`, not `ok`: the arm is real and so are its costs.
       tone: 'warn',
-      headline: 'AR ARM — ARCore POSES, ULTRA-WIDE AND AE LOCK GIVEN UP',
+      headline: i.arcoreAvailable == null
+        ? 'AR ARM — CHECKING ARCore\u2026'
+        : 'AR ARM — THE STITCHER\u2019S ARCore SESSION, NO ULTRA-WIDE, NO AE LOCK',
       detail:
-        'ARCore\u2019s world\u2190camera rotation feeds the engine directly, with '
-        + 'NO basis: Camera.getPose() is already in the engine\u2019s own '
-        + 'convention, so SENSOR_ORIENTATION plays no part and a wrong '
-        + 'derivation cannot rotate this canvas. WHAT IT COSTS, measured on '
-        + 'this phone and recorded in the pack (device.json \u2192 arm.costs): '
-        + 'ARCore picks the camera and the CPU image size from its own '
-        + 'CameraConfig list \u2014 camera 0 at 69.7\u00b0 and 1920\u00d71080, so '
-        + 'the 0.5\u00d7 ultra-wide is NOT available on this arm; '
-        + 'Session.resume() installs ARCore\u2019s repeating request over the '
-        + 'AE/AWB lock this recorder asserts, and CONTROL_AE_LOCK read back '
-        + 'false the last time it was measured, so banding is more likely here '
-        + 'than on the IMU arm; and the pose series arrives at the camera\u2019s '
-        + '~30 Hz instead of the rotation vector\u2019s ~122 Hz, so a frame may '
-        + 'wait up to 33 ms for a pose that brackets it. \u26a0 ATTEMPTED, NOT '
-        + 'PROMISED: if the shared-camera session cannot open, the sweep runs '
-        + 'on the IMU arm instead of being lost, and the pack and the panel '
-        + 'both say which one ran. The rotation vector is logged either way, so '
-        + 'ONE pack replays on BOTH arms offline \u2014 same pixels, same hand '
-        + 'motion, which is the only honest comparison.',
-      canStart: true,
-      // TRUE ON ANDROID FOR THE FIRST TIME. `PanoPlusCaptureSurface` reads this
-      // for the start bag and for the host’s pill; what it must NOT do on
-      // this contract is mount `<ARCameraView>` from it — the recorder owns
-      // the ARCore session in-process, and a second client would take the
-      // camera from the arm that needs it. See `arArmed` there.
+        'The sweep runs on the same ARCore session the AR view shows (the '
+        + 'stitcher\u2019s), and each frame arrives with the pose it was taken at '
+        + '\u2014 no pose ring, no bracket wait, no basis: Camera.getPose() is '
+        + 'already in the engine\u2019s own convention. WHAT IT COSTS: ARCore '
+        + 'picks the camera and the image size, so the 0.5\u00d7 ultra-wide is '
+        + 'NOT available on this arm; and an ARCore session exposes no exposure '
+        + 'lock, so the exposure is measured per frame (not held) and banding is '
+        + 'more likely than on a locked sweep. There is NO fallback: if ARCore '
+        + 'delivers no frames, the sweep paints nothing and the pack\u2019s '
+        + 'arPlugin counters say so.',
+      // Not until the probe has answered: a hold before then could arm a
+      // plugin no frame will reach.
+      canStart: i.arcoreAvailable === true,
       effectivePoseSource: 'ar',
-      // Not a FALLBACK: nothing was downgraded. The operator asked for AR and
-      // is getting AR attempted.
       fallbackToAr: false,
-      // NO τ CHIP ON THIS ARM. τ is the camera\u2194IMU offset, and this arm
-      // has no IMU in its pose path at all — ARCore’s pose and the frame
-      // come from the same capture. Setting `tauUncorrectedRun` here would put
-      // a warning about an approximation this sweep does not make.
+      // NO τ CHIP ON THIS ARM: ARCore's pose and the frame come from the same
+      // capture, so there is no camera↔IMU offset in the pose path.
       startLabel: 'Start sweep (ARCore)',
     };
   }

@@ -421,6 +421,13 @@ describe('the AR pill on Android runs the sweep on the STITCHER\u2019s ARCore se
         // viewfinder, one client, the arrangement iOS has always had.
         const ar = mount('ar');
         await settle();
+        // Not before ARCore has said it can run (the one-shot isSupported
+        // probe, M2) — and then after the Android camera-release grace
+        // (600 ms, the measured Camera2 release), as any arm change.
+        await settle();
+        act(() => { jest.advanceTimersByTime(250); });
+        expect(ar.has('ar-camera')).toBe(false);   // still inside the release
+        act(() => { jest.advanceTimersByTime(400); });
         expect(ar.has('ar-camera')).toBe(true);
         ar.unmount();
         // The IMU arm still leaves it unmounted: there is one back camera.
@@ -429,6 +436,23 @@ describe('the AR pill on Android runs the sweep on the STITCHER\u2019s ARCore se
         expect(imu.has('ar-camera')).toBe(false);
         imu.unmount();
       });
+
+    it('⚑ where ARCore cannot run: no AR view, and the arm REFUSES by name (no silent loss)', async () => {
+      const ar = NM.RNSARSession as { isSupported: () => Promise<boolean> };
+      const real = ar.isSupported;
+      ar.isSupported = () => Promise.resolve(false);
+      try {
+        const r = mount('ar');
+        await settle();
+        await settle();
+        act(() => { jest.advanceTimersByTime(700); });
+        expect(r.has('ar-camera')).toBe(false);
+        expect(r.shows('ARCore CANNOT RUN')).toBe(true);
+        r.unmount();
+      } finally {
+        ar.isSupported = real;
+      }
+    });
 
     it('claims nothing about ARCore\u2019s state at idle — on either arm', async () => {
       // ⚠ THIS TEST ASSERTED `shows('ARCore is UP')` UNTIL 2026-09-03, AND IT

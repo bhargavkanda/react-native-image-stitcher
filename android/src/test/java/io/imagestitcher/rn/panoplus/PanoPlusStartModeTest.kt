@@ -37,6 +37,34 @@ class PanoPlusStartModeTest {
     }
 
     @Test
+    fun `a live AR sweep where ARCore cannot run is refused by name — no silent fallback`() {
+        assertEquals(
+            PanoStartMode.REFUSE_AR_UNAVAILABLE,
+            panoStartMode(
+                live = true, poseSource = "ar", arcoreReference = ArCoreRefMode.OFF,
+                vcPluginArm = false, arcoreSupported = false,
+            ),
+        )
+        assertEquals(
+            PanoStartMode.AR_PLUGIN,
+            panoStartMode(
+                live = true, poseSource = "ar", arcoreReference = ArCoreRefMode.OFF,
+                vcPluginArm = false, arcoreSupported = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `a vision-camera sweep that asks for pano+'s own ARCore is refused by name`() {
+        for (ref in listOf(ArCoreRefMode.SHARED, ArCoreRefMode.STANDALONE, ArCoreRefMode.AUTO)) {
+            assertEquals(
+                PanoStartMode.REFUSE_OWN_ARCORE_ON_VC_ARM,
+                panoStartMode(live = true, poseSource = "imu", arcoreReference = ref, vcPluginArm = true),
+            )
+        }
+    }
+
+    @Test
     fun `the vc arm is read WITH the IMU pose arm, never alone`() {
         assertEquals(
             PanoStartMode.VC_PLUGIN,

@@ -2658,8 +2658,14 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
         // never sent — so the library-default AR sweep reached pano+'s own
         // SHARED_CAMERA arm (which has never painted a strip in 23 packs), and
         // even the plugin arm opened pano+'s ARCore channel first.
+        // ARCore availability, asked only for a live AR sweep (the AR-plugin
+        // arm has no fallback, so an ARCore that cannot run is refused here by
+        // name rather than discovered as an empty canvas).
+        val arAvail = if (cfg.live && cfg.livePoseSource == "ar") readArCoreAvailability(ctx) else null
+        if (arAvail != null) arcoreAvailability = arAvail
         when (panoStartMode(
             cfg.live, cfg.livePoseSource, cfg.arcoreReference, cfg.vcPluginArm, cfg.allowOwnCamera,
+            arAvail?.supported,
         )) {
             PanoStartMode.AR_PLUGIN -> return startArPluginArm(promise)
             PanoStartMode.REFUSE_OWN_ARCORE_ON_AR_ARM -> return fail(
@@ -2668,6 +2674,18 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
                     "own, so arcoreReference:'${cfg.arcoreReference.name.lowercase()}' cannot " +
                     "apply to it. Send arcoreReference:'off' (the default), or record a " +
                     "reference series on a non-live session.",
+            )
+            PanoStartMode.REFUSE_AR_UNAVAILABLE -> return fail(
+                promise, "ar-unavailable",
+                "a live AR sweep runs only on the stitcher's ARCore session, and ARCore cannot " +
+                    "run here (${arAvail?.status}): ${arAvail?.detail} Switch the sweep to the " +
+                    "IMU arm (AR off).",
+            )
+            PanoStartMode.REFUSE_OWN_ARCORE_ON_VC_ARM -> return fail(
+                promise, "vc-arm-no-own-arcore",
+                "a vision-camera sweep runs on the camera vision-camera owns, so " +
+                    "arcoreReference:'${cfg.arcoreReference.name.lowercase()}' — a second ARCore " +
+                    "session on that camera — cannot apply to it. Send arcoreReference:'off'.",
             )
             PanoStartMode.VC_PLUGIN -> return startVcPluginArm(promise)
             PanoStartMode.REFUSE_LIVE_WITHOUT_CAMERA -> return fail(
@@ -6844,6 +6862,21 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
                                     "seq $arArmDegradedAtSeq. Do NOT compare this pack with " +
                                     "one from a sweep that asked for the IMU arm up front: the " +
                                     "pose series is comparable, the pixels are not."
+                            else if (frameSourceArm == "ar-plugin")
+                                // M2: the only live Android AR arm.
+                                "THE AR-PLUGIN ARM'S PRICE: (1) CAMERA — the stitcher's ARCore " +
+                                    "session chose the camera id and the CPU image size; pano+ " +
+                                    "opened no Camera2 client and no ARCore session of its own, " +
+                                    "so the 0.5x ultra-wide is not available. (2) EXPOSURE — " +
+                                    "pano+ requested NO AE/AWB lock (a normal ARCore session " +
+                                    "exposes none); the per-frame exposure from ARCore's image " +
+                                    "metadata is what the engine normalises against. (3) POSE — " +
+                                    "each pose arrives with its own frame: no ring, no bracket " +
+                                    "wait. (4) BASIS — none is applied on this arm."
+                            else if (frameSourceArm == "vc-plugin")
+                                "not applicable — this sweep ran on the IMU arm, on the camera " +
+                                    "vision-camera opened; its lock and metadata are in vcLock " +
+                                    "and vcMeta."
                             else if (!arArmActive)
                                 "not applicable — this sweep ran on the IMU arm, on the camera " +
                                     "this recorder selected, at the fps it requested, with the " +

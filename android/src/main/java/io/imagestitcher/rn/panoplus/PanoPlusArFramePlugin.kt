@@ -172,6 +172,18 @@ internal class PanoPlusArFramePlugin private constructor() : ARFramePlugin {
      * `camera.pose.rotationQuaternion`, not the display-oriented pose).
      */
     @Volatile var poseRowSink: ((tsNs: Double, q: DoubleArray, t: DoubleArray, tracking: String) -> Unit)? = null
+        set(value) {
+            field = value
+            lastPoseTsNs = Long.MIN_VALUE
+        }
+
+    /**
+     * The last camera timestamp written as a pose row. The AR view can hand
+     * plugins the SAME ARCore frame more than once (a GL re-render with no new
+     * camera image); without this each re-render wrote a duplicate row. Read
+     * and written only on the GL thread, in [process].
+     */
+    private var lastPoseTsNs = Long.MIN_VALUE
 
     override fun name(): String = NAME
 
@@ -249,10 +261,14 @@ internal class PanoPlusArFramePlugin private constructor() : ARFramePlugin {
 
     override fun process(context: ARFrameContext): WritableMap? {
         poseRowSink?.let { sink ->
-            try {
-                sink(context.timestampNs, context.poseRotation, context.poseTranslation, context.trackingState)
-            } catch (t: Throwable) {
-                state.recordThrew("poseRow:" + t.javaClass.simpleName)
+            val ts = context.timestampNs.toLong()
+            if (ts > lastPoseTsNs) {
+                lastPoseTsNs = ts
+                try {
+                    sink(context.timestampNs, context.poseRotation, context.poseTranslation, context.trackingState)
+                } catch (t: Throwable) {
+                    state.recordThrew("poseRow:" + t.javaClass.simpleName)
+                }
             }
         }
         val verdict = state.verdict(

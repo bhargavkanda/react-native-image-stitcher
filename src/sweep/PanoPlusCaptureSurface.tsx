@@ -1442,12 +1442,32 @@ export const PanoPlusCaptureSurface = forwardRef<
    *  line reads `armNotice` and cannot tell which produced it, which is the
    *  property that keeps the arm latch, the pack stamp and the host's pill on
    *  one code path. */
+  // ── M2: CAN ARCore RUN HERE? ─────────────────────────────────────────────
+  // One probe per mount, Android only. The AR arm has no fallback since M2,
+  // so the notice needs the answer to refuse by name, and the AR view is not
+  // mounted until it is yes (an unsupported phone would show a black view
+  // that never delivers a frame, and a hold would paint nothing).
+  const [arcoreAvailable, setArcoreAvailable] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (armContract !== 'android-sensor') return undefined;
+    const mod = (NativeModules as Record<string, unknown>).RNSARSession as
+      | { isSupported?: () => Promise<boolean> }
+      | undefined;
+    if (mod?.isSupported == null) { setArcoreAvailable(false); return undefined; }
+    let live = true;
+    mod.isSupported()
+      .then((ok) => { if (live) setArcoreAvailable(ok === true); })
+      .catch(() => { if (live) setArcoreAvailable(false); });
+    return () => { live = false; };
+  }, [armContract]);
+
   const armNotice = useMemo(
     () => (armContract === 'android-sensor'
       ? panoPlusAndroidArmNotice({
           poseSource,
           liveModule: nativeReady,
           basis: basisResolution,
+          arcoreAvailable,
         })
       : panoPlusArmNotice(
           poseSource, plan, calib, tauUncorrected,
@@ -1465,6 +1485,7 @@ export const PanoPlusCaptureSurface = forwardRef<
         )),
     [
       armContract,
+      arcoreAvailable,
       basisResolution,
       calib,
       lens,
@@ -1792,7 +1813,8 @@ export const PanoPlusCaptureSurface = forwardRef<
     // key on. `armContract` is already 'android-sensor' in this branch.
     ? (runningArm != null
       ? runningArm.poseSource !== 'imu'
-      : armNotice.effectivePoseSource !== 'imu')
+      // …and only once ARCore has said it can run (M2).
+      : armNotice.effectivePoseSource !== 'imu' && arcoreAvailable === true)
     : runningArm != null
       ? runningArm.poseSource !== 'imu'
       : poseSource !== 'imu'
@@ -1845,17 +1867,27 @@ export const PanoPlusCaptureSurface = forwardRef<
    * `start()` is covered by the overlay's own `REFERENCE_GRACE_S`, which is why
    * a reference-less first second is coached rather than blamed on the hands.
    */
+  // ⚠ M2: AND ONLY ONCE THE PREVIOUS CAMERA OWNER HAS LET GO. Inside
+  // `<Camera>`'s release window the surface is told `frameSource: 'host'` on
+  // purpose — neither side may open a camera yet — and the AR view opening
+  // there raced the host's own camera. On Android the grace is the measured
+  // Camera2 release (the recorder reclaimed the camera at ~479 ms on the
+  // A35; `<Camera>` settles 600 ms), not iOS's 250 ms.
+  const arMayOpen = arArmed && frameSource === 'own';
+  const arGraceMs = armContract === 'android-sensor'
+    ? Math.max(PANO_PLUS_SWAP_GRACE_MS, 600)
+    : PANO_PLUS_SWAP_GRACE_MS;
   useEffect(() => {
     // Down means down: an arm that is not armed has no session to be ready
     // for, and leaving `arReady` true there is what let the next arming
     // commit claim a live reference it did not have.
     setArReady(false);
-    if (!arArmed) return undefined;
+    if (!arMayOpen) return undefined;
     const t = setTimeout(() => {
       if (mountedRef.current) setArReady(true);
-    }, PANO_PLUS_SWAP_GRACE_MS);
+    }, arGraceMs);
     return () => { clearTimeout(t); };
-  }, [arArmed]);
+  }, [arMayOpen, arGraceMs]);
 
   // The coach mark self-fades; the component never self-times (its contract).
   useEffect(() => {
@@ -2049,6 +2081,9 @@ export const PanoPlusCaptureSurface = forwardRef<
     // ERROR_CAMERA_IN_USE at mount time.
     frameSource === 'own'
     && !arArmed
+    // M2: nor for a sweep that will run on AR while ARCore is still being
+    // probed (or has refused) — the Camera2 viewfinder is the IMU arm's.
+    && !(armContract === 'android-sensor' && armNotice.effectivePoseSource !== 'imu')
     && !armPendingForIdle
     && available
     && phase !== 'sweeping'
@@ -3792,7 +3827,7 @@ export const PanoPlusCaptureSurface = forwardRef<
           tracker fed with the same structure the other shelf surfaces use, and
           a shared configuration is one less way for two surfaces to behave
           differently on the same rack. */}
-      {arReady && arArmed && (
+      {arReady && arMayOpen && (
         <ARCameraView
           style={StyleSheet.absoluteFill}
           planeDetection="vertical"

@@ -479,14 +479,15 @@ internal class PanoPlusPreviewView(context: Context) : TextureView(context) {
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
-        // ── PANO'S PORTRAIT LOCK, HELD FROM HERE (2026-09-03) ───────────
-        // The stitcher's `<Camera>` pins the Activity to portrait while it is
-        // mounted; pano+ unmounts that camera, so the pano+ screen rotated
-        // with the accelerometer and Pano's did not. This view is mounted for
-        // the whole pano+ segment on Android, and attach/detach are UI-thread
-        // framework callbacks no JS path can skip — so the lock lives here.
-        // See PanoPlusPortraitLock.kt for why this beats a @ReactMethod pair.
-        PanoPlusPortraitLock.hold(this)
+        // ── NO PORTRAIT LOCK HERE ANY MORE (M2) ─────────────────────────
+        // This view used to hold PanoPlusPortraitLock for the pano+ segment.
+        // Since M2 the Android AR arm UNMOUNTS it (the stitcher's AR view is
+        // the viewfinder), and its release then wrote the host's orientation
+        // back while the surface's own RNSARSession lock still believed it
+        // held — the screen rotated mid-sweep, and the surface's unlock later
+        // left the host stuck in portrait. The surface's single lock now spans
+        // its whole lifetime and is the only writer; this viewfinder goes with
+        // pano+'s own camera in M6b.
         PanoPlusPreview.setGeometryListener(geometryListener)
         // `display` is null while detached, so THIS is the first moment the
         // display rotation is readable at all. Under the lock above it reads
@@ -497,9 +498,6 @@ internal class PanoPlusPreviewView(context: Context) : TextureView(context) {
 
     override fun onDetachedFromWindow() {
         PanoPlusPreview.clearGeometryListener(geometryListener)
-        // Restores the prior requestedOrientation when this was the last
-        // holder — the same restore RNSARSession.unlockOrientation performs.
-        PanoPlusPortraitLock.release(this)
         super.onDetachedFromWindow()
     }
 
