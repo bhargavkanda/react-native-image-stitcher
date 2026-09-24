@@ -513,19 +513,26 @@ describe('every sweep-level arm actually reaches the bridge', () => {
 // RNSARSession.lockPortrait() on mount and unlockOrientation() on unmount.
 // pano+ never did, and only got away with it while it mounted no view that let
 // the window follow the device.
-describe('the pano+ surface pins portrait the way Pano does', () => {
+describe('the portrait lock has ONE owner — <Camera> (M8)', () => {
+  // The surface used to take RNSARSession's portrait lock on mount and release
+  // it on unmount. The lock is ONE non-refcounted native slot and <Camera>
+  // already takes it, so the surface's release — on the unmount behind the
+  // review — UNLOCKED the screen <Camera> had locked. The engine hook takes no
+  // lock at all now; <Camera> is the one owner.
   const src = surfaceAndEngineSrc();
+  const camera = require('fs').readFileSync(
+    require('path').join(__dirname, '..', '..', 'camera', 'Camera.tsx'),
+    'utf8',
+  ) as string;
 
-  it('locks on mount and RESTORES on unmount — never one without the other', () => {
-    expect(src).toContain('arModule?.lockPortrait?.()');
-    // Leaving the host stranded in portrait would be a worse bug than the one
-    // this fixes, so the cleanup is asserted explicitly.
-    expect(src).toContain('arModule?.unlockOrientation?.()');
+  it('the sweep engine and its screen neither lock nor unlock the orientation', () => {
+    expect(src).not.toContain('lockPortrait?.()');
+    expect(src).not.toContain('unlockOrientation?.()');
   });
 
-  it('is Android-only — iOS has always mounted an AR view without this problem', () => {
-    const i = src.indexOf('arModule?.lockPortrait?.()');
-    expect(src.slice(Math.max(0, i - 500), i)).toContain("Platform.OS !== 'android'");
+  it('<Camera> still locks on mount and restores on unmount', () => {
+    expect(camera).toMatch(/lockPortrait/);
+    expect(camera).toMatch(/unlockOrientation/);
   });
 });
 

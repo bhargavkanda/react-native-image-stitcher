@@ -143,7 +143,19 @@ export type PreviewSlot = {
 export function useSweepEngine(
   props: PanoPlusCaptureSurfaceProps,
   ref: React.ForwardedRef<SurfaceControlHandle>,
+  /**
+   * M8 — `enabled: false` is the hook mounted but not selected (`<Camera>`
+   * calls it on every engine). Every NATIVE call is gated on it: no
+   * calibration or lens read, no ARCore probe, no idle viewfinder, no start.
+   * When it falls with a sweep live, the sweep is STOPPED — finalized, its
+   * pack kept, never cancelled — and `onSweepingChange(false)` is reported,
+   * exactly as an unmount does.
+   */
+  options: { enabled?: boolean } = {},
 ) {
+  const enabled = options.enabled ?? true;
+  const enabledRef = useRef(enabled);
+  enabledRef.current = enabled;
   const {
     onComplete,
     onFailure,
@@ -579,6 +591,7 @@ export function useSweepEngine(
   const vcHostArm = armContract === 'ios-coremotion' && frameSource === 'host';
 
   useEffect(() => {
+    if (!enabled) return undefined;   // M8 — no native read for a hook not selected
     if (poseSource !== 'imu') return undefined;
     // ── THE ANDROID CONTRACT ASKS NOTHING ─────────────────────────────────
     //
@@ -656,7 +669,7 @@ export function useSweepEngine(
     // basis through native, and nothing else would tell this component.
     // `armContract` is a dep (2026-09-02) only to satisfy exhaustive-deps —
     // it is fixed for the life of the process.
-  }, [poseSource, lens, calibEpoch, armContract, vcHostArm]);
+  }, [poseSource, lens, calibEpoch, armContract, vcHostArm, enabled]);
 
   /**
    * WHICH LENSES THIS BODY CAN ACTUALLY OPEN — pano+'s answer to Pano's
@@ -703,6 +716,7 @@ export function useSweepEngine(
     // Then once per mount: it is a fact about the hardware, and neither the
     // flag nor the arm can change it. (`askedRef` rather than `lensAvail !=
     // null` because null is also the legitimate "not ours to answer" answer.)
+    if (!enabled) return undefined;   // M8
     if (poseSource !== 'imu' || !calibRead) return undefined;
     // M5 — not on the iOS host arm either: the question asks pano+'s OWN
     // camera planner which lenses IT could open, and on this arm pano+ opens
@@ -723,7 +737,7 @@ export function useSweepEngine(
       () => undefined,
     );
     return undefined;
-  }, [poseSource, calibRead, vcHostArm]);
+  }, [poseSource, calibRead, vcHostArm, enabled]);
 
   // ── WHERE THE BASIS COMES FROM, AND WHETHER TO ASK FOR IT ────────────────
   //
@@ -815,6 +829,7 @@ export function useSweepEngine(
   // that never delivers a frame, and a hold would paint nothing).
   const [arcoreAvailable, setArcoreAvailable] = useState<boolean | null>(null);
   useEffect(() => {
+    if (!enabled) return undefined;   // M8
     if (armContract !== 'android-sensor') return undefined;
     const mod = (NativeModules as Record<string, unknown>).RNSARSession as
       | { isSupported?: () => Promise<boolean> }
@@ -825,7 +840,7 @@ export function useSweepEngine(
       .then((ok) => { if (live) setArcoreAvailable(ok === true); })
       .catch(() => { if (live) setArcoreAvailable(false); });
     return () => { live = false; };
-  }, [armContract]);
+  }, [armContract, enabled]);
 
   const armNotice = useMemo(
     () => (armContract === 'android-sensor'
@@ -1317,6 +1332,42 @@ export function useSweepEngine(
     [],
   );
 
+  // ── M8: `enabled` FALLING IS AN UNMOUNT, WITHOUT THE UNMOUNT ─────────────
+  // `<Camera>` keeps this hook mounted on every engine; a host that switches
+  // the engine (or turns panorama off) mid-sweep ends the sweep exactly as an
+  // unmount would — STOPPED, so the pack is finalized and kept, never
+  // cancelled — and the shell is told the sweep is over. Unlike an unmount the
+  // hook lives on, so its own state goes back to idle as well.
+  const prevEnabledRef = useRef(enabled);
+  useEffect(() => {
+    const was = prevEnabledRef.current;
+    prevEnabledRef.current = enabled;
+    if (!was || enabled) return;
+    if (phaseRef.current === 'starting') {
+      // The start resolves into a stop (see `stopOnStartRef`).
+      stopOnStartRef.current = true;
+    } else if (sweepLiveRef.current) {
+      sweepLiveRef.current = false;
+      liveSessionRef.current = null;
+      void stopPanoPlus().then(
+        (st) => {
+          // eslint-disable-next-line no-console
+          console.log('[pano+] sweep ended by the host (engine off) — pack finalized at', st.sessionDir);
+        },
+        (e: unknown) => {
+          const info = panoPlusErrorInfo(e);
+          if (info.code === 'panoplus-not-running') void cancelPanoPlus();
+        },
+      );
+      setRunningArm(null);
+      setCameraLock(null);
+      setStatus(null);
+      setPhase('idle');
+    }
+    onSweepingChangeRef.current?.(false);
+    // Deps: the EDGE only.
+  }, [enabled]);
+
   /**
    * ONE writer for both status channels.
    *
@@ -1447,10 +1498,11 @@ export function useSweepEngine(
   const armPendingForIdle =
     armContract === 'ios-coremotion' && poseSource === 'imu' && !calibRead;
   const avfIdleWanted =
+    enabled
     // ⚠ NEVER ON THE HOST ARM. This opens a Camera2 client of our own; the
     // host already has one on the same back camera, and the second open is
     // ERROR_CAMERA_IN_USE at mount time.
-    frameSource === 'own'
+    && frameSource === 'own'
     && !arArmed
     // M2: nor for a sweep that will run on AR while ARCore is still being
     // probed (or has refused) — the Camera2 viewfinder is the IMU arm's.
@@ -1727,6 +1779,7 @@ export function useSweepEngine(
   const finishRef = useRef<() => void>(() => undefined);
 
   const start = useCallback(() => {
+    if (!enabledRef.current) return;   // M8 — a hook not selected starts nothing
     if (busyRef.current || !available || documentDirectory == null) return;
     busyRef.current = true;
     stopOnStartRef.current = false;
@@ -2735,42 +2788,11 @@ export function useSweepEngine(
     setPreviewSlots({ a: null, b: null, visible: 'a' });
   }, [statusSessionId]);
 
-  /**
-   * PIN THE SCREEN TO PORTRAIT WHILE THIS SURFACE IS MOUNTED, exactly as Pano
-   * does — same native call, same lifecycle, same restore.
-   *
-   * ⚠ THE OPERATOR, 2026-09-10, on the newly-mounted Android AR view: "when in
-   * AR and I move to landscape, the screen rotates!! The camera screen is
-   * supposed to stay as is - shutter button stuck to the home button edge."
-   * Then, asked what the rule should be: "follow whatever pano does today. It
-   * does not rotate."
-   *
-   * It does not rotate because the stitcher's `<Camera>` calls
-   * `RNSARSession.lockPortrait()` on mount and `unlockOrientation()` on unmount
-   * (Camera.tsx:1793-1803). pano+ never did, and got away with it only because
-   * this surface previously mounted no view that let the window follow the
-   * device. Mounting `<ARCameraView>` on Android removed that accident.
-   *
-   * The native side captures the host's PRIOR orientation on the first lock and
-   * restores it on unlock, so nesting with Pano's own lock is safe: first lock
-   * wins, and neither surface can strand the host in portrait.
-   *
-   * Android only. iOS pano+ has always mounted an AR view and has never had
-   * this problem, and the module's methods are absent there.
-   *
-   * Empty dep array on purpose: mount and unmount, never mid-sweep — a
-   * re-lock while the operator is panning would be a visible hitch for no gain.
-   */
-  useEffect(() => {
-    if (Platform.OS !== 'android') return undefined;
-    const arModule = (NativeModules as Record<string, unknown>).RNSARSession as
-      | { lockPortrait?: () => void; unlockOrientation?: () => void }
-      | undefined;
-    arModule?.lockPortrait?.();
-    return () => {
-      arModule?.unlockOrientation?.();
-    };
-  }, []);
+  // M8 — THE SURFACE'S ANDROID PORTRAIT LOCK IS GONE, and that is a FIX.
+  // `RNSARSession`'s lock is ONE non-refcounted slot, and `<Camera>` already
+  // takes it on mount; this hook took it a second time and released it on
+  // unmount — which, with the surface unmounted behind the review, UNLOCKED
+  // the screen `<Camera>` had locked. `<Camera>` is the one owner now.
 
   const previewUri = preview?.uri ?? null;
   const previewGeom = previewLayout.content;
