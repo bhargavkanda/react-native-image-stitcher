@@ -1031,19 +1031,26 @@ export function useSweepEngine(
   // which is not a guarantee to rest a capture on.
   //
   // The phase is what changed or nothing did, so `busy` is the only dep.
+  //
+  // ⚠ M8: AND ONLY WHILE SELECTED. `<Camera>` mounts this hook on every
+  // engine; an engine that is not selected reports nothing to the host. The
+  // rising edge re-reports (`enabled` is a dep), and the falling edge's
+  // `false` is the deselect effect's, below.
   const onSweepingChangeRef = useRef(onSweepingChange);
   onSweepingChangeRef.current = onSweepingChange;
   useEffect(() => {
+    if (!enabled) return;
     onSweepingChangeRef.current?.(busy);
-  }, [busy]);
+  }, [busy, enabled]);
   // Same ref shape, for the same reason: `painted` is what changed or nothing
   // did. `status` is null whenever no sweep is live, which reports 0.
   const onPaintedChangeRef = useRef(onPaintedChange);
   onPaintedChangeRef.current = onPaintedChange;
   const livePainted = status?.painted ?? 0;
   useEffect(() => {
+    if (!enabled) return;
     onPaintedChangeRef.current?.(livePainted);
-  }, [livePainted]);
+  }, [livePainted, enabled]);
   // Told on every change, INCLUDING the first resolve: the host's pill renders
   // before the precondition read lands, so without the mount-time call it would
   // show the requested arm until something else happened to change.
@@ -1085,8 +1092,14 @@ export function useSweepEngine(
   // keeps it false mid-sweep: a running sweep is on a settled arm whatever the
   // prop has done since.
   const armResolving = runningArm == null && armPending;
+  // M8 — keyed on the VALUES, not on the callback's identity (`<Camera>` passes
+  // a fresh props object on every render), and reported only while selected;
+  // the rising edge re-reports, so `<Camera>`'s copy is never left cleared.
+  const onEffectiveArmChangeRef = useRef(onEffectiveArmChange);
+  onEffectiveArmChangeRef.current = onEffectiveArmChange;
   useEffect(() => {
-    onEffectiveArmChange?.({
+    if (!enabled) return;
+    onEffectiveArmChangeRef.current?.({
       poseSource: reportedArm.poseSource,
       fallbackToAr: reportedArm.fallbackToAr,
       basisRoute: basisResolution.route,
@@ -1101,7 +1114,7 @@ export function useSweepEngine(
     reportedArm.fallbackToAr,
     basisResolution.route,
     basisGestureVisible,
-    onEffectiveArmChange,
+    enabled,
   ]);
   // A surface that goes away must not leave the shell believing a sweep is
   // still in flight — that would latch the mode-switch guard for the rest of
@@ -2662,9 +2675,17 @@ export function useSweepEngine(
    *  :247-249`). The pack write is the one window in which the shutter is
    *  genuinely unavailable. */
   const shutterBusy = phase === 'finishing';
+  // M8 — the same ref shape as `onSweepingChange`: `<Camera>` composes its own
+  // handler into this prop inline, so keyed on the callback it re-fired on
+  // every `<Camera>` render (8 Hz during a sweep, now that the engine's state
+  // re-renders `<Camera>`) and called the host's copy each time. The values
+  // are what changed or nothing did. Reported only while selected.
+  const onControlsStateRef = useRef(onControlsState);
+  onControlsStateRef.current = onControlsState;
   useEffect(() => {
-    onControlsState?.({ canCapture, canFinalize: false, busy: shutterBusy });
-  }, [canCapture, onControlsState, shutterBusy]);
+    if (!enabled) return;
+    onControlsStateRef.current?.({ canCapture, canFinalize: false, busy: shutterBusy });
+  }, [canCapture, shutterBusy, enabled]);
 
   // THE COACHING CONTEXT — one object, read by BOTH the governor line and the
   // HUD so the two can never coach different gestures. `screenIsLandscape` is

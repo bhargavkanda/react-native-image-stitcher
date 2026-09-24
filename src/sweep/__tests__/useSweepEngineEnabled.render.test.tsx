@@ -130,3 +130,45 @@ describe('useSweepEngine — enabled falling mid-sweep is an unmount, without th
     act(() => { t.unmount(); });
   });
 });
+
+describe('useSweepEngine — the host hears from the SELECTED engine only (M8)', () => {
+  function surfaceWith(log: string[]): Record<string, unknown> {
+    return {
+      frameSource: 'own', poseSource: 'imu',
+      onSweepingChange: (v: boolean) => { log.push(`sweeping:${v}`); },
+      onPaintedChange: (n: number) => { log.push(`painted:${n}`); },
+      onEffectiveArmChange: () => { log.push('arm'); },
+      onControlsState: () => { log.push('controls'); },
+    };
+  }
+
+  it('not selected: no report at all, however often the caller re-renders', async () => {
+    const log: string[] = [];
+    const handle = React.createRef<SweepSurfaceHandle | null>() as React.RefObject<SweepSurfaceHandle | null>;
+    let t!: ReactTestRenderer;
+    act(() => { t = create(<Probe enabled={false} handle={handle} surface={surfaceWith(log)} />); });
+    await flush(500);
+    // A fresh props object with fresh callbacks — what `<Camera>` passes on
+    // every render.
+    act(() => { t.update(<Probe enabled={false} handle={handle} surface={surfaceWith(log)} />); });
+    await flush(500);
+    expect(log).toEqual([]);
+    act(() => { t.unmount(); });
+  });
+
+  it('the rising edge reports every channel once, and a same-valued re-render reports none', async () => {
+    const log: string[] = [];
+    const handle = React.createRef<SweepSurfaceHandle | null>() as React.RefObject<SweepSurfaceHandle | null>;
+    let t!: ReactTestRenderer;
+    act(() => { t = create(<Probe enabled={false} handle={handle} surface={surfaceWith(log)} />); });
+    await flush(500);
+    act(() => { t.update(<Probe enabled handle={handle} surface={surfaceWith(log)} />); });
+    await flush(500);
+    expect(log).toEqual(expect.arrayContaining(['sweeping:false', 'painted:0', 'arm', 'controls']));
+    log.length = 0;
+    act(() => { t.update(<Probe enabled handle={handle} surface={surfaceWith(log)} />); });
+    await flush(500);
+    expect(log).toEqual([]);
+    act(() => { t.unmount(); });
+  });
+});
