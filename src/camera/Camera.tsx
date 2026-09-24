@@ -276,9 +276,10 @@ import { SweepHoldOverlay } from '../sweep/SweepHoldOverlay';
 import { panoPlusVcArmSupported } from '../sweep/panoPlusNative';
 import { useIncrementalStitcher } from '../stitching/useIncrementalStitcher';
 import { useIMUTranslationGate } from '../sensors/useIMUTranslationGate';
-import { cropSiblingPath, toBareFilePath, toFileUri } from '../utils/paths';
+import { toBareFilePath, toFileUri } from '../utils/paths';
 import { normaliseOrientation } from '../quality/normaliseOrientation';
 import {
+  copyFile,
   defaultPanoramaFilename,
   defaultPhotoFilename,
   getDefaultCaptureDir,
@@ -365,6 +366,12 @@ export type CameraCaptureResult =
   | {
       ok: true;
       type: 'panorama';
+      /**
+       * M9 (D6) — which engine made it. `'sweep'` is the other panorama member
+       * below; narrowing on it is how a host reaches the fields only one
+       * engine has (this member's `finalConfidenceThresh`, the sweep's pack).
+       */
+      engine: 'keyframe' | 'batch-keyframe';
       uri: string;
       width: number;
       height: number;
@@ -417,32 +424,48 @@ export type CameraCaptureResult =
       warnings: CaptureWarning[];
     }
   /**
-   * A finished SWEEP (`engine="sweep"`).
+   * A finished SWEEP (`engine="sweep"`) — M9 (D6): a PANORAMA, with the engine
+   * named.
    *
-   * ⚠ A THIRD SHAPE, NOT A WIDENED PANORAMA. A sweep is not a keyframe
-   * panorama with different settings: it produces a pack directory, per-strip
-   * integrity counters and a residual verdict. Folding it into the
-   * `'panorama'` member would give every existing consumer a set of fields
-   * that are absent on every capture they have ever seen. `type: 'panoplus'`
-   * keeps the discriminant honest and leaves existing narrowing untouched.
+   * It used to be a third member (`type: 'panoplus'`), so every host that
+   * handled panoramas had to learn a second shape to use a second engine — the
+   * opposite of `engine` changing only what the hold runs. It is now
+   * `type: 'panorama'` + `engine: 'sweep'`, with the same output fields the
+   * keyframe member has, filled from the sweep's own counters:
+   *   · `uri` — a COPY of the canvas in `outputDir` (or the default capture
+   *     directory), `panorama-<ms>.jpg`, like a keyframe panorama. The pack's
+   *     own canvas is left untouched, so a crop works on the copy in place;
+   *   · `framesRequested` — frames the engine SAW; `framesIncluded` — frames
+   *     that reached the canvas (painted strips + the latch seed + the tail
+   *     flush); `framesDropped` — frames the engine REFUSED (the `rejected*`
+   *     counts). Held and skipped frames are neither: a sweep does not paint
+   *     every frame by design, so requested ≠ included + dropped;
+   *   · `durationMs` — `summary.sweepMs`.
+   * The pack stays at the top level exactly as before (`kind: 'panoplus'`,
+   * `sessionDir`, `summary`, `arms`, `capturedAt`), so a debug-pack consumer
+   * keyed on those is unchanged. `finalConfidenceThresh` is keyframe-only.
    *
-   * ⚠ AND IT CARRIES `warnings` — the paragraph above said it did not, and
-   * that stopped being true on 2026-09-20. A sweep's result now carries the
-   * engine's own integrity verdict (`SWEEP_NOT_INTACT`) AND the two
-   * `<Camera>` observes for either engine (`LATERAL_DRIFT_FINALIZE`,
-   * `HIGH_PAN_SPEED`). The RUNTIME value had them and the TYPE did not, so a
-   * host reading `result.warnings` uniformly across the three members got a
-   * compile error on the one member whose warnings are newest — which is the
-   * same defect as an empty channel, one layer up. Declared here rather than
-   * on `PanoPlusCaptureResult` because it is `<Camera>`'s contribution: the
-   * surface's own `onComplete` result has no warnings and should not claim
-   * any.
+   * `liveness: 'unavailable'` is the ONE named output difference (D12): the
+   * liveness feed hosts use reads keyframes, which a sweep does not make.
    */
-  | (PanoPlusCaptureResult & { ok: true; warnings: CaptureWarning[] })
+  | (Omit<PanoPlusCaptureResult, 'type'> & {
+      ok: true;
+      type: 'panorama';
+      engine: 'sweep';
+      framesRequested: number;
+      framesIncluded: number;
+      framesDropped: number;
+      durationMs: number;
+      liveness: 'unavailable';
+      /** Non-fatal quality signals (empty when none). */
+      warnings: CaptureWarning[];
+    })
   | {
       ok: false;
-      /** Which capture path failed. */
-      type: 'photo' | 'panorama' | 'panoplus';
+      /** Which capture path failed. M9: a failed sweep is a 'panorama'. */
+      type: 'photo' | 'panorama';
+      /** M9 (D6) — the engine selected when it failed. */
+      engine: 'keyframe' | 'sweep' | 'batch-keyframe';
       /** The classified failure (same object handed to `onError`). */
       error: CameraError;
       /** Any warnings gathered before the failure (usually empty). */
@@ -458,7 +481,13 @@ export type CameraCaptureResult =
  */
 export type PanoramaCaptureResult = Extract<
   CameraCaptureResult,
-  { ok: true; type: 'panorama' }
+  { ok: true; type: 'panorama'; engine: 'keyframe' | 'batch-keyframe' }
+>;
+
+/** M9 — the sweep's panorama member of {@link CameraCaptureResult}. */
+export type SweepPanoramaResult = Extract<
+  CameraCaptureResult,
+  { ok: true; type: 'panorama'; engine: 'sweep' }
 >;
 
 
@@ -3690,7 +3719,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       // v0.16 — failures now reach `onCapture` too (ok:false), with
       // `onError` kept as a mirror so existing handlers keep working.
       onError?.(e);
-      onCapture?.({ ok: false, type: 'photo', error: e, warnings: [] });
+      onCapture?.({ ok: false, type: 'photo', engine, error: e, warnings: [] });
     }
   }, [enablePhotoMode, shutterDisabled, isAR, capture, outputDir, onCapture, onError]);
 
@@ -3921,13 +3950,15 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         nativeCode === 'engine-unavailable' ||
         nativeCode === 'engine-unknown' ||
         (err instanceof Error && err.message.includes('engineResolved'));
-      onError?.(
-        new CameraError(
-          isEngineRefusal ? 'ENGINE_UNAVAILABLE' : 'PANORAMA_START_FAILED',
-          err instanceof Error ? err.message : String(err),
-          err,
-        ),
+      const startError = new CameraError(
+        isEngineRefusal ? 'ENGINE_UNAVAILABLE' : 'PANORAMA_START_FAILED',
+        err instanceof Error ? err.message : String(err),
+        err,
       );
+      onError?.(startError);
+      // M9 — ONE failure contract: a start failure reaches `onCapture` as
+      // `ok: false` too, on both engines, as a stitch failure always has.
+      onCapture?.({ ok: false, type: 'panorama', engine, error: startError, warnings: [] });
     }
   }, [
     incremental,
@@ -4239,6 +4270,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       const captureResultObj: PanoramaCaptureResult = {
         ok: true,
         type: 'panorama',
+        engine: engine === 'batch-keyframe' ? 'batch-keyframe' : 'keyframe',
         // Native finalize() returns a bare `/data/.../foo.jpg` path;
         // normalise to `file://` for Android <Image>.
         uri: toFileUri(result.panoramaPath),
@@ -4323,6 +4355,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       onCapture?.({
         ok: false,
         type: 'panorama',
+        engine,
         error,
         warnings: buildCaptureWarnings({
           lateralFinalize: wasLateralFinalize,
@@ -5129,24 +5162,16 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             ];
         try {
           // cropQuad takes a BARE path; the stashed uri is a file:// URI.
+          // M9 — IN PLACE, ON BOTH ENGINES. A sweep's output used to be its
+          // pack's own canvas, so it was cropped to a sibling to keep the pack
+          // honest. It is now a COPY in the output directory (see the sweep's
+          // `onComplete`), a standalone file like every other engine's, so the
+          // pack's canvas is never touched and the special case goes.
           const source = toBareFilePath(pending.uri);
-          // ⚠ A SWEEP IS CROPPED TO A SIBLING, NEVER IN PLACE. A pano+
-          // canvas is referenced by its pack (`sessionDir/canvas.jpg`), so
-          // overwriting it leaves every offline harness reading a pack whose
-          // image is not the image that was measured — the pack would still
-          // carry the seam residuals, the coverage mask and the ledger of a
-          // panorama nobody can look at any more.
-          //
-          // Every other engine keeps the in-place contract it has always
-          // had: its output is a standalone file with nothing referencing it.
-          const destination =
-            pending.captureResultObj.type === 'panoplus'
-              ? cropSiblingPath(source)
-              : undefined;
           const cropped = await cropQuad(
             source,
             cropPoints,
-            destination,
+            undefined,
             { quality: 90 },
           );
           onCapture?.({
@@ -5676,6 +5701,10 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     // would silently lose the other six, including the trajectory
     // continuation that removes the elbow. Host keys still win.
     engineOptions: { ...SWEEP_ENGINE_DEFAULTS, ...sweep?.engineOptions },
+    // M9 — ONE OUTPUT QUALITY: the canvas is written at the keyframe
+    // panorama's JPEG quality (90), not native's 92. Merged like
+    // `engineOptions`, so a host's own pack keys still win.
+    packOptions: { canvasQuality: 90, ...sweep?.packOptions },
     // `<Camera>`'s ALONE (M8 review: this note said a host copy was still
     // composed). `SweepOptions` no longer carries `onControlsState`, so there
     // is no host copy to call; a host shutter follows `onSweepingChange`.
@@ -5809,9 +5838,40 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           result.summary, sweep?.defectCopy,
         ),
       ];
-      const captureResultObj = {
-        ...result, ok: true as const, warnings: sweepWarnings,
-      };
+      // ── M9: THE OUTPUT IS A PANORAMA IN THE HOST'S DIRECTORY ──────────
+      // A COPY of the canvas at `<outputDir | default capture dir>/
+      // panorama-<ms>.jpg`, emitted in the keyframe panorama's shape. The
+      // pack's own canvas is never the output, so a crop runs in place on
+      // the copy and the pack keeps the canvas the engine painted.
+      let outputUri = result.uri;
+      if (sweepHasCanvas) {
+        try {
+          const dest = outputDir
+            ? `${toBareFilePath(outputDir).replace(/\/$/, '')}/${defaultPanoramaFilename()}`
+            : `${await getDefaultCaptureDir()}/${defaultPanoramaFilename()}`;
+          outputUri = await copyFile(result.uri, dest);
+        } catch (err) {
+          const error = new CameraError(
+            'OUTPUT_WRITE_FAILED',
+            `the sweep's panorama could not be written to the output directory: ${
+              err instanceof Error ? err.message : String(err)}`,
+            err,
+          );
+          onError?.(error);
+          onCapture?.({
+            ok: false, type: 'panorama', engine: 'sweep', error, warnings: sweepWarnings,
+          });
+          writeSweepVerdictSidecar(result);
+          return;
+        }
+      }
+      const captureResultObj = sweepPanoramaResult(result, sweepWarnings, outputUri);
+      if (captureResultObj.framesDropped > 0) {
+        onFramesDropped?.({
+          requested: captureResultObj.framesRequested,
+          included: captureResultObj.framesRequested - captureResultObj.framesDropped,
+        });
+      }
       // The verdict sidecar used to be written by the review screen's
       // mount effect. That screen no longer mounts, so the write
       // moves here — before the stash, so it happens even if the
@@ -5869,7 +5929,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         let sweepRect: ImageRect | undefined;
         if (rectCrop) {
           try {
-            const inscribed = await computeInscribedRect(result.uri);
+            const inscribed = await computeInscribedRect(outputUri);
             if (inscribed && inscribed.width > 0 && inscribed.height > 0) {
               sweepRect = {
                 x: inscribed.x,
@@ -5897,10 +5957,10 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
           // the warnings and the debug pill all painted; the panorama
           // did not. The keyframe path has always schemed its own
           // (`toFileUri(result.panoramaPath)`); only this one did not.
-          uri: toFileUri(result.uri),
+          uri: toFileUri(outputUri),
           width: result.width,
           height: result.height,
-          // NOT re-schemed: the public result keeps the bare path.
+          // NOT re-schemed here: the emit boundary does it (`emitUri`).
           captureResultObj,
           initialRect: sweepRect,
           // ⚠ THE SWEEP'S OWN VERDICT, not an empty array. This was
@@ -5938,22 +5998,25 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       // was nowhere near. On the keyframe engine the same rotation
       // produces no `onError` at all.
       if (failure.code === 'panoplus-abandoned') return;
-      onError?.(
-        // A sweep refusal is a capture failure, not an engine one:
-        // the engine IS available here — this is the engine saying no
-        // to this attempt — EXCEPT for the refusals that are about the
-        // BUILD or the DEVICE, which `sweepFailureCameraCode` names.
-        //
-        // The original failure rides on `cause`, so the sweep's own
-        // code (`panoplus-busy`, `panoplus-io`, …) and its counters
-        // survive the hop instead of being flattened to a string.
-        new CameraError(
-          sweepFailureCameraCode(failure.code),
-          failure.message ?? String(failure.code ?? 'sweep failed'),
-          failure,
-        ),
+      // M9 — the ONE failure contract both engines use: `onError` AND
+      // `onCapture({ ok: false })`. A sweep refusal is a capture failure, not
+      // an engine one (the engine IS available — it is saying no to this
+      // attempt), EXCEPT the refusals about the BUILD or the DEVICE, which
+      // `sweepFailureCameraCode` names; a FINISH failure is a finalize failure,
+      // as a keyframe stitch's is. The sweep's own failure rides on `cause`,
+      // so its code and counters survive the hop.
+      const mapped = sweepFailureCameraCode(failure.code);
+      const error = new CameraError(
+        mapped === 'PANORAMA_START_FAILED' && failure.stage === 'finish'
+          ? 'PANORAMA_FINALIZE_FAILED'
+          : mapped,
+        failure.message ?? String(failure.code ?? 'sweep failed'),
+        failure,
       );
+      onError?.(error);
+      onCapture?.({ ok: false, type: 'panorama', engine: 'sweep', error, warnings: [] });
     },
+
   };
   const sweepEngine = useSweepEngine(sweepSurfaceProps, sweepRef, {
     enabled: engine === 'sweep' && cropPending == null,
@@ -6902,6 +6965,36 @@ export function colourLensTypeCount(physicalDevices: readonly string[] | null | 
  * `ENGINE_UNAVAILABLE`, the code the keyframe engine already uses for "this
  * build cannot run the engine you asked for" (M3 review).
  */
+export function sweepPanoramaResult(
+  result: PanoPlusCaptureResult,
+  warnings: CaptureWarning[],
+  outputUri: string,
+): SweepPanoramaResult {
+  // M9 (D6) — a finished sweep in the panorama shape. See the member's doc on
+  // `CameraCaptureResult` for what each count means for a sweep.
+  const c = result.summary.counts;
+  const refused = c.rejectedLowResponse + c.rejectedOutOfCage + c.rejectedPoseSpeed
+    + c.rejectedTracking + c.rejectedRectify + c.rejectedInput;
+  const included = c.painted
+    + (result.summary.latch.latched ? 1 : 0)
+    + (result.summary.tailFlushed ? 1 : 0);
+  const { type: _panoplusType, ...pack } = result;
+  void _panoplusType;
+  return {
+    ...pack,
+    ok: true,
+    type: 'panorama',
+    engine: 'sweep',
+    uri: outputUri,
+    framesRequested: c.seen,
+    framesIncluded: included,
+    framesDropped: refused,
+    durationMs: result.summary.sweepMs,
+    liveness: 'unavailable',
+    warnings,
+  };
+}
+
 export function sweepFailureCameraCode(code: string | null | undefined): CameraErrorCode {
   switch (code) {
     case 'panoplus-plugin-unavailable':

@@ -17,6 +17,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed (BREAKING)
+- **One output contract (M9, D6).** A finished sweep is `type: 'panorama'`
+  with **`engine: 'sweep'`**; the keyframe engine's panorama carries
+  `engine: 'keyframe'` (or `'batch-keyframe'`). The old `type: 'panoplus'`
+  member is gone. Narrow on `engine` to reach what only one engine has: the
+  keyframe engine's `finalConfidenceThresh`, or the sweep's pack
+  (`kind: 'panoplus'`, `sessionDir`, `summary`, `arms` and `capturedAt`, all
+  still at the top level). The sweep result has the panorama's own fields:
+  - `uri` is a COPY of the canvas in `outputDir` (or the default capture
+    directory), `panorama-<ms>.jpg`. The pack's own canvas is never the
+    output, so the crop editor crops in place on the copy, and the sweep's
+    crop-to-sibling rule is gone;
+  - `framesRequested` = frames the engine saw, `framesIncluded` = frames on
+    the canvas, `framesDropped` = frames it refused; `durationMs`;
+  - `liveness: 'unavailable'`, the one named difference;
+  - frames the engine refused fire `onFramesDropped`, and the canvas is
+    written at JPEG quality 90, like a keyframe panorama.
+  Failures follow ONE contract on both engines: `onError` AND
+  `onCapture({ ok: false, type, engine, error })`. The `ok: false` member
+  drops `'panoplus'` and gains `engine`. A sweep that fails to finish is
+  `PANORAMA_FINALIZE_FAILED` (a start refusal keeps its own code), and an
+  output that cannot be written is `OUTPUT_WRITE_FAILED`. **A keyframe START
+  failure now reaches `onCapture` as `ok: false` too**; before, only `onError`
+  heard it. `PanoPlusFailure.stage` says where a sweep failed.
 - **`<Camera engine="sweep">` is one screen with the keyframe engine (M8).**
   The sweep no longer swaps in a screen of its own. It runs on `<Camera>`'s
   own camera, shutter and chrome: the vision-camera preview for non-AR, and

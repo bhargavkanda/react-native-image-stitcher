@@ -1156,3 +1156,14 @@ describe('<Camera engine="sweep">', () => {
     act(() => { tree.unmount(); });
   });
 });
+
+describe('M9 — one output quality', () => {
+  it('asks the sweep for the keyframe panorama\'s JPEG quality (90), and a host key still wins', () => {
+    const t1 = render({ engine: 'sweep' });
+    expect((lastSweepProps().packOptions as { canvasQuality?: number }).canvasQuality).toBe(90);
+    act(() => { t1.unmount(); });
+    const t2 = render({ engine: 'sweep', sweep: { packOptions: { canvasQuality: 80 } } });
+    expect((lastSweepProps().packOptions as { canvasQuality?: number }).canvasQuality).toBe(80);
+    act(() => { t2.unmount(); });
+  });
+});

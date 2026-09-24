@@ -34,7 +34,11 @@ jest.mock('../../stitching/useIncrementalStitcher', () => {
   const obj: any = {
     isAvailable: true, isRunning: false, hint: null, confidenceLevel: null,
     keyframeThumbnails: [],
-    start: async () => { (globalThis as any).__kf.calls.push('start'); return { ok: true }; },
+    start: async () => {
+      (globalThis as any).__kf.calls.push('start');
+      if ((globalThis as any).__kf.startFails) throw new Error('native start refused');
+      return { ok: true };
+    },
     finalize: async () => {
       (globalThis as any).__kf.calls.push('finalize');
       return {
@@ -141,6 +145,7 @@ function el(props: any, ref: any) {
 beforeEach(() => {
   g.__kf.state = { acceptedCount: 0 };
   g.__kf.calls = [];
+  g.__kf.startFails = false;
   g.__sw.calls = [];
   g.__sw.props = {};
   g.__ar.props = {};
@@ -494,6 +499,33 @@ describe('D7 — takePhoto() in the SAME tick as startPanorama() is refused, on 
     await act(async () => { await sleep(400); });
     await act(async () => { void ref.current.takePhoto(); await Promise.resolve(); });
     expect(errors).not.toContain('CAPTURE_IN_PROGRESS');
+    act(() => t.unmount());
+  });
+});
+
+describe('M9 — ONE failure contract: a keyframe START failure reaches onCapture too', () => {
+  it('onError AND onCapture({ ok: false, type: "panorama", engine: "keyframe" })', async () => {
+    g.__kf.startFails = true;
+    const ref = React.createRef<any>();
+    const errs: Array<{ code: string }> = [];
+    const seen: Array<Record<string, any>> = [];
+    let t!: ReactTestRenderer;
+    await act(async () => {
+      t = create(el({
+        engine: 'keyframe', defaultCaptureSource: 'non-ar',
+        onError: (e: { code: string }) => { errs.push(e); },
+        onCapture: (r: Record<string, any>) => { seen.push(r); },
+      }, ref));
+    });
+    await act(async () => { await sleep(400); });
+    await act(async () => {
+      ref.current.startPanorama(); await Promise.resolve(); await Promise.resolve();
+    });
+    await act(async () => { await sleep(20); });
+    expect(errs.map((e) => e.code)).toEqual(['PANORAMA_START_FAILED']);
+    expect(seen.map((r) => [r.ok, r.type, r.engine, r.error?.code])).toEqual([
+      [false, 'panorama', 'keyframe', 'PANORAMA_START_FAILED'],
+    ]);
     act(() => t.unmount());
   });
 });

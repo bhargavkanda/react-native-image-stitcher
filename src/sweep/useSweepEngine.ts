@@ -2516,7 +2516,7 @@ export function useSweepEngine(
         liveSessionRef.current = null;   // with the panel — see the success path
         setCameraLock(null);  // see the success path — it dies with its sweep
         setError(panoPlusFailureCopy(info));
-        onFailure?.(info);
+        onFailure?.({ ...info, stage: 'finish' });
       },
     );
   }, [onComplete, onFailure]);
@@ -2726,6 +2726,7 @@ export function useSweepEngine(
       sessionDir: statusSessionDir,
       counts: null,
       abort: null,
+      stage: 'sweep',
     } as PanoPlusFailure;
     setError(panoPlusFailureCopy(info));
     onFailure?.(info);

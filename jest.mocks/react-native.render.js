@@ -126,6 +126,13 @@ module.exports = {
   // <ARCameraView> makes, which is what lets <Camera> run this hook in sweep
   // mode without opening a second session.
   NativeModules: {
+    // M9 — a sweep's panorama is a COPY of the canvas in the output directory
+    // (`copyFile`), like a keyframe panorama. The copy lands where it was sent.
+    RNImageStitcherFileUtils: {
+      copyFile: (_from, to) => Promise.resolve(to),
+      moveFile: (_from, to) => Promise.resolve(to),
+      defaultCaptureDir: () => Promise.resolve('/tmp/rnis-captures'),
+    },
     RNSARSession: {
       takePhoto: () => Promise.resolve({ path: '/tmp/rnsar.jpg' }),
       isSupported: () => Promise.resolve(true),

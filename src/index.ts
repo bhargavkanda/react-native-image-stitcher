@@ -30,6 +30,7 @@ export type {
   CameraHandle,
   CameraCaptureResult,
   PanoramaCaptureResult,
+  SweepPanoramaResult,
   CameraErrorCode,
   CaptureSource,
   CaptureSourcesMode,

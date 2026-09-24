@@ -1956,6 +1956,13 @@ export interface PanoPlusCaptureResult {
  * pack the residual analysis wants.
  */
 export interface PanoPlusFailure {
+  /**
+   * M9 — where the sweep failed: refused or failed at START, ended by a
+   * device refusal while it SWEPT, or failed to FINISH (the stop's finalize).
+   * `<Camera>` reports a finish failure as `PANORAMA_FINALIZE_FAILED`, like a
+   * keyframe stitch failure. Absent means start.
+   */
+  stage?: 'start' | 'sweep' | 'finish';
   /** `'panoplus-unavailable' | 'panoplus-busy' | 'invalid-options' |
    *  'panoplus-io' | 'panoplus-not-running' | 'panoplus-empty' | 'unknown'` */
   code: string;

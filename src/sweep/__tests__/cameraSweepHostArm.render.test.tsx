@@ -216,6 +216,18 @@ async function setEngine(
 const surfaceProps = (_t: ReactTestRenderer): Record<string, unknown> =>
   lastSweepProps() as Record<string, unknown>;
 const cameraViews = (t: ReactTestRenderer) => t.root.findAllByType(CameraView);
+/** M9 — `onComplete` awaits the canvas COPY (and the inscribed rect) before
+ *  the review opens or the result is emitted, so drive it asynchronously. */
+async function completeSweep(tree: ReactTestRenderer, r: unknown): Promise<void> {
+  await act(async () => {
+    void (surfaceProps(tree).onComplete as (x: unknown) => Promise<void> | void)(r);
+    for (let i = 0; i < 6; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await Promise.resolve();
+    }
+  });
+}
+const COPY_RE = /^\/tmp\/rnis-captures\/panorama-\d+\.jpg$/;
 
 /**
  * Flip `<Camera>`'s OWN AR pill.
@@ -410,9 +422,8 @@ describe('⚑ THE REVIEW CYCLE — M8: the preview stays up, the engine stands d
       }).onPreviewStarted?.();
     });
     expect(surfaceProps(tree).hostPreviewLive).toBe(true);
-    const onComplete = surfaceProps(tree).onComplete as (r: unknown) => void;
-    act(() => {
-      onComplete({
+    await act(async () => {
+      void (surfaceProps(tree).onComplete as (r: unknown) => Promise<void>)({
         uri: 'file:///x.jpg',
         width: 4000,
         height: 1200,
@@ -420,6 +431,10 @@ describe('⚑ THE REVIEW CYCLE — M8: the preview stays up, the engine stands d
         arms: { rectify: true, gainMatch: true },
         summary: coercePanoPlusSummary({}),
       });
+      for (let i = 0; i < 6; i += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        await Promise.resolve();
+      }
     });
     const behind = cameraViews(tree);
     expect(behind).toHaveLength(1);                       // still mounted
@@ -645,8 +660,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
     const tree = await render({
       rectCrop: false, showPreview: true, onCapture: (r: unknown) => { seen.push(r); },
     });
-    const onComplete = surfaceProps(tree).onComplete as (r: unknown) => void;
-    act(() => { onComplete(RESULT); });
+    await completeSweep(tree, RESULT);
     expect(seen).toHaveLength(0);          // nothing emitted yet
     expect(review(tree)).toHaveLength(1);  // …and the review is up
     // ⚠ AND IT IS SHOWING THE PANORAMA. `<Image>` renders nothing for a
@@ -654,20 +668,24 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
     // the right modal around an empty frame — which is how the operator's
     // defect #4 was "fixed". The public result keeps the bare path; only
     // what the viewer is handed is schemed.
-    expect(RESULT.uri).toBe(CANVAS);                       // bare, by contract
-    expect(review(tree)[0].props.imageUri).toBe(`file://${CANVAS}`);
+    // M9 — the review shows the OUTPUT, a COPY in the capture directory; the
+    // pack's canvas is left as the engine painted it.
+    expect(RESULT.uri).toBe(CANVAS);
+    const shown = String(review(tree)[0].props.imageUri);
+    expect(shown.startsWith('file://')).toBe(true);
+    expect(shown.replace('file://', '')).toMatch(COPY_RE);
     // …and the surface is gone behind it, so two cameras cannot be open.
     expect(lastSweepEngineCall().enabled).toBe(false);
     act(() => { tree.unmount(); });
   });
 
-  it('⚑ Confirm emits it, exactly once, with the panoplus discriminant', async () => {
+  it('⚑ Confirm emits it, exactly once — a PANORAMA with engine "sweep", its pack kept (M9)', async () => {
     const seen: Array<Record<string, unknown>> = [];
     const tree = await render({
       rectCrop: false, showPreview: true,
       onCapture: (r: Record<string, unknown>) => { seen.push(r); },
     });
-    act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT); });
+    await completeSweep(tree, RESULT);
     // The emit must come from CONFIRM, not from `onComplete`. Without this
     // the count of 1 cannot tell the fix from the emit-first defect it
     // replaced — measured: a mutation restoring emit-first kept this green.
@@ -675,8 +693,20 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
     act(() => { (review(tree)[0].props.onUseOriginal as (u?: string) => void)(); });
     expect(seen).toHaveLength(1);
     expect(review(tree)).toHaveLength(0);   // …and it closed
-    expect(seen[0].type).toBe('panoplus');
+    // M9 (D6): one panorama shape for both engines, the engine named, and the
+    // pack at the top level exactly as before.
+    expect(seen[0].type).toBe('panorama');
+    expect(seen[0].engine).toBe('sweep');
     expect(seen[0].ok).toBe(true);
+    expect(seen[0].kind).toBe('panoplus');
+    expect(seen[0].sessionDir).toBe(RESULT.sessionDir);
+    expect(seen[0].summary).toBe(RESULT.summary);
+    expect(seen[0].liveness).toBe('unavailable');
+    expect(seen[0].framesRequested).toBe(120);   // counts.seen
+    expect(seen[0].framesIncluded).toBe(96);     // painted (no seed, no tail here)
+    expect(seen[0].framesDropped).toBe(0);
+    expect(typeof seen[0].durationMs).toBe('number');
+    expect('finalConfidenceThresh' in seen[0]).toBe(false);
     act(() => { tree.unmount(); });
   });
 
@@ -686,7 +716,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
     const tree = await render({
       rectCrop: false, showPreview: true, onCapture: (r: unknown) => { seen.push(r); },
     });
-    act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT); });
+    await completeSweep(tree, RESULT);
     act(() => { (review(tree)[0].props.onRetake as () => void)(); });
     expect(seen).toHaveLength(0);
     // …and the surface comes BACK, which is what makes a retake possible.
@@ -707,7 +737,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
   it('⚑ every sweep writes host_verdict.json into its own session dir', async () => {
     written.length = 0;
     const tree = await render({ rectCrop: false, showPreview: true });
-    act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT); });
+    await completeSweep(tree, RESULT);
     await act(async () => { await Promise.resolve(); });
     const verdict = written.filter((w) => w.uri.endsWith('/host_verdict.json'));
     expect(verdict).toHaveLength(1);
@@ -734,7 +764,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
     // reason the call sits where it does.
     written.length = 0;
     const tree = await render({ rectCrop: false, showPreview: true });
-    act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT); });
+    await completeSweep(tree, RESULT);
     await act(async () => { await Promise.resolve(); });
     act(() => { (review(tree)[0].props.onRetake as () => void)(); });
     await act(async () => { await Promise.resolve(); });
@@ -748,11 +778,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
     // unconditionally and puts `host_verdict.json` at the filesystem root.
     written.length = 0;
     const tree = await render({});
-    act(() => {
-      (surfaceProps(tree).onComplete as (r: unknown) => void)({
-        ...RESULT, sessionDir: '',
-      });
-    });
+    await completeSweep(tree, { ...RESULT, sessionDir: '' });
     await act(async () => { await Promise.resolve(); });
     expect(written.filter((w) => w.uri.endsWith('/host_verdict.json')))
       .toHaveLength(0);
@@ -783,7 +809,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
       rectCrop: false, showPreview: true,
       onCapture: (r: Record<string, unknown>) => { seen.push(r); },
     });
-    act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(holed); });
+    await completeSweep(tree, holed);
     // The BANNER gets the message strings…
     expect((review(tree)[0].props.warnings as string[]).join(' ')).not.toBe('');
     // …and the HOST gets the coded warning on the result, which is the
@@ -803,7 +829,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
       rectCrop: false, showPreview: true,
       onCapture: (r: Record<string, unknown>) => { seen.push(r); },
     });
-    act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT); });
+    await completeSweep(tree, RESULT);
     act(() => { (review(tree)[0].props.onUseOriginal as () => void)(); });
     expect((seen[0].warnings as Array<{ code: string }>).map((x) => x.code))
       .not.toContain('SWEEP_NOT_INTACT');
@@ -823,9 +849,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
     // `cropQuad` now takes a destination (both natives) and `<Camera>` hands
     // a pano+ crop a SIBLING of the canvas, so `canvas.jpg` is untouched.
     const tree = await render({ rectCrop: true });
-    await act(async () => {
-      (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT);
-    });
+    await completeSweep(tree, RESULT);
     expect(review(tree)[0].props.showCropControls).toBe(true);
     // …AND THE QUAD OPENS ON THE INSCRIBED RECTANGLE, which is the half the
     // operator actually asked for ("cropped to the maximum inscribable
@@ -836,7 +860,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
     act(() => { tree.unmount(); });
   });
 
-  it('⚑ …and the crop lands on a SIBLING — canvas.jpg is never overwritten', async () => {
+  it('⚑ …and the crop runs IN PLACE on the COPY — canvas.jpg is never touched (M9)', async () => {
     // ⚠ THE WHOLE REASON THE EDITOR WAS WITHHELD. A pano+ canvas is
     // referenced by its pack, so an in-place crop leaves every offline
     // harness reading a pack whose seam residuals, coverage mask and ledger
@@ -847,9 +871,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
       rectCrop: true,
       onCapture: (r: Record<string, unknown>) => { seen.push(r); },
     });
-    await act(async () => {
-      (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT);
-    });
+    await completeSweep(tree, RESULT);
     await act(async () => {
       (review(tree)[0].props.onConfirm as (q: unknown) => void)({
         quad: [
@@ -859,12 +881,11 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
       });
     });
     expect(cropCalls).toHaveLength(1);
-    expect(cropCalls[0]!.imagePath)
-      .toBe('/data/user/0/com.x/files/panoplus/pp_1/canvas.jpg');
-    expect(cropCalls[0]!.outputPath)
-      .toBe('/data/user/0/com.x/files/panoplus/pp_1/canvas.cropped.jpg');
+    expect(cropCalls[0]!.imagePath).toMatch(COPY_RE);
+    expect(cropCalls[0]!.imagePath).not.toContain('canvas.jpg');
+    expect(cropCalls[0]!.outputPath).toBeUndefined();
     // …and the HOST is handed the crop, not the canvas.
-    expect(String(seen[0]!.uri)).toContain('canvas.cropped.jpg');
+    expect(String(seen[0]!.uri)).toContain('/tmp/rnis-captures/panorama-');
     act(() => { tree.unmount(); });
   });
 
@@ -896,9 +917,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
       rectCrop: false, showPreview: true,            // preview-only — NOT the crop editor
       onCapture: (r: Record<string, unknown>) => { seen.push(r); },
     });
-    await act(async () => {
-      (surfaceProps(tree).onComplete as (r: unknown) => void)(bootstrapOnly);
-    });
+    await completeSweep(tree, bootstrapOnly);
     // ON THE BANNER…
     const banner = (review(tree)[0].props.warnings as string[]).join(' | ');
     expect(banner).toContain('single frame');
@@ -912,7 +931,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
     act(() => { tree.unmount(); });
   });
 
-  it('⚑ …and a STALE native is refused before it can overwrite the canvas', async () => {
+  it('⚑ …and a STALE native still crops — in place on the copy needs no output path (M9)', async () => {
     // ⚠ JS NEWER THAN NATIVE IS THE ROUTINE STATE HERE — a Metro reload
     // without a rebuild. Such a build ignores the unknown `outputPath` key
     // and rewrites `imagePath` in place, and on this path `imagePath` IS the
@@ -931,9 +950,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
       onCapture: (r: Record<string, unknown>) => { seen.push(r); },
       onError: (e: unknown) => { errs.push(e); },
     });
-    await act(async () => {
-      (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT);
-    });
+    await completeSweep(tree, RESULT);
     await act(async () => {
       (review(tree)[0].props.onConfirm as (q: unknown) => void)({
         quad: [
@@ -942,12 +959,14 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
         ],
       });
     });
-    expect(cropCalls).toHaveLength(0);     // native was never asked
-    expect(errs).toHaveLength(1);          // …the host is told
-    // …and the capture is NOT lost: the un-cropped panorama is emitted, and
-    // it is SCHEMED, which the sweep's bare `canvasPath` is not.
+    // Until M9 the sweep cropped to a SIBLING of the pack's canvas, which an
+    // older native could not do, so the crop was refused. Its output is now a
+    // standalone copy, cropped in place like every other engine's.
+    expect(cropCalls).toHaveLength(1);
+    expect(cropCalls[0]!.outputPath).toBeUndefined();
+    expect(errs).toHaveLength(0);
     expect(seen).toHaveLength(1);
-    expect(String(seen[0]!.uri)).toMatch(/^file:\/\//);
+    expect(String(seen[0]!.uri)).toMatch(/^file:\/\/\/tmp\/rnis-captures\/panorama-/);
     act(() => { tree.unmount(); });
   });
 
@@ -968,7 +987,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
       rectCrop: false, showPreview: false,
       onCapture: (r: unknown) => { seen.push(r); },
     });
-    act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT); });
+    await completeSweep(tree, RESULT);
     expect(review(tree)).toHaveLength(0);
     expect(seen).toHaveLength(1);          // …and it emitted immediately
     act(() => { tree.unmount(); });
@@ -982,14 +1001,114 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
     // case above is therefore opt-in: it has to say `rectCrop: false`.
     const seen: unknown[] = [];
     const tree = await render({ onCapture: (r: unknown) => { seen.push(r); } });
-    await act(async () => {
-      (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT);
-    });
+    await completeSweep(tree, RESULT);
     expect(review(tree)).toHaveLength(1);
     expect(review(tree)[0].props.showCropControls).toBe(true);
     expect(review(tree)[0].props.initialRect)
       .toEqual({ x: 12, y: 8, width: 3600, height: 1100 });
     expect(seen).toHaveLength(0);
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ M9: the output lands in the host\'s outputDir', async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const tree = await render({
+      rectCrop: false, showPreview: false, outputDir: 'file:///host/out/',
+      onCapture: (r: Record<string, unknown>) => { seen.push(r); },
+    });
+    await completeSweep(tree, RESULT);
+    expect(String(seen[0].uri)).toMatch(/^file:\/\/\/host\/out\/panorama-\d+\.jpg$/);
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ M9: frames the engine REFUSED reach onFramesDropped', async () => {
+    const dropped: Array<{ requested: number; included: number }> = [];
+    const refused = panoPlusResultOf(
+      coercePanoPlusSummary({
+        canvasPath: CANVAS, sessionDir: '/data/user/0/com.x/files/panoplus/pp_1',
+        width: 4000, height: 1200,
+        counts: { seen: 120, painted: 96, rejectedOutOfCage: 7, rejectedTracking: 3 },
+      }),
+      { rectify: true, gainMatch: true, packFrames: 'all', poseSource: 'imu' },
+      '2026-09-24T00:00:00.000Z',
+    );
+    const tree = await render({
+      rectCrop: false, showPreview: false,
+      onFramesDropped: (d: { requested: number; included: number }) => { dropped.push(d); },
+    });
+    await completeSweep(tree, refused);
+    expect(dropped).toEqual([{ requested: 120, included: 110 }]);
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ NEGATIVE CONTROL: a sweep with no refusals fires no onFramesDropped', async () => {
+    const dropped: unknown[] = [];
+    const tree = await render({
+      rectCrop: false, showPreview: false,
+      onFramesDropped: (d: unknown) => { dropped.push(d); },
+    });
+    await completeSweep(tree, RESULT);
+    expect(dropped).toEqual([]);
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ M9: an output that cannot be written is OUTPUT_WRITE_FAILED on both channels', async () => {
+    const NM = require('react-native').NativeModules as Record<string, any>;
+    const realCopy = NM.RNImageStitcherFileUtils.copyFile;
+    NM.RNImageStitcherFileUtils.copyFile = () => Promise.reject(new Error('disk full'));
+    const seen: Array<Record<string, any>> = [];
+    const errs: Array<{ code: string }> = [];
+    try {
+      const tree = await render({
+        rectCrop: false, showPreview: true,
+        onCapture: (r: Record<string, any>) => { seen.push(r); },
+        onError: (e: { code: string }) => { errs.push(e); },
+      });
+      await completeSweep(tree, RESULT);
+      expect(errs.map((e) => e.code)).toEqual(['OUTPUT_WRITE_FAILED']);
+      expect(seen).toHaveLength(1);
+      expect([seen[0].ok, seen[0].type, seen[0].engine]).toEqual([false, 'panorama', 'sweep']);
+      expect(review(tree)).toHaveLength(0);     // nothing to review
+      act(() => { tree.unmount(); });
+    } finally {
+      NM.RNImageStitcherFileUtils.copyFile = realCopy;
+    }
+  });
+
+  it('⚑ M9: a failure reaches onCapture as ok:false, and a FINISH failure is a finalize failure', async () => {
+    const seen: Array<Record<string, any>> = [];
+    const errs: Array<{ code: string }> = [];
+    const tree = await render({
+      onCapture: (r: Record<string, any>) => { seen.push(r); },
+      onError: (e: { code: string }) => { errs.push(e); },
+    });
+    const fail = surfaceProps(tree).onFailure as (f: unknown) => void;
+    act(() => { fail({ code: 'panoplus-io', message: 'x', sessionDir: null, counts: null, abort: null }); });
+    act(() => {
+      fail({ code: 'panoplus-io', message: 'y', sessionDir: null, counts: null, abort: null, stage: 'finish' });
+    });
+    expect(errs.map((e) => e.code)).toEqual(['PANORAMA_START_FAILED', 'PANORAMA_FINALIZE_FAILED']);
+    expect(seen.map((r) => [r.ok, r.type, r.engine, r.error.code])).toEqual([
+      [false, 'panorama', 'sweep', 'PANORAMA_START_FAILED'],
+      [false, 'panorama', 'sweep', 'PANORAMA_FINALIZE_FAILED'],
+    ]);
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ NEGATIVE CONTROL: an abandon is a guard rail, not a failure — neither channel hears it', async () => {
+    const seen: unknown[] = [];
+    const errs: unknown[] = [];
+    const tree = await render({
+      onCapture: (r: unknown) => { seen.push(r); },
+      onError: (e: unknown) => { errs.push(e); },
+    });
+    act(() => {
+      (surfaceProps(tree).onFailure as (f: unknown) => void)({
+        code: 'panoplus-abandoned', message: 'x', sessionDir: null, counts: null, abort: null,
+      });
+    });
+    expect(seen).toEqual([]);
+    expect(errs).toEqual([]);
     act(() => { tree.unmount(); });
   });
 
@@ -1005,11 +1124,12 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
       rectCrop: false, showPreview: false,
       onCapture: (r: Record<string, unknown>) => { seen.push(r); },
     });
-    act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT); });
+    await completeSweep(tree, RESULT);
     expect(seen).toHaveLength(1);
-    expect(seen[0].uri).toBe(`file://${CANVAS}`);
-    // …and the PACK's own path is untouched, which is why the scheming
-    // happens at the emit boundary and not in `panoPlusResultOf`.
+    // M9 — the emitted uri is the COPY, schemed like every other engine's…
+    expect(String(seen[0].uri).startsWith('file://')).toBe(true);
+    expect(String(seen[0].uri).replace('file://', '')).toMatch(COPY_RE);
+    // …and the PACK's own path is untouched.
     expect(RESULT.uri).toBe(CANVAS);
     act(() => { tree.unmount(); });
   });
