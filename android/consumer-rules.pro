@@ -13,6 +13,17 @@
     public static void registerAll();
 }
 
+# The sweep's AE/AWB lock (panoplus/PanoPlusVcCameraControl.kt) reaches
+# vision-camera's CameraX camera through two Kotlin `internal` properties it
+# reads by FIELD NAME. A minifying host would rename them and the lock would
+# report "unavailable" on every sweep. Harmless without vision-camera.
+-keepclassmembers class com.mrousavy.camera.react.CameraView {
+    *** cameraSession;
+}
+-keepclassmembers class com.mrousavy.camera.core.CameraSession {
+    *** camera;
+}
+
 # The ARCore availability probe (panoplus/PanoPlusArCoreReference.kt) is also
 # reflective: it looks up ArCoreApk.getInstance / checkAvailability by name so
 # a missing ARCore runtime is a reported reason, not a crash.

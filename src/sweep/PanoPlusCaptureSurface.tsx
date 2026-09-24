@@ -324,6 +324,12 @@ export interface PanoPlusCaptureSurfaceProps {
    */
   hostArmRefusal?: { code: string; message: string } | null;
   /**
+   * M4 — the React tag of vision-camera's CameraView (the host's camera), so
+   * the Android vision-camera arm can apply the AE/AWB lock to the camera it
+   * sweeps from. Sent only with `vcPluginArm`.
+   */
+  vcViewTag?: number;
+  /**
    * Long-edge budget (px) for the AR arm's CPU image. Omit for the library's
    * 1920 default.
    *
@@ -780,12 +786,15 @@ export const PanoPlusCaptureSurface = forwardRef<
   onFailure,
   rectify = true,
   gainMatch = true,
-  packFrames = 'all',
+  // D10 (M4): 'none' by default — 'all' writes 30–62 MB of frames per sweep.
+  // A host that replays packs offline (the field build) opts in.
+  packFrames = 'none',
   engineOptions,
   attitudeMagFree,
   vcPluginArm,
   vcCameraId,
   hostArmRefusal,
+  vcViewTag,
   frameSource = 'own',
   hostPreviewLive = true,
   hostPreviewError = '',
@@ -2552,7 +2561,7 @@ export const PanoPlusCaptureSurface = forwardRef<
       // separate term because the guard only runs on the host arm, and this
       // line must also be correct on the own arm.
       ...(willSendArm && frameSource === 'host'
-        ? { vcPluginArm: true, vcCameraId }
+        ? { vcPluginArm: true, vcCameraId, ...(vcViewTag != null ? { vcViewTag } : {}) }
         : {}),
       // M3 — the recorder's backstop refuses a live sweep that neither runs
       // on a plugin arm nor was explicitly given its own camera. Only a
@@ -2870,6 +2879,7 @@ export const PanoPlusCaptureSurface = forwardRef<
     vcCameraId,
     vcPluginArm,
     hostArmRefusal,
+    vcViewTag,
     box.height,
     box.width,
   ]);

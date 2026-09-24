@@ -12,6 +12,8 @@
  * goes here as an explicit `module.exports.<feature> = ...` add-on.
  */
 module.exports = {
+  // M4 — <Camera> reads vision-camera's view tag for the sweep's AE/AWB lock.
+  findNodeHandle: (ref) => (ref == null ? null : 101),
   NativeModules: {},
   Platform: { OS: 'ios', select: (spec) => spec.ios ?? spec.default },
 };

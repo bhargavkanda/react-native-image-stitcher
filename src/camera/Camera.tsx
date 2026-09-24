@@ -50,6 +50,7 @@ import React, {
   useState,
 } from 'react';
 import {
+  findNodeHandle,
   AppState,
   NativeModules,
   Platform,
@@ -136,7 +137,7 @@ export type SweepOptions = Omit<
   PanoPlusCaptureSurfaceProps,
   'onComplete' | 'onCancel' | 'onFailure'
   | 'frameSource' | 'hostPreviewLive' | 'vcPluginArm' | 'vcCameraId'
-  | 'hostArmRefusal'
+  | 'hostArmRefusal' | 'vcViewTag'
   // ⚠ D9 (M3): the pose arm and the lens follow `<Camera>`'s own AR pill and
   // lens chip. A bag override made both dead controls on the sweep, and was
   // the Android route into pano+'s own Camera2 client.
@@ -5370,6 +5371,12 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             hostPreviewError={hostPreviewError}
             vcPluginArm={mountHostPreview}
             vcCameraId={mountHostPreview ? (capture.device?.id ?? '') : ''}
+            // M4 — the CameraView's tag, for the AE/AWB lock on vision-
+            // camera's own camera (Android). Read at render; the start bag
+            // carries whatever the mounted preview's tag is at the hold.
+            vcViewTag={mountHostPreview
+              ? (findNodeHandle(visionCameraRef.current) ?? undefined)
+              : undefined}
             // The NAMED reason a hold on the host camera cannot start now —
             // the surface refuses with it rather than opening a camera of
             // its own. See `sweepHostArmRefusal`.

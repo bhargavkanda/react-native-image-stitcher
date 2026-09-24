@@ -57,6 +57,8 @@ const AppState = {
 };
 
 module.exports = {
+  // M4 — <Camera> reads vision-camera's view tag for the sweep's AE/AWB lock.
+  findNodeHandle: (ref) => (ref == null ? null : 101),
   AppState,
   __emitAppState: (next) => {
     AppState.currentState = next;

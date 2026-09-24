@@ -104,6 +104,14 @@ class ARFrameContext(
     @JvmField val depthHeight: Int = 0,
     @JvmField val anchors: List<Map<String, Any?>> = emptyList(),
     @JvmField val featurePoints: FloatArray? = null,
+    /**
+     * The frame's exposure time from ARCore's per-frame image metadata
+     * (`SENSOR_EXPOSURE_TIME`, ns); 0 when ARCore did not report it. Lets a
+     * plugin normalise exposure across a sweep instead of running on zeros.
+     */
+    @JvmField val exposureTimeNs: Long = 0L,
+    /** `SENSOR_SENSITIVITY` (ISO) from the same metadata; 0 when absent. */
+    @JvmField val sensitivityIso: Int = 0,
 ) {
     /**
      * Read-only window onto JUST the Y (luminance) plane of [nv21] — the

@@ -182,6 +182,13 @@ android {
     // last-known-good fallback for raw RN hosts without an Expo pin.
     ndkVersion safeExtGet('ndkVersion', '27.1.12297006')
 
+    // android.util.Log (and friends) return defaults in JVM unit tests
+    // instead of throwing "not mocked": the pano+ sink logs on arm/disarm, and
+    // its frame ordering is what PanoPlusVcFrameSinkTest pins.
+    testOptions {
+        unitTests.returnDefaultValues = true
+    }
+
     defaultConfig {
         // Keep rules for the reflective lookups this package makes — see the
         // file. Consumer rules travel with the AAR to every host that minifies.
@@ -483,6 +490,10 @@ dependencies {
         // `compileOnly` because the host app already ships these via
         // vision-camera's transitive runtime dep.
         compileOnly "androidx.camera:camera-core:1.5.0-alpha03"
+        // M4 — CameraX's Camera2 interop (Camera2CameraControl for the sweep's
+        // AE/AWB lock, Camera2CameraCaptureResult for each frame's own
+        // CaptureResult). compileOnly: vision-camera ships it at run time.
+        compileOnly "androidx.camera:camera-camera2:1.5.0-alpha03"
     } else {
         // Without vision-camera on the classpath these sources can't
         // compile (imports unresolved). Exclude them so the rest of the
@@ -521,6 +532,7 @@ dependencies {
             '**/SaveFrameAsJpegPlugin.kt',
             '**/VisionCameraPluginRegistrations.kt',
             '**/PanoPlusSweepFrameProcessor.kt',
+            '**/PanoPlusVcCameraControl.kt',
         ]
         tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
             vcOnlySources.each { pattern -> exclude pattern }

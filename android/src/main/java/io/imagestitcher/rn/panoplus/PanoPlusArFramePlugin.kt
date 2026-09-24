@@ -321,7 +321,9 @@ internal class PanoPlusArFramePlugin private constructor() : ARFramePlugin {
             val fy = context.fy
             val cx = context.cx
             val cy = context.cy
-            worker.execute { ingestOffThread(nv21, w, h, tsNs, fx, fy, cx, cy, q, n) }
+            val expS = if (context.exposureTimeNs > 0L) context.exposureTimeNs / 1e9 else 0.0
+            val iso = if (context.sensitivityIso > 0) context.sensitivityIso.toDouble() else 0.0
+            worker.execute { ingestOffThread(nv21, w, h, tsNs, fx, fy, cx, cy, q, n, expS, iso) }
         } catch (t: Throwable) {
             busy.set(false)
             state.recordThrew("submit:" + t.javaClass.simpleName)
@@ -368,6 +370,8 @@ internal class PanoPlusArFramePlugin private constructor() : ARFramePlugin {
         cy: Double,
         q: DoubleArray,
         n: Long,
+        exposureDurationS: Double,
+        exposureISO: Double,
     ) {
         try {
             val r = PanoPlusLiveNative.ingest(
@@ -390,11 +394,13 @@ internal class PanoPlusArFramePlugin private constructor() : ARFramePlugin {
                 // only reached when ARCore itself said TRACKING.
                 tracking = 2,
                 seq = n,
-                // No Camera2 stream on this arm, so no CaptureResult and no
-                // exposure pair. 0 reads as "not measured", never as a measured
-                // zero — the same shape the iOS ARKit arm has always had.
-                exposureDurationS = 0.0,
-                exposureISO = 0.0,
+                // M4: ARCore's own per-frame exposure, from the frame's image
+                // metadata (it used to be a zero pair, so exposure
+                // normalisation ran on nothing on this arm). NOT locked —
+                // ARCore offers no AE lock on a normal Session — but measured,
+                // it is correctable. 0 still reads as "not measured".
+                exposureDurationS = exposureDurationS,
+                exposureISO = exposureISO,
             )
             state.recordIngest(r.ran, r.painted, r.outcome)
         } catch (t: Throwable) {

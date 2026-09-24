@@ -1343,6 +1343,17 @@ class RNSARCameraView @JvmOverloads constructor(
             }
         }
 
+        // The frame's exposure from ARCore's per-frame image metadata, for
+        // plugins that normalise exposure (the sweep engine). Absent keys are
+        // 0, never a guess.
+        var exposureNs = 0L
+        var iso = 0
+        try {
+            val md = frame.imageMetadata
+            try { exposureNs = md.getLong(com.google.ar.core.ImageMetadata.SENSOR_EXPOSURE_TIME) } catch (_: Throwable) { }
+            try { iso = md.getInt(com.google.ar.core.ImageMetadata.SENSOR_SENSITIVITY) } catch (_: Throwable) { }
+        } catch (_: Throwable) { }
+
         val ctx = ARFrameContext(
             nv21 = packed.nv21,
             width = packed.width,
@@ -1367,6 +1378,8 @@ class RNSARCameraView @JvmOverloads constructor(
             depthHeight = depth?.height ?: 0,
             anchors = anchorMaps,
             featurePoints = featurePoints,
+            exposureTimeNs = exposureNs,
+            sensitivityIso = iso,
         )
 
         var sync: HashMap<String, Any?>? = null

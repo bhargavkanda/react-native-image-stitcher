@@ -131,6 +131,18 @@ class PanoPlusLiveModule(
     override fun getName(): String = "RNSSweepSession"
 
     /**
+     * M4 — a JS reload or a torn-down bridge must not leave the sweep's AE/AWB
+     * lock on vision-camera's camera: interop request options outlive the
+     * module, and a lock left behind pins the exposure of every photo taken
+     * after it. The recorder clears it on every sweep teardown; this covers the
+     * teardown that never reaches the recorder.
+     */
+    override fun invalidate() {
+        try { PanoPlusVcBridge.cameraLock?.unlock() } catch (_: Throwable) { }
+        super.invalidate()
+    }
+
+    /**
      * ── WHY THIS PACKAGE SHIPS ITS OWN DOCUMENT DIRECTORY ────────────────
      * A sweep needs one thing from the filesystem before it can start: a
      * writable base directory to put the session under. Native creates the
@@ -375,6 +387,8 @@ class PanoPlusLiveModule(
         // M3 — see PanoPlusStartMode.REFUSE_LIVE_WITHOUT_CAMERA.
         bag.putBoolean("allowOwnCamera", optBool(options, "allowOwnCamera", false))
         bag.putString("vcCameraId", optStr(options, "vcCameraId", "") ?: "")
+        // M4 — vision-camera's CameraView tag, for the AE/AWB lock.
+        bag.putInt("vcViewTag", optDbl(options, "vcViewTag", 0.0).toInt())
 
         // ── Camera ───────────────────────────────────────────────────────
         // The ultra-wide by default (`preferPhysical`), 60 fps preferred, and

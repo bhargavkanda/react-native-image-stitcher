@@ -61,6 +61,11 @@ internal object VisionCameraPluginRegistrations {
             SaveFrameAsJpegPlugin.PLUGIN_NAME,
         ) { proxy, options -> SaveFrameAsJpegPlugin(proxy, options) }
 
+        // M4 — the sweep's reach into vision-camera's CameraX camera (the
+        // AE/AWB lock), registered where vision-camera is known to exist.
+        io.imagestitcher.rn.panoplus.PanoPlusVcBridge.cameraLock =
+            io.imagestitcher.rn.panoplus.PanoPlusVcCameraControl
+
         // S5 — the sweep engine, fed from the camera <Camera> already owns.
         FrameProcessorPluginRegistry.addFrameProcessorPlugin(
             io.imagestitcher.rn.panoplus.PanoPlusSweepFrameProcessor.PLUGIN_NAME,

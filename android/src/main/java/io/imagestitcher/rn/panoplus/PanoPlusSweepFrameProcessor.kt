@@ -66,16 +66,10 @@ class PanoPlusSweepFrameProcessor(
     private val unused = proxy to options
 
     /**
-     * The pooled NV21 destination and the de-stride scratch.
-     *
-     * ⚠ SAFE ONLY BECAUSE THE SINK RUNS ONE INGEST AT A TIME. The worker
-     * reads `dst` after this callback returns, so reusing it on the next
-     * frame would race the engine — except that the sink refuses a second
-     * frame while one is in flight, and this callback only reaches the
-     * de-stride after that gate has been won. Remove the gate and this
-     * buffer must become a pool.
+     * The de-stride scratch. The NV21 destination comes from the SINK's pool
+     * (M4) — a buffer the engine may still be reading is never handed out, so
+     * this callback cannot overwrite one mid-ingest.
      */
-    private var dst: ByteArray? = null
     private var scratch: ByteArray? = null
     private var pooledW = -1
     private var pooledH = -1
@@ -144,15 +138,22 @@ class PanoPlusSweepFrameProcessor(
             return mapOf("ingested" to false, "why" to "planes ${planes.size}")
         }
 
-        // ⚠ THE GATE BEFORE THE COPY, NOT AFTER IT. `dst` is pooled and the
-        // sink's worker is still reading it for the previous frame; gating
-        // after the de-stride lets this callback overwrite a buffer inside
-        // someone else's `nativeLiveIngest`, and then records the tear as a
-        // clean "busy" drop. At ~30 ms of ingest against a 33 ms frame
-        // interval that is the steady state.
-        if (!PanoPlusVcFrameSink.tryAcquire()) {
-            return mapOf("ingested" to false, "why" to "busy")
+        // ⚠ THE BUFFER BEFORE THE COPY, NOT AFTER IT: the de-stride writes
+        // into a buffer the sink's pool has handed over, never into one the
+        // engine is still reading.
+        // ⚠ D3 (M4): THE BASIS ASSUMES AN UNROTATED, UNMIRRORED BUFFER. The
+        // recorder derives C from SENSOR_ORIENTATION for the RAW sensor raster
+        // (PanoPlusNativeBasis, appliedRotation 0). vision-camera 4.7.3 does
+        // not rotate or mirror frame-processor buffers today — but nothing
+        // checked, and a rotated buffer would roll C by 90° with every scalar
+        // check passing. Refused by name instead.
+        val orient = bufferOrientation(frame)
+        if (orient != null) {
+            PanoPlusVcFrameSink.notePreOfferRefusal()
+            return mapOf("ingested" to false, "why" to orient)
         }
+        val out = PanoPlusVcFrameSink.acquireBuffer(w * h * 3 / 2)
+            ?: return mapOf("ingested" to false, "why" to "busy")
         var acquired = true
         try {
             // First-frame size latch, PER SWEEP. Checked INSIDE the gate so
@@ -165,7 +166,7 @@ class PanoPlusSweepFrameProcessor(
                 latchedH = h
             }
             if (w != latchedW || h != latchedH) {
-                // POST-acquire: `tryAcquire()` above already counted this
+                // POST-acquire: `acquireBuffer()` above already counted this
                 // frame as offered, so booking it pre-offer would put it in
                 // two buckets and break the partition the pack is read with.
                 PanoPlusVcFrameSink.notePostAcquireRefusal()
@@ -173,7 +174,6 @@ class PanoPlusSweepFrameProcessor(
             }
 
             if (pooledW != w || pooledH != h) {
-                dst = ByteArray(w * h * 3 / 2)
                 pooledW = w
                 pooledH = h
                 scratch = null
@@ -191,10 +191,6 @@ class PanoPlusSweepFrameProcessor(
             )
             var scr = scratch
             if (scr == null || scr.size < needScr) { scr = ByteArray(needScr); scratch = scr }
-            val out = dst ?: run {
-                PanoPlusVcFrameSink.notePostAcquireRefusal()
-                return mapOf("ingested" to false, "why" to "no buffer")
-            }
 
             try {
                 Yuv420ToNv21.convert(
@@ -220,14 +216,41 @@ class PanoPlusSweepFrameProcessor(
             // `out.size` — never a recomputed w*h*3/2. The JNI does not
             // validate `length` against the array, so a confident wrong
             // value is a SIGSEGV inside cvtColor rather than a refusal.
-            val taken = PanoPlusVcFrameSink.offerAcquired(out, out.size, w, h, tsNs)
-            acquired = false   // ownership handed to the sink's worker
+            // The frame's own CaptureResult (M4) — exposure, lock read-back,
+            // crop, zoom, the active physical lens. Null when CameraX paired
+            // none; the sink and the recorder treat that as "not measured".
+            val meta = PanoPlusVcCameraControl.metaOf(frame)
+            val taken = PanoPlusVcFrameSink.submit(out, out.size, w, h, tsNs, meta)
+            acquired = false   // ownership handed to the sink
             return mapOf("ingested" to taken)
         } finally {
             // Every early return above still holds the slot. Releasing it
             // here is what stops one bad frame wedging the arm shut for the
             // rest of the sweep.
-            if (acquired) PanoPlusVcFrameSink.release()
+            if (acquired) PanoPlusVcFrameSink.returnBuffer(out)
         }
+    }
+
+    /**
+     * Null when the buffer is the raw sensor raster the basis assumes;
+     * otherwise why it is not. Reads CameraX's sensor-to-buffer transform: an
+     * unrotated, unmirrored buffer maps sensor to buffer by scale and
+     * translation only (no skew terms, positive scales).
+     */
+    private fun bufferOrientation(frame: Frame): String? = try {
+        val m = FloatArray(9)
+        frame.imageProxy.imageInfo.sensorToBufferTransformMatrix.getValues(m)
+        val skewX = m[android.graphics.Matrix.MSKEW_X]
+        val skewY = m[android.graphics.Matrix.MSKEW_Y]
+        val sx = m[android.graphics.Matrix.MSCALE_X]
+        val sy = m[android.graphics.Matrix.MSCALE_Y]
+        when {
+            kotlin.math.abs(skewX) > 1e-3f || kotlin.math.abs(skewY) > 1e-3f ->
+                "buffer rotated (sensor-to-buffer skew ${"%.3f".format(skewX)},${"%.3f".format(skewY)})"
+            sx < 0f || sy < 0f -> "buffer mirrored"
+            else -> null
+        }
+    } catch (_: Throwable) {
+        null   // no transform to read: the pre-M4 assumption stands, as before
     }
 }
