@@ -1,0 +1,14 @@
+# TEMPLATE. Copy to packs.txt (git-ignored) and point each row at the pack
+# on your machine. The pack folder names are the originals.
+# The nine iPhone AR-arm packs that carry BOTH attitude channels:
+# panoplus/track.jsonl (ARKit poseRotation) and panoplus/attitude_imu.jsonl
+# (CoreMotion, RNISPanoImuSidecar).  <tag> <packDir>, tab-separated.
+PP6-195027	<packs root>/panoplus-debug-pack-2026-09-07T19-50-27-933Z
+PP6-195035	<packs root>/panoplus-debug-pack-2026-09-07T19-50-35-278Z
+PP6-225431	<packs root>/panoplus-debug-pack-2026-09-07T22-54-31-232Z
+T14-225636	<packs root>/panoplus-debug-pack-2026-09-02T22-56-36-065Z
+T14-225753	<packs root>/panoplus-debug-pack-2026-09-02T22-57-53-060Z
+T14-230008	<packs root>/panoplus-debug-pack-2026-09-02T23-00-08-904Z
+T14-225004	<packs root>/panoplus-debug-pack-2026-09-02T22-50-04-607Z
+PP3-124737	<packs root>/panoplus-debug-pack-2026-09-04T12-47-37-120Z
+T15-225457	<packs root>/panoplus-debug-pack-2026-09-11T22-54-57-065Z

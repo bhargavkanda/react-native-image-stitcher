@@ -5131,9 +5131,19 @@ export function panoPlusCaptureWarnings(
  *
  * ADVISORY — it gates nothing. `not-measurable` when the image moved too
  * little, or when rotation explains too little of the motion (a walk, where
- * translation dominates and the prediction is small by nature). The
- * thresholds are first estimates; the offline negative control (a replay with
- * a deliberately wrong basis) is what calibrates them.
+ * translation dominates and the prediction is small by nature).
+ *
+ * CALIBRATED OFFLINE (tools/d3-basis-proof, 2026-09-24): nine iPhone17,1
+ * packs replayed through the engine on the true basis #8 and on wrong ones.
+ * The shipped floor of 40 px answered NOTHING — the latch freezes its
+ * vectors the moment max(|x|,|y|) reaches 24 px, so they are ~24–36 px long
+ * (M5 review: 110 of 110 real latches). At 16 px: #8 agrees on 8 of 9 (the
+ * ninth relatched, which zeroes `rotationPx`), a quarter turn (#0) disagrees
+ * on 8 of 9, the two sign flips (#9, #10) on 7 of 9 each.
+ *
+ * ⚠ BLIND TO A WRONG BASIS ABOUT THE SWEEP'S OWN AXIS (#11, #13): those
+ * predict the same motion on a pan, so they agree. That is the degeneracy
+ * `selectBasis` documents, and no image check at the latch can break it.
  */
 export interface PanoPlusBasisImageCheck {
   verdict: 'agrees' | 'disagrees' | 'not-measurable';
@@ -5144,12 +5154,18 @@ export interface PanoPlusBasisImageCheck {
 }
 
 export const PANO_PLUS_BASIS_CHECK = {
-  /** Below this image motion (canvas px) the direction is noise. */
-  minTotalPx: 40,
+  /** Below this image motion (canvas px) the direction is noise. BELOW the
+   *  latch's own 24 px trigger, or the check can never answer. */
+  minTotalPx: 16,
   /** Rotation must explain at least this share of the motion's length. */
   minRotationShare: 0.25,
   /** cos 45°: the prediction and the measurement point the same way. */
   agreeCos: 0.707,
+  /** The travel check: below this |rotTravelPx| (canvas px) the sign is noise. */
+  minRotTravelPx: 100,
+  /** …and rotation must carry at least this share of the net travel, so a
+   *  walk with a small counter-rotation is not read as a flipped basis. */
+  minRotTravelShare: 0.25,
 } as const;
 
 export function panoPlusBasisImageCheck(
@@ -5171,6 +5187,46 @@ export function panoPlusBasisImageCheck(
     rotationPx: rot,
     totalPx: tot,
   };
+}
+
+/**
+ * D3 — THE SECOND IMAGE-SIDE SIGNAL: the SIGN of the rotation's travel along
+ * the sweep, over the whole sweep rather than at the latch.
+ *
+ * `regime.rotTravelPx` is the rotation channel's net contribution along the
+ * latched sweep direction. On the true basis the attitude turns the way the
+ * canvas grows, so it is positive; a sign-flipped basis (#9, #10) predicts
+ * the opposite turn and the residual channel absorbs twice the difference, so
+ * it is negative. Measured offline on the nine packs: #8 positive on 9 of 9;
+ * #9 and #10 negative on 8 of 9 (the ninth aborted before painting). With the
+ * floors below: #8 agrees on 8 of 9 and never disagrees, #9 and #10 disagree
+ * on 7 of 9 — including sweeps whose latch relatched and so gave the latch
+ * check nothing to read.
+ *
+ * Blind to a quarter turn (#0 puts the rotation across the sweep, so its
+ * travel along it is small); the latch check catches that one. Blind, like
+ * every image check, to #11 and #13. ADVISORY — it gates nothing.
+ */
+export interface PanoPlusBasisTravelCheck {
+  verdict: 'agrees' | 'disagrees' | 'not-measurable';
+  rotTravelPx: number;
+  /** rotTravelPx ÷ the net travel (rotation + residual); null when there is none. */
+  rotTravelShare: number | null;
+}
+
+export function panoPlusBasisTravelCheck(
+  regime: { rotTravelPx: number; resTravelPx: number } | null | undefined,
+): PanoPlusBasisTravelCheck {
+  const rot = regime?.rotTravelPx ?? 0;
+  const res = regime?.resTravelPx ?? 0;
+  const net = rot + res;
+  const share = Number.isFinite(net) && Math.abs(net) > 0 ? rot / Math.abs(net) : null;
+  if (!Number.isFinite(rot) || share == null
+    || Math.abs(rot) < PANO_PLUS_BASIS_CHECK.minRotTravelPx
+    || Math.abs(share) < PANO_PLUS_BASIS_CHECK.minRotTravelShare) {
+    return { verdict: 'not-measurable', rotTravelPx: rot, rotTravelShare: share };
+  }
+  return { verdict: rot > 0 ? 'agrees' : 'disagrees', rotTravelPx: rot, rotTravelShare: share };
 }
 
 export function panoPlusVerdictSidecar(
@@ -5213,6 +5269,7 @@ export function panoPlusVerdictSidecar(
       residuals,
       // D3 — the image-side check of the basis the sweep ran on. Advisory.
       basisImageCheck: panoPlusBasisImageCheck(result.summary.latch),
+      basisTravelCheck: panoPlusBasisTravelCheck(result.summary.regime),
       // WHY THIS FILE EXISTS, inside the file. A sidecar whose purpose lives
       // only in the commit that added it is a sidecar the next reader deletes.
       note:

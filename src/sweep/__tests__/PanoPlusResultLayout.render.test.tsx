@@ -88,6 +88,8 @@ import {
   panoPlusIntegrity,
   panoPlusResidualLines,
   panoPlusVerdictSidecar,
+  panoPlusBasisImageCheck,
+  panoPlusBasisTravelCheck,
 } from '../panoPlusModel';
 import type { PanoPlusCaptureResult } from '../panoPlusTypes';
 
@@ -341,6 +343,18 @@ describe('the output screen shows the image and the controls', () => {
 });
 
 describe('the report that left the screen is in the pack', () => {
+  it('carries BOTH D3 basis checks, each read off this sweep\'s own summary', () => {
+    const r = fieldResult();
+    const written = JSON.parse(panoPlusVerdictSidecar(r, { writtenAtMs: 0 }));
+    expect(written.basisImageCheck).toEqual(
+      JSON.parse(JSON.stringify(panoPlusBasisImageCheck(r.summary.latch))),
+    );
+    expect(written.basisTravelCheck).toEqual(
+      JSON.parse(JSON.stringify(panoPlusBasisTravelCheck(r.summary.regime))),
+    );
+    expect(written.basisTravelCheck.rotTravelPx).toBe(r.summary.regime.rotTravelPx);
+  });
+
   it('carries every sentence and every residual, verbatim', () => {
     const r = fieldResult();
     const written = JSON.parse(panoPlusVerdictSidecar(r, { writtenAtMs: 0 }));

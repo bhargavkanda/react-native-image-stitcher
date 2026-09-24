@@ -1,0 +1,6 @@
+# CMake build tree (./build.sh)
+build/
+# synthesised replay packs, replayed canvases and ledgers (./run_all.sh)
+out/
+# the local pack list (absolute paths on one machine); packs.example.txt is the template
+packs.txt
