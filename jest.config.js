@@ -111,6 +111,11 @@ const render = {
     // relatively, so these two patterns cannot catch anything else.
     '^\\.\\./index$': '<rootDir>/jest.mocks/sweep-host-components.render.js',
     '^\\.\\./\\.\\./index$': '<rootDir>/jest.mocks/sweep-host-components.render.js',
+    // M7 — the engine hook's direct import of the orientation hook, forwarded
+    // to the same seam (see the mock's header). Only src/sweep/useSweepEngine.ts
+    // imports it by this relative path.
+    '^\\.\\./camera/useDeviceOrientation$':
+      '<rootDir>/jest.mocks/sweep-device-orientation.render.js',
     '^react-native-image-stitcher$':
       '<rootDir>/jest.mocks/sweep-host-components.render.js',
   },

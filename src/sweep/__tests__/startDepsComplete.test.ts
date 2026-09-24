@@ -35,7 +35,9 @@
 import { readFileSync } from 'fs';
 import { join } from 'path';
 
-const SRC = join(__dirname, '..', 'PanoPlusCaptureSurface.tsx');
+// M7 — the engine (and `start`) moved out of the surface into the hook; the
+// guard is re-anchored on the hook's own props destructuring.
+const SRC = join(__dirname, '..', 'useSweepEngine.ts');
 
 /** Strip comments so a prop NAMED in prose does not read as a use. */
 function decomment(src: string): string {
@@ -44,12 +46,12 @@ function decomment(src: string): string {
     .replace(/(^|[^:])\/\/[^\n]*/g, '$1 ');
 }
 
-describe("PanoPlusCaptureSurface start()'s deps", () => {
+describe("useSweepEngine start()'s deps", () => {
   const src = readFileSync(SRC, 'utf8');
 
   /** The component's destructured props, in declaration order. */
   const props: string[] = (() => {
-    const from = src.indexOf('function PanoPlusCaptureSurface({');
+    const from = src.indexOf('export function useSweepEngine(');
     expect(from).toBeGreaterThan(-1);
     // ⚠ THIS ANCHORED ON '}: PanoPlusCaptureSurfaceProps', WHICH IS NEVER
     // FOUND AFTER `from` — the type name appears in the `forwardRef<>`
@@ -64,12 +66,16 @@ describe("PanoPlusCaptureSurface start()'s deps", () => {
     // anywhere before the real parameter-list close truncates the props
     // list, and every prop after it becomes invisible to the guard. In a
     // file whose comments routinely quote code, that is not a remote shape.
+    // M7: the props are destructured from `props` at the top of the hook —
+    // `const { … } = props;` — rather than in a parameter list.
     const clean = decomment(src);
-    const cleanFrom = clean.indexOf('function PanoPlusCaptureSurface({');
-    expect(cleanFrom).toBeGreaterThan(-1);
-    const to = clean.indexOf('}, ref)', cleanFrom);
+    const hookFrom = clean.indexOf('export function useSweepEngine(');
+    expect(hookFrom).toBeGreaterThan(-1);
+    const cleanFrom = clean.indexOf('const {', hookFrom);
+    expect(cleanFrom).toBeGreaterThan(hookFrom);
+    const to = clean.indexOf('} = props;', cleanFrom);
     expect(to).toBeGreaterThan(cleanFrom);
-    const block = clean.slice(cleanFrom, to);
+    const block = clean.slice(cleanFrom, to + 1);
     // ⚠ THE FIRST VERSION OF THIS REGEX REQUIRED A TRAILING COMMA, A
     // SINGLE-LINE DEFAULT AND NO RENAME — and silently yielded NO MATCH for
     // three legal, type-clean shapes:

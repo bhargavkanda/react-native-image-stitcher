@@ -41,6 +41,20 @@ afterEach(() => {
   delete NM.RNISPanoPlus;
 });
 
+
+/**
+ * M7 — the sweep's source is TWO files now: the surface keeps the props it
+ * declares and the drawing, and `useSweepEngine` holds everything that
+ * destructures, forwards and starts. A source guard reads both, so a hop moved
+ * between them is still a hop it can see.
+ */
+function surfaceAndEngineSrc(): string {
+  const fs = require('fs') as typeof import('fs');
+  const path = require('path') as typeof import('path');
+  return fs.readFileSync(path.join(__dirname, '..', 'PanoPlusCaptureSurface.tsx'), 'utf8')
+    + '\n' + fs.readFileSync(path.join(__dirname, '..', 'useSweepEngine.ts'), 'utf8');
+}
+
 describe('availability', () => {
   it('is false with no module linked', () => {
     expect(panoPlusIsAvailable()).toBe(false);
@@ -423,10 +437,7 @@ describe('iOS\'s OWN answer for the same fault survives the coercion', () => {
 // no knob, because every downstream measurement then describes the wrong arm.
 describe('sweep-level arms actually reach the native start options', () => {
   it('forwards attitudeMagFree when the host sets it, and omits it when unset', () => {
-    const src = require('fs').readFileSync(
-      require('path').join(__dirname, '..', 'PanoPlusCaptureSurface.tsx'),
-      'utf8',
-    ) as string;
+    const src = surfaceAndEngineSrc();
     // Declared as a PROP of the surface, not merely as a type somewhere else.
     expect(src).toMatch(/^\s*attitudeMagFree\?: boolean;/m);
     // Destructured, so it is in scope at the start call.
@@ -449,10 +460,7 @@ describe('sweep-level arms actually reach the native start options', () => {
 //
 // A flag that selects an arm must be gated on that arm at BOTH ends.
 describe('the Android AR arm is the AR-plugin arm, with no flag to forget (M2)', () => {
-  const src = require('fs').readFileSync(
-    require('path').join(__dirname, '..', 'PanoPlusCaptureSurface.tsx'),
-    'utf8',
-  ) as string;
+  const src = surfaceAndEngineSrc();
 
   it('the surface sends no arm-selecting flag at all', () => {
     // The recorder takes the AR-plugin arm for every live AR sweep
@@ -482,10 +490,7 @@ describe('the Android AR arm is the AR-plugin arm, with no flag to forget (M2)',
 // asserts the hops exist for the sweep-level arms, in the source, because no
 // behavioural test can see a value that never arrives.
 describe('every sweep-level arm actually reaches the bridge', () => {
-  const surface = require('fs').readFileSync(
-    require('path').join(__dirname, '..', 'PanoPlusCaptureSurface.tsx'),
-    'utf8',
-  ) as string;
+  const surface = surfaceAndEngineSrc();
 
   it('lockCamera is forwarded — it was inert on Android for the whole v6 era', () => {
     expect(surface).toMatch(/^\s*lockCamera,$/m);
@@ -509,10 +514,7 @@ describe('every sweep-level arm actually reaches the bridge', () => {
 // pano+ never did, and only got away with it while it mounted no view that let
 // the window follow the device.
 describe('the pano+ surface pins portrait the way Pano does', () => {
-  const src = require('fs').readFileSync(
-    require('path').join(__dirname, '..', 'PanoPlusCaptureSurface.tsx'),
-    'utf8',
-  ) as string;
+  const src = surfaceAndEngineSrc();
 
   it('locks on mount and RESTORES on unmount — never one without the other', () => {
     expect(src).toContain('arModule?.lockPortrait?.()');
@@ -541,10 +543,7 @@ describe('the pano+ surface pins portrait the way Pano does', () => {
 // is gated on a refcount that only this prop raises. Mosaic sets it. pano+ did
 // not, so pano+ got ARCore's default.
 describe('the AR camera view is asked for keyframe-quality capture', () => {
-  const src = require('fs').readFileSync(
-    require('path').join(__dirname, '..', 'PanoPlusCaptureSurface.tsx'),
-    'utf8',
-  ) as string;
+  const src = surfaceAndEngineSrc();
 
   it('sets keyframeQualityCapture on the AR view', () => {
     const i = src.indexOf('<ARCameraView');
