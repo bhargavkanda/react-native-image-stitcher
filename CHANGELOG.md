@@ -232,6 +232,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capture uses that review too.
 
 ### Fixed
+- **A false "NO LIVE CAMERA FEED" on every Android sweep.** The Android live
+  status always carries the state of pano+'s own preview view, which
+  `<Camera>` never mounts (its vision-camera preview is the viewfinder), so
+  the hold overlay showed the notice over a live preview for the whole sweep
+  and every pack's `host_sweep_hud.json` recorded it. The notice now speaks
+  only when the sweep owns its camera.
 
 - **The sweep engine's guard rails follow the keyframe engine's lateral-stop
   policy.** A sideways-drift stop on `engine="sweep"` is judged by the same

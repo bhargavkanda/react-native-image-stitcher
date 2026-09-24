@@ -107,6 +107,8 @@ let startedDirs: string[] = [];
 let sessionDir = '';
 /** What native `stop()` does — set per case. */
 let stopImpl: () => Promise<unknown> = () => Promise.resolve({});
+/** The live status native answers mid-sweep. */
+let statusExtra: Record<string, unknown> = {};
 let cancels = 0;
 /** Every `copyFile(from, to)`, bare paths, in call order. */
 let copyCalls: Array<[string, string]> = [];
@@ -153,6 +155,7 @@ beforeEach(() => {
   copyCalls = [];
   inscribedCalls = [];
   stopImpl = () => Promise.resolve(summary());
+  statusExtra = {};
   copyImpl = (_f, to) => Promise.resolve(to);
   NM.RNSSweepSession = {
     start: (o: Record<string, unknown>) => {
@@ -165,7 +168,9 @@ beforeEach(() => {
     },
     stop: () => stopImpl(),
     cancel: () => { cancels += 1; return Promise.resolve({ cancelled: true }); },
-    getStatus: () => Promise.resolve({ running: true, sessionDir, seq: 1, painted: 5 }),
+    getStatus: () => Promise.resolve({
+      running: true, sessionDir, seq: 1, painted: 5, ...statusExtra,
+    }),
     setIdlePreview: () => Promise.resolve({ on: false }),
     getConstants: () => ({ documentDirectory: 'file:///data/files/', vcArmSupported: true }),
     documentDirectory: 'file:///data/files/',
@@ -787,6 +792,37 @@ describe('M9 review T10 — a rejected native stop is a FINALIZE failure, throug
     }));
     // A rejected stop that is NOT `not-running` keeps the pack: no cancel.
     expect(cancels).toBe(0);
+    act(() => { h.tree.unmount(); });
+  });
+});
+
+// ── Android viewfinder notice on <Camera>'s camera ────────────────────────
+describe('the "NO LIVE CAMERA FEED" notice is for the sweep\'s OWN camera only', () => {
+  it('⚑ an Android sweep on <Camera>\'s camera shows no notice and records none, whatever native says of its own view', async () => {
+    // Android's live status always carries pano+'s own preview view's state,
+    // and on `<Camera>`'s camera that view is never mounted: native answers
+    // `viewfinderAttached: false` with its default note on every poll. That
+    // painted "NO LIVE CAMERA FEED — …" over the live vision-camera preview
+    // for the whole sweep, and wrote it into host_sweep_hud.json.
+    // MUTATION: drop the `frameSource === 'own'` gate → the note renders.
+    statusExtra = {
+      viewfinderAttached: false,
+      viewfinderNote: 'no preview surface has been offered — the viewfinder view is not mounted',
+    };
+    const h = await mount({ rectCrop: false, showPreview: false });
+    await act(async () => { h.ref.current.startPanorama(); });
+    await tick(300);
+    await tick(300);
+    expect(startedDirs).toHaveLength(1);
+    expect(h.tree.root.findAll((n) => n.props?.testID === 'panoplus-viewfinder-note')).toHaveLength(0);
+    expect(JSON.stringify(h.tree.toJSON())).not.toContain('NO LIVE CAMERA FEED');
+    await act(async () => { await h.ref.current.stopPanorama(); });
+    await drain();
+    const hud = g.__m9.written.filter((w: { uri: string }) => w.uri.endsWith('host_sweep_hud.json'));
+    expect(hud.length).toBeGreaterThan(0);   // the sidecar was written, so the check below bites
+    for (const w of hud) {
+      expect((JSON.parse(w.body) as Record<string, unknown>).viewfinder ?? null).toBeNull();
+    }
     act(() => { h.tree.unmount(); });
   });
 });

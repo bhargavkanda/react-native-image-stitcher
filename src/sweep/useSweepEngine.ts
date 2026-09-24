@@ -2664,7 +2664,15 @@ export function useSweepEngine(
   // "the camera is fine, the panel is just behind" was the same black
   // rectangle. Null — and therefore invisible — on iOS and on any build that
   // does not track it. See `panoPlusViewfinderNotice`.
-  const viewfinderNotice = panoPlusViewfinderNotice(status);
+  //
+  // ⚠ ONLY WHEN THE SWEEP OWNS ITS CAMERA (`frameSource: 'own'`, the DR-1a
+  // hatch). The status describes pano+'s OWN preview view — the one Android's
+  // Camera2 arm draws into. On the host arms the viewfinder is `<Camera>`'s
+  // camera, which native does not track, and Android still reports its own
+  // (never-mounted) view as unattached with its default note — so every
+  // Android sweep on `<Camera>` showed "NO LIVE CAMERA FEED" over a live
+  // preview, and every pack recorded it (found while preparing M6b).
+  const viewfinderNotice = frameSource === 'own' ? panoPlusViewfinderNotice(status) : null;
   // ── THE HUD'S TEXT, LATCHED FOR THE PACK ────────────────────────────────
   // Written on every render, read once at stop. `panoPlusPreviewWindowCaption`
   // is called HERE and only here: the preview no longer says "showing the last
