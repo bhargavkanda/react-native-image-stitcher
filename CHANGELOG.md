@@ -38,6 +38,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is a property of the build: it resolves whether or not an AR view is bound,
   and never rejects. Method absent ⇒ the build predates the report (unknown).
   The iOS side must resolve the same shape (`platform: 'ios'`).
+- **`AROverlay.badgePlacement`** (Android) — accepted by the overlay parser
+  and the `updateOverlay` patch path so the contract is the same on both
+  platforms (`AROverlayData.badgePlacement`; `AROverlayBadgePlacement` applies
+  iOS's rule: only the exact string `'plane'` opts in, anything else is the
+  default `'camera'`). Nothing Android draws changes: its badge is sized from
+  the projected screen box and drawn after the fill whatever the key says, so
+  `overlayFeatures()` does not list `flatPlaneBadge` on Android.
 - **`RNSARSession.overlayFeatures()`** (iOS) — the same `arOverlayFeatures/1`
   shape with `platform: 'ios'` and `features: ['imageScale', 'flatPlaneBadge']`
   (`RNISAROverlayFeatures.describe()`). No data parameter, never rejects.

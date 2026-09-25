@@ -20,6 +20,16 @@ class AROverlayFeaturesTest {
     }
 
     @Test
+    fun badgePlacementIsParsedButNotListed_becauseAndroidDrawsTheSameBadge() {
+        // iOS lists `flatPlaneBadge` for `badgePlacement: 'plane'`; Android
+        // parses the key (AROverlayBadgePlacement) and draws the same
+        // screen-space badge for every value, so it lists neither name.
+        assertTrue("flatPlaneBadge" !in AROverlayFeatures.FEATURES)
+        assertTrue("badgePlacement" !in AROverlayFeatures.FEATURES)
+        assertTrue("depthOcclusion" !in AROverlayFeatures.FEATURES)
+    }
+
+    @Test
     fun shapeIsExactlyTheContract() {
         val d = AROverlayFeatures.describe()
         assertEquals(listOf("contract", "platform", "features", "imageScale"), d.keys.toList())

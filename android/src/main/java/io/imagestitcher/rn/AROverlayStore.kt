@@ -29,6 +29,7 @@ import java.util.concurrent.atomic.AtomicReference
  *     label?: string;
  *     imageUri?: string;              // image badge inside a box
  *     imageScale?: number;            // badge size ×; default 1
+ *     badgePlacement?: 'plane' | 'camera'; // iOS badge opt-in; parsed, not drawn here
  *     color?: string;                 // hex; default a theme colour
  *     mode?: '2d' | '3d';             // default '2d'; '3d' is SCAFFOLD ONLY
  *     depthOcclusion?: boolean;       // default false; iOS-renderer opt-in
@@ -93,6 +94,14 @@ data class AROverlayData(
     /// compiling; [AROverlayRenderer] re-sanitises it (a plugin can bypass
     /// [fromReadableMap]).
     val imageScale: Float = AROverlayImageScale.DEFAULT,
+    /// Where the iOS renderer puts the [imageUri] badge
+    /// ([AROverlayBadgePlacement]): [AROverlayBadgePlacement.PLANE] or the
+    /// default [AROverlayBadgePlacement.CAMERA].  Parsed for cross-platform
+    /// contract parity and IGNORED by [AROverlayRenderer], like
+    /// [depthOcclusion]: Android's badge is always sized from the projected
+    /// screen box and drawn after the fill.  Trailing + defaulted like its
+    /// siblings so native-plugin SPI callers keep compiling.
+    val badgePlacement: String = AROverlayBadgePlacement.DEFAULT,
 ) {
     // data class with array fields — override equals/hashCode by `id` only.
     // Identity for diffing the declarative `overlays` prop / imperative set
@@ -188,6 +197,23 @@ data class AROverlayData(
         }
 
         /**
+         * Read `badgePlacement` → [AROverlayBadgePlacement.sanitize] of the
+         * value, or null when the key is ABSENT (the caller keeps what it
+         * had: the default in [fromReadableMap], the base in a patch).  A
+         * PRESENT key always decides — a non-string or unknown value reads as
+         * the default, iOS's rule — so a patch can turn the opt-in off with
+         * `'camera'` or `null`.  `internal` for [AROverlayStore.applyPatch],
+         * like [readAlpha].
+         */
+        internal fun readBadgePlacement(map: ReadableMap): String? {
+            if (!map.hasKey("badgePlacement")) return null
+            val raw: String? = if (map.getType("badgePlacement") == ReadableType.String) {
+                map.getString("badgePlacement")
+            } else null
+            return AROverlayBadgePlacement.sanitize(raw)
+        }
+
+        /**
          * Parse one [ReadableMap] (the JS `AROverlay` shape) into an
          * [AROverlayData], or null when it carries neither a usable
          * `worldPosition` nor a 3-4-point `worldQuad`, or has no `id`.
@@ -254,6 +280,9 @@ data class AROverlayData(
             // Absent / non-number ⇒ 1 (the pre-field badge); out of range ⇒ 1.
             val imageScale = readImageScale(map) ?: AROverlayImageScale.DEFAULT
 
+            // Only the string 'plane' opts in (iOS's rule); parsed, not drawn.
+            val badgePlacement = readBadgePlacement(map) ?: AROverlayBadgePlacement.DEFAULT
+
             return AROverlayData(
                 id = id,
                 worldPosition = worldPosition,
@@ -268,6 +297,7 @@ data class AROverlayData(
                 imageUri = imageUri,
                 depthOcclusion = depthOcclusion,
                 imageScale = imageScale,
+                badgePlacement = badgePlacement,
             )
         }
 
@@ -526,6 +556,9 @@ class AROverlayStore {
                         parsed.depthOcclusion
                     } else base.depthOcclusion,
                     imageScale = if (patch.hasKey("imageScale")) parsed.imageScale else base.imageScale,
+                    badgePlacement = if (patch.hasKey("badgePlacement")) {
+                        parsed.badgePlacement
+                    } else base.badgePlacement,
                 )
             }
 
@@ -576,6 +609,10 @@ class AROverlayStore {
             // Same "present AND right type wins" convention as the alphas.
             val imageScale = AROverlayData.readImageScale(patch) ?: base.imageScale
 
+            // A PRESENT key decides (unknown / non-string ⇒ the default, so a
+            // patch can turn the iOS opt-in off); absent keeps the base.
+            val badgePlacement = AROverlayData.readBadgePlacement(patch) ?: base.badgePlacement
+
             return base.copy(
                 sizeMeters = size,
                 shape = shape,
@@ -587,6 +624,7 @@ class AROverlayStore {
                 imageUri = imageUri,
                 depthOcclusion = depthOcclusion,
                 imageScale = imageScale,
+                badgePlacement = badgePlacement,
             )
         }
 

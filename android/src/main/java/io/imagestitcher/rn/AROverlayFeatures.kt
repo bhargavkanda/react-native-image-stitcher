@@ -31,6 +31,13 @@ package io.imagestitcher.rn
  * here is parsed ([AROverlayData.fromReadableMap], the patch path) AND drawn
  * ([AROverlayRenderer]). `imageScale` carries its honoured range: a value
  * outside it renders at `default`, not clipped ([AROverlayImageScale]).
+ *
+ * NOT listed, on purpose — fields Android parses but does not draw
+ * differently: `depthOcclusion`, and `badgePlacement` (iOS lists
+ * `flatPlaneBadge` for it). Android's badge is sized from the projected
+ * screen box and drawn after the fill whatever `badgePlacement` says
+ * ([AROverlayBadgePlacement]), so a host reading this report records "not
+ * honoured" on Android, which is what the pixels are.
  */
 object AROverlayFeatures {
     const val CONTRACT = "arOverlayFeatures/1"
