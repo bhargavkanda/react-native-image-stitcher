@@ -98,6 +98,22 @@ export interface AROverlay {
   imageUri?: string;
 
   /**
+   * Size multiplier for the {@link imageUri} badge.  Omitted = `1`, which
+   * renders exactly as before the field existed: the badge's extent is ~26%
+   * of the box's shorter side, clamped (iOS 4 mm – 5 cm, Android 10 – 110 px).
+   * `s` scales the proportional extent AND the upper clamp — iOS
+   * `min(max(short·0.26·s, 4 mm), 5 cm·s)`, Android
+   * `(short·0.26·s).coerceIn(10 px, 110 px·s)`; the lower floor, the padding
+   * ratio and the degenerate-box skip are unchanged.  Honoured range
+   * `[0.25, 2.5]`: at 2.5 the inset badge still ends inside the box (inset +
+   * extent = iOS 1.25 × 0.65 = 0.81 of the shorter side, Android 1.15 × 0.65
+   * = 0.75).  Same fallback-not-clip rule as {@link fillAlpha}: a non-finite,
+   * out-of-range or non-number value (a boolean included) renders at `1`
+   * rather than being clipped.  Ignored without an `imageUri`.
+   */
+  imageScale?: number;
+
+  /**
    * Stroke / fill colour as a hex string (e.g. `'#00E5FF'`).  Defaults to a
    * theme colour on the native side when omitted.
    */

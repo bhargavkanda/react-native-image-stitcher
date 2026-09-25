@@ -314,6 +314,7 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
                     relCorners: rel, color: overlay.color, label: overlay.label,
                     fillAlpha: overlay.fillAlpha, strokeAlpha: overlay.strokeAlpha,
                     imageUri: overlay.imageUri,
+                    imageScale: overlay.imageScale,
                     depthOcclusion: overlay.depthOcclusion)
             }
             return Self.makeQuadOutlineNode(
@@ -322,6 +323,7 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
                 shape: overlay.shape, fillAlpha: overlay.fillAlpha,
                 strokeAlpha: overlay.strokeAlpha,
                 imageUri: overlay.imageUri,
+                imageScale: overlay.imageScale,
                 camDir: camDir,
                 depthOcclusion: overlay.depthOcclusion)
         }
@@ -789,6 +791,7 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
         fillAlpha: CGFloat,
         strokeAlpha: CGFloat,
         imageUri: String?,
+        imageScale: CGFloat = RNISAROverlay.defaultImageScale,
         depthOcclusion: Bool = false
     ) -> SCNNode {
         // Box dims from the quad's own in-plane basis: the edge lengths are
@@ -866,10 +869,11 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
         }
         // Badge image bottom-left INSIDE the box.  The parent faces the
         // camera, so local −X/−Y is screen bottom-left; same proportional
-        // sizing as the plane-oriented path (≈26% of the shorter side,
-        // clamped).
+        // sizing as the plane-oriented path (≈26% of the shorter side ×
+        // `imageScale`, clamped — `RNISAROverlay.badgeExtent`, the one rule
+        // both paths ask).
         if let uri = imageUri, w > 0.012, h > 0.012, let img = badgeImage(uri) {
-            let extent = min(max(min(w, h) * 0.26, 0.004), 0.05)
+            let extent = RNISAROverlay.badgeExtent(shortSide: min(w, h), imageScale: imageScale)
             let pad = Float(extent) * 0.25
             let badge = makeBadgeImageNode(image: img, extent: extent)
             badge.simdPosition = simd_float3(
@@ -901,6 +905,7 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
         fillAlpha: CGFloat = RNISAROverlay.defaultFillAlpha,
         strokeAlpha: CGFloat = RNISAROverlay.defaultStrokeAlpha,
         imageUri: String? = nil,
+        imageScale: CGFloat = RNISAROverlay.defaultImageScale,
         camDir: simd_float3? = nil,
         depthOcclusion: Bool = false
     ) -> SCNNode {
@@ -990,8 +995,10 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
                 // floor can be half of a small box and cover it; ~26% of the
                 // shorter side reads the same on a tiny quad and a 15 cm one.
                 // The tiny floor only avoids a zero-size plane, the cap only
-                // stops a huge quad's badge dwarfing the feed.
-                let extent = min(max(min(qw, qh) * 0.26, 0.004), 0.05)
+                // stops a huge quad's badge dwarfing the feed.  `imageScale`
+                // (default 1 = this exact rule) scales the share and the cap
+                // — `RNISAROverlay.badgeExtent`, shared with the billboard path.
+                let extent = RNISAROverlay.badgeExtent(shortSide: min(qw, qh), imageScale: imageScale)
                 let pad = Float(extent) * 0.25
                 let badge = makeBadgeImageNode(image: img, extent: extent)
                 // `front * 2 * layerGapM` — one tier above the stroke in the

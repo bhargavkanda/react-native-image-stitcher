@@ -28,6 +28,7 @@ import java.util.concurrent.atomic.AtomicReference
  *     strokeAlpha?: number;           // 0..1; default 1 (opaque outline)
  *     label?: string;
  *     imageUri?: string;              // image badge inside a box
+ *     imageScale?: number;            // badge size ×; default 1
  *     color?: string;                 // hex; default a theme colour
  *     mode?: '2d' | '3d';             // default '2d'; '3d' is SCAFFOLD ONLY
  *     depthOcclusion?: boolean;       // default false; iOS-renderer opt-in
@@ -86,6 +87,12 @@ data class AROverlayData(
     /// by [AROverlayRenderer].  Trailing + defaulted like its siblings so
     /// native-plugin SPI callers keep compiling.
     val depthOcclusion: Boolean = false,
+    /// Size multiplier for the [imageUri] badge ([AROverlayImageScale]).
+    /// Default 1 = the badge exactly as before the field existed.  Trailing +
+    /// defaulted like its siblings so native-plugin SPI callers keep
+    /// compiling; [AROverlayRenderer] re-sanitises it (a plugin can bypass
+    /// [fromReadableMap]).
+    val imageScale: Float = AROverlayImageScale.DEFAULT,
 ) {
     // data class with array fields — override equals/hashCode by `id` only.
     // Identity for diffing the declarative `overlays` prop / imperative set
@@ -169,6 +176,18 @@ data class AROverlayData(
         }
 
         /**
+         * Read `imageScale` → a SANITISED scale ([AROverlayImageScale.sanitize]),
+         * or null when the key is absent / not a number — the same
+         * [ReadableType.Number] gate as [readAlpha], so a JS boolean is
+         * rejected rather than read as 1.0/0.0.  `internal` for
+         * [AROverlayStore.applyPatch], like [readAlpha].
+         */
+        internal fun readImageScale(map: ReadableMap): Float? {
+            if (!map.hasKey("imageScale") || map.getType("imageScale") != ReadableType.Number) return null
+            return AROverlayImageScale.sanitize(map.getDouble("imageScale").toFloat())
+        }
+
+        /**
          * Parse one [ReadableMap] (the JS `AROverlay` shape) into an
          * [AROverlayData], or null when it carries neither a usable
          * `worldPosition` nor a 3-4-point `worldQuad`, or has no `id`.
@@ -232,6 +251,9 @@ data class AROverlayData(
                 map.getType("depthOcclusion") == ReadableType.Boolean &&
                 map.getBoolean("depthOcclusion")
 
+            // Absent / non-number ⇒ 1 (the pre-field badge); out of range ⇒ 1.
+            val imageScale = readImageScale(map) ?: AROverlayImageScale.DEFAULT
+
             return AROverlayData(
                 id = id,
                 worldPosition = worldPosition,
@@ -245,6 +267,7 @@ data class AROverlayData(
                 strokeAlpha = strokeAlpha,
                 imageUri = imageUri,
                 depthOcclusion = depthOcclusion,
+                imageScale = imageScale,
             )
         }
 
@@ -502,6 +525,7 @@ class AROverlayStore {
                     depthOcclusion = if (patch.hasKey("depthOcclusion")) {
                         parsed.depthOcclusion
                     } else base.depthOcclusion,
+                    imageScale = if (patch.hasKey("imageScale")) parsed.imageScale else base.imageScale,
                 )
             }
 
@@ -549,6 +573,9 @@ class AROverlayStore {
                 patch.getType("depthOcclusion") == ReadableType.Boolean
             ) patch.getBoolean("depthOcclusion") else base.depthOcclusion
 
+            // Same "present AND right type wins" convention as the alphas.
+            val imageScale = AROverlayData.readImageScale(patch) ?: base.imageScale
+
             return base.copy(
                 sizeMeters = size,
                 shape = shape,
@@ -559,6 +586,7 @@ class AROverlayStore {
                 strokeAlpha = strokeAlpha,
                 imageUri = imageUri,
                 depthOcclusion = depthOcclusion,
+                imageScale = imageScale,
             )
         }
 

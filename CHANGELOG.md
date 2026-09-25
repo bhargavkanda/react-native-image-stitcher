@@ -16,6 +16,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`AROverlay.imageScale`** — a size multiplier for the in-box `imageUri`
+  badge. Omitted, the badge renders exactly as before (the extent is ~26% of
+  the box's shorter side, clamped to 4 mm – 5 cm on iOS and 10 – 110 px on
+  Android). `s` scales the proportional extent and the upper clamp; the lower
+  floor, the inset and the degenerate-box skip do not change. The honoured
+  range is `[0.25, 2.5]`; a non-finite, out-of-range or non-number value
+  (a boolean included) renders at 1 instead of being clipped, the same rule
+  as `fillAlpha`. One function per platform decides the extent
+  (`RNISAROverlay.badgeExtent` on iOS, `AROverlayImageScale.badgeExtentPx` on
+  Android), and both box builders on iOS call it. Android's `updateOverlay`
+  patch path carries the field like its siblings.
+
 ### Changed (BREAKING)
 
 - **`<Camera engine="sweep">` runs on `<Camera>`'s own camera on iOS too.** A

@@ -281,7 +281,7 @@ internal class AROverlayRenderer(
         // annotates.
         val badge = overlay.imageUri?.let { badgeBitmap(it) }
         if (badge != null) {
-            drawBadge(canvas, badge, screen)
+            drawBadge(canvas, badge, screen, overlay.imageScale)
         } else {
             overlay.label?.let { drawLabel(canvas, it, screen, overlay.colorArgb) }
         }
@@ -330,6 +330,7 @@ internal class AROverlayRenderer(
         canvas: Canvas,
         bmp: android.graphics.Bitmap,
         screen: FloatArray,
+        imageScale: Float,
     ) {
         var minX = Float.MAX_VALUE
         var maxX = -Float.MAX_VALUE
@@ -349,9 +350,10 @@ internal class AROverlayRenderer(
         val bh = maxY - minY
         // Skip only a DEGENERATE box; a small box still gets a small badge.
         if (bw < 20f || bh < 20f) return
-        // Proportional badge (iOS parity): ~26% of the shorter side,
-        // bottom-left, clamped so a huge box's badge never dwarfs the feed.
-        val extent = (minOf(bw, bh) * 0.26f).coerceIn(10f, 110f)
+        // Proportional badge (iOS parity): ~26% of the shorter side ×
+        // `imageScale` (default 1 = this exact rule), bottom-left, clamped so
+        // a huge box's badge never dwarfs the feed.
+        val extent = AROverlayImageScale.badgeExtentPx(minOf(bw, bh), imageScale)
         val ar = if (bmp.height > 0) bmp.width.toFloat() / bmp.height.toFloat() else 1f
         val w = if (ar >= 1f) extent else extent * ar
         val h = if (ar >= 1f) extent / ar else extent

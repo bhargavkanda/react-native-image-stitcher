@@ -21,6 +21,7 @@
 //     strokeAlpha?: number;                        // 0..1; default 1 (opaque outline)
 //     label?: string;
 //     imageUri?: string;                           // image badge inside a box
+//     imageScale?: number;                         // badge size ×; default 1
 //     color?: string;                              // hex; default theme color
 //     mode?: '2d' | '3d';                          // default '2d'; '3d' SCAFFOLD only
 //     orient?: 'plane' | 'camera';                 // default 'plane'
@@ -115,6 +116,14 @@ public struct RNISAROverlay: Equatable {
     /// silently ignores an undecodable file.
     public let imageUri: String?
 
+    /// Size multiplier for the `imageUri` badge, in
+    /// `minImageScale...maxImageScale`.  Defaults to `defaultImageScale` (1),
+    /// so an overlay that omits the JS `imageScale` key draws its badge
+    /// EXACTLY as before the field existed.  Always in range: the init
+    /// sanitises (fallback-not-clip, like the alphas).  See AROverlay.ts
+    /// `imageScale` and `badgeExtent(shortSide:imageScale:)`.
+    public let imageScale: CGFloat
+
     /// Stroke / label color.  Defaults to a theme color when the JS hex
     /// is absent / unparseable.
     public let color: UIColor
@@ -155,7 +164,10 @@ public struct RNISAROverlay: Equatable {
         strokeAlpha: CGFloat = RNISAROverlay.defaultStrokeAlpha,
         imageUri: String? = nil,
         billboard: Bool = false,
-        depthOcclusion: Bool = false
+        depthOcclusion: Bool = false,
+        // Trailing + defaulted like its siblings: native-plugin SPI call sites
+        // keep compiling and keep the 1× badge.
+        imageScale: CGFloat = RNISAROverlay.defaultImageScale
     ) {
         self.id = id
         self.worldPosition = worldPosition
@@ -173,6 +185,39 @@ public struct RNISAROverlay: Equatable {
         // funnel every overlay passes through.
         self.fillAlpha = Self.sanitizedFillAlpha(fillAlpha)
         self.strokeAlpha = Self.sanitizedStrokeAlpha(strokeAlpha)
+        self.imageScale = Self.sanitizedImageScale(imageScale)
+    }
+
+    /// Coerce a caller-supplied badge scale to the honoured range.  Same
+    /// contract as `sanitizedFillAlpha`: anything non-finite or outside
+    /// `minImageScale...maxImageScale` falls back to `defaultImageScale` (the
+    /// pre-field badge) rather than being clipped — a confused caller gets
+    /// the documented default, never a vanishing or box-covering badge.
+    public static func sanitizedImageScale(_ raw: CGFloat) -> CGFloat {
+        guard raw.isFinite, raw >= minImageScale, raw <= maxImageScale else {
+            return defaultImageScale
+        }
+        return raw
+    }
+
+    /// Default badge scale when JS omits `imageScale`: 1 — the badge every
+    /// pre-`imageScale` build drew.
+    public static let defaultImageScale: CGFloat = 1.0
+    /// Honoured badge-scale range.  At the top of it the inset badge still
+    /// ends inside the box (inset + extent = 1.25 × 0.26 × 2.5 = 0.81 of the
+    /// shorter side).
+    public static let minImageScale: CGFloat = 0.25
+    public static let maxImageScale: CGFloat = 2.5
+
+    /// THE badge extent rule, in metres, for a box whose shorter side is
+    /// `shortSide` metres: ~26% of it × `imageScale`, floored at 4 mm and
+    /// capped at 5 cm × `imageScale`.  At `imageScale` 1 this is exactly the
+    /// constant expression both box builders used before the field existed
+    /// (`min(max(min(w, h) * 0.26, 0.004), 0.05)`).  The scale is
+    /// re-sanitised here because the builders are handed a raw value.
+    public static func badgeExtent(shortSide: CGFloat, imageScale: CGFloat) -> CGFloat {
+        let s = sanitizedImageScale(imageScale)
+        return min(max(shortSide * 0.26 * s, 0.004), 0.05 * s)
     }
 
     /// Coerce a caller-supplied fill alpha to the honoured range.  Anything
@@ -279,6 +324,9 @@ public struct RNISAROverlay: Equatable {
         // range.  JS is never trusted to be in-range OR in-type.
         let fillAlpha = numeric(dict["fillAlpha"]) ?? defaultFillAlpha
         let strokeAlpha = numeric(dict["strokeAlpha"]) ?? defaultStrokeAlpha
+        // Same funnel: absent / non-number / boolean → 1; the init sanitises
+        // the range (fallback-not-clip).
+        let imageScale = numeric(dict["imageScale"]) ?? defaultImageScale
         // `orient: 'camera'` ⇒ billboard.  Any other / absent value ⇒ 'plane'
         // (false) ⇒ byte-identical to pre-`orient` builds.
         let billboard = (dict["orient"] as? String) == "camera"
@@ -308,14 +356,15 @@ public struct RNISAROverlay: Equatable {
             strokeAlpha: strokeAlpha,
             imageUri: imageUri,
             billboard: billboard,
-            depthOcclusion: depthOcclusion
+            depthOcclusion: depthOcclusion,
+            imageScale: imageScale
         )
     }
 
     // MARK: Dictionary parsing helpers
 
     /// Parse one bridged JS value as a number.  The single numeric funnel for
-    /// EVERY field (`fillAlpha`, `strokeAlpha`, `sizeMeters`, `worldPosition`,
+    /// EVERY field (`fillAlpha`, `strokeAlpha`, `imageScale`, `sizeMeters`, `worldPosition`,
     /// `worldQuad`), so a `nil` here means "JS sent a non-number" for all of
     /// them alike.
     private static func numeric(_ v: Any?) -> CGFloat? {

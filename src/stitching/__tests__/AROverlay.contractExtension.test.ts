@@ -6,6 +6,7 @@
  *   fillAlpha?: number;        // 0..1 box-fill opacity; absent = native ~22%
  *   strokeAlpha?: number;      // 0..1 outline opacity; absent = opaque; 0 = fill-only
  *   imageUri?: string;         // image badge drawn inside a 'box'
+ *   imageScale?: number;       // badge size multiplier; absent = 1 (as before)
  *   orient?: 'plane'|'camera'; // 'camera' = gravity-upright billboard box (iOS)
  *   depthOcclusion?: boolean;  // opt-in iOS box occlusion; absent/false = legacy
  *
@@ -104,6 +105,24 @@ describe('AROverlay contract extension — types', () => {
     expect(minimal.orient).toBeUndefined();
     // Absent = legacy rendering is the depthOcclusion back-compat contract.
     expect(minimal.depthOcclusion).toBeUndefined();
+    // Absent imageScale = 1 = the badge exactly as before the field existed.
+    expect(minimal.imageScale).toBeUndefined();
+  });
+
+  it('models a badge drawn at twice the default size (imageScale 2)', () => {
+    const big: AROverlay = {
+      id: 'accepted-1',
+      worldQuad: [
+        [0, 0, 0],
+        [0.2, 0, 0],
+        [0.2, 0.3, 0],
+        [0, 0.3, 0],
+      ],
+      shape: 'box',
+      imageUri: 'file:///tmp/packshot.png',
+      imageScale: 2,
+    };
+    expect(big.imageScale).toBe(2);
   });
 
   it('rejects wrong types on the new fields', () => {
@@ -132,8 +151,18 @@ describe('AROverlay contract extension — types', () => {
       // @ts-expect-error — depthOcclusion is a boolean, not a number.
       depthOcclusion: 1,
     };
-    expect([bad1.id, bad2.id, bad3.id, bad4.id, bad5.id])
-      .toEqual(['x', 'y', 'z', 'w', 'v']);
+    const bad6: AROverlay = {
+      id: 'u',
+      // @ts-expect-error — imageScale is a number, not a string.
+      imageScale: '2',
+    };
+    const bad7: AROverlay = {
+      id: 't',
+      // @ts-expect-error — imageScale is a number, not a boolean.
+      imageScale: true,
+    };
+    expect([bad1.id, bad2.id, bad3.id, bad4.id, bad5.id, bad6.id, bad7.id])
+      .toEqual(['x', 'y', 'z', 'w', 'v', 'u', 't']);
   });
 });
 
@@ -151,6 +180,7 @@ describe('AROverlay contract extension — controller dispatch', () => {
       fillAlpha: 0.35,
       strokeAlpha: 0.8,
       imageUri: 'file:///tmp/badge.png',
+      imageScale: 2,
       orient: 'camera',
       depthOcclusion: true,
     };
@@ -161,6 +191,7 @@ describe('AROverlay contract extension — controller dispatch', () => {
     expect(sent[0].fillAlpha).toBe(0.35);
     expect(sent[0].strokeAlpha).toBe(0.8);
     expect(sent[0].imageUri).toBe('file:///tmp/badge.png');
+    expect(sent[0].imageScale).toBe(2);
     expect(sent[0].orient).toBe('camera');
     // Opt-in selects the new depth-occlusion scheme on the native side —
     // the flag must arrive exactly as set.
@@ -174,6 +205,8 @@ describe('AROverlay contract extension — controller dispatch', () => {
     expect('fillAlpha' in sent[0]).toBe(false);
     expect('strokeAlpha' in sent[0]).toBe(false);
     expect('imageUri' in sent[0]).toBe(false);
+    // Absent imageScale ⇒ native renders the badge at 1 (byte-identical).
+    expect('imageScale' in sent[0]).toBe(false);
     expect('orient' in sent[0]).toBe(false);
     // The depthOcclusion back-compat guarantee: an overlay that never set
     // the flag reaches native WITHOUT the key, and the native default
