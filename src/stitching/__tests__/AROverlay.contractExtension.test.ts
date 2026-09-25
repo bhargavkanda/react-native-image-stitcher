@@ -7,6 +7,7 @@
  *   strokeAlpha?: number;      // 0..1 outline opacity; absent = opaque; 0 = fill-only
  *   imageUri?: string;         // image badge drawn inside a 'box'
  *   imageScale?: number;       // badge size multiplier; absent = 1 (as before)
+ *   badgePlacement?: 'plane'|'camera'; // opt-in flat + over-fill badge (iOS); absent = as before
  *   orient?: 'plane'|'camera'; // 'camera' = gravity-upright billboard box (iOS)
  *   depthOcclusion?: boolean;  // opt-in iOS box occlusion; absent/false = legacy
  *
@@ -107,6 +108,25 @@ describe('AROverlay contract extension — types', () => {
     expect(minimal.depthOcclusion).toBeUndefined();
     // Absent imageScale = 1 = the badge exactly as before the field existed.
     expect(minimal.imageScale).toBeUndefined();
+    // Absent badgePlacement = the camera-facing badge exactly as before.
+    expect(minimal.badgePlacement).toBeUndefined();
+  });
+
+  it('models a badge opted into the plane placement (badgePlacement plane)', () => {
+    const flat: AROverlay = {
+      id: 'labelled-1',
+      worldQuad: [
+        [0, 0, 0],
+        [0.2, 0, 0],
+        [0.2, 0.3, 0],
+        [0, 0.3, 0],
+      ],
+      shape: 'box',
+      orient: 'plane',
+      imageUri: 'file:///tmp/packshot.png',
+      badgePlacement: 'plane',
+    };
+    expect(flat.badgePlacement).toBe('plane');
   });
 
   it('models a badge drawn at twice the default size (imageScale 2)', () => {
@@ -161,8 +181,18 @@ describe('AROverlay contract extension — types', () => {
       // @ts-expect-error — imageScale is a number, not a boolean.
       imageScale: true,
     };
-    expect([bad1.id, bad2.id, bad3.id, bad4.id, bad5.id, bad6.id, bad7.id])
-      .toEqual(['x', 'y', 'z', 'w', 'v', 'u', 't']);
+    const bad8: AROverlay = {
+      id: 's',
+      // @ts-expect-error — badgePlacement is a closed union.
+      badgePlacement: 'flat',
+    };
+    const bad9: AROverlay = {
+      id: 'r',
+      // @ts-expect-error — badgePlacement is a string, not a boolean.
+      badgePlacement: true,
+    };
+    expect([bad1.id, bad2.id, bad3.id, bad4.id, bad5.id, bad6.id, bad7.id, bad8.id, bad9.id])
+      .toEqual(['x', 'y', 'z', 'w', 'v', 'u', 't', 's', 'r']);
   });
 });
 
@@ -183,6 +213,7 @@ describe('AROverlay contract extension — controller dispatch', () => {
       imageScale: 2,
       orient: 'camera',
       depthOcclusion: true,
+      badgePlacement: 'plane',
     };
     c.setOverlays([overlay]);
     expect(setOverlaysSpy).toHaveBeenCalledTimes(1);
@@ -196,6 +227,8 @@ describe('AROverlay contract extension — controller dispatch', () => {
     // Opt-in selects the new depth-occlusion scheme on the native side —
     // the flag must arrive exactly as set.
     expect(sent[0].depthOcclusion).toBe(true);
+    // The badge opt-in reaches native as sent.
+    expect(sent[0].badgePlacement).toBe('plane');
   });
 
   it('does NOT materialise absent fields (absent = native default is the contract)', () => {
@@ -213,5 +246,9 @@ describe('AROverlay contract extension — controller dispatch', () => {
     // (false) selects the legacy pre-`depthOcclusion` rendering pipeline
     // for it — pre-existing box overlays are visually unchanged.
     expect('depthOcclusion' in sent[0]).toBe(false);
+    // The badgePlacement back-compat guarantee (round-3 production review
+    // MEDIUM-1): absent ⇒ iOS draws the pre-field camera-facing badge on the
+    // box's own tier, byte-identical to every build before the field.
+    expect('badgePlacement' in sent[0]).toBe(false);
   });
 });

@@ -22,6 +22,7 @@
 //     label?: string;
 //     imageUri?: string;                           // image badge inside a box
 //     imageScale?: number;                         // badge size ×; default 1
+//     badgePlacement?: 'plane' | 'camera';         // default 'camera' (legacy badge)
 //     color?: string;                              // hex; default theme color
 //     mode?: '2d' | '3d';                          // default '2d'; '3d' SCAFFOLD only
 //     orient?: 'plane' | 'camera';                 // default 'plane'
@@ -124,6 +125,25 @@ public struct RNISAROverlay: Equatable {
     /// `imageScale` and `badgeExtent(shortSide:imageScale:)`.
     public let imageScale: CGFloat
 
+    /// Where the `imageUri` badge sits — AROverlay.ts `badgePlacement`.
+    ///
+    /// `.camera` (DEFAULT — the key absent, or any value but `'plane'`): the
+    /// badge every build before the field drew, byte-for-byte — a
+    /// camera-facing billboard on the box's tier, lifted along the box normal.
+    ///
+    /// `.plane` (OPT-IN, `badgePlacement: 'plane'`): on an `orient:'plane'`
+    /// quad the badge lies IN the quad's plane and foreshortens with it
+    /// (`RNSARCameraView.makeQuadOutlineNode`), and on EITHER box it draws one
+    /// tier above its box's visible parts, so its own box's fill never tints
+    /// it.  See `RNSARCameraView.makeBadgeImageNode` for why each is opt-in.
+    public enum BadgePlacement: String {
+        case camera
+        case plane
+    }
+
+    /// See `BadgePlacement`.  Default `.camera` = the pre-field badge.
+    public let badgePlacement: BadgePlacement
+
     /// Stroke / label color.  Defaults to a theme color when the JS hex
     /// is absent / unparseable.
     public let color: UIColor
@@ -135,8 +155,10 @@ public struct RNISAROverlay: Equatable {
     /// `orient == 'camera'` on a `.box` `worldQuad` overlay ⇒ draw the box
     /// as a camera-facing, screen-upright BILLBOARD (sized by the quad's
     /// edges at its centroid) instead of a plane-oriented outline.  Default
-    /// false = 'plane' = byte-identical to every pre-`orient` build.  See
-    /// AROverlay.ts `orient`.
+    /// false = 'plane' = byte-identical to every pre-`orient` build, its
+    /// `imageUri` badge included — the badge changes only when the overlay
+    /// ALSO opts in with `badgePlacement: 'plane'` (see `badgePlacement`).
+    /// See AROverlay.ts `orient`.
     public let billboard: Bool
 
     /// Opt-in for the renderer's box-vs-box depth-occlusion scheme on a
@@ -167,7 +189,10 @@ public struct RNISAROverlay: Equatable {
         depthOcclusion: Bool = false,
         // Trailing + defaulted like its siblings: native-plugin SPI call sites
         // keep compiling and keep the 1× badge.
-        imageScale: CGFloat = RNISAROverlay.defaultImageScale
+        imageScale: CGFloat = RNISAROverlay.defaultImageScale,
+        // Same rule: an SPI call site that never heard of the field keeps the
+        // pre-field camera-facing badge.
+        badgePlacement: BadgePlacement = .camera
     ) {
         self.id = id
         self.worldPosition = worldPosition
@@ -180,6 +205,7 @@ public struct RNISAROverlay: Equatable {
         self.imageUri = imageUri
         self.billboard = billboard
         self.depthOcclusion = depthOcclusion
+        self.badgePlacement = badgePlacement
         // Sanitise HERE (not just in `from(dictionary:)`) so the 0...1
         // invariant holds for the native-plugin path too — this is the one
         // funnel every overlay passes through.
@@ -328,8 +354,16 @@ public struct RNISAROverlay: Equatable {
         // the range (fallback-not-clip).
         let imageScale = numeric(dict["imageScale"]) ?? defaultImageScale
         // `orient: 'camera'` ⇒ billboard.  Any other / absent value ⇒ 'plane'
-        // (false) ⇒ byte-identical to pre-`orient` builds.
+        // (false) ⇒ byte-identical to pre-`orient` builds — the box AND its
+        // badge, unless `badgePlacement` below opts the badge in.
         let billboard = (dict["orient"] as? String) == "camera"
+        // `badgePlacement: 'plane'` — the ONLY value that opts in (a string,
+        // exactly).  Absent, 'camera', any other string or any non-string ⇒
+        // `.camera`, the pre-field badge: a malformed value can never change
+        // how a pre-existing consumer's badge draws (fallback-not-coerce, as
+        // `depthOcclusion`).
+        let badgePlacement: BadgePlacement =
+            (dict["badgePlacement"] as? String) == BadgePlacement.plane.rawValue ? .plane : .camera
         // `depthOcclusion` — genuine-boolean gate (fallback-not-clip, the
         // mirror of `numeric`'s boolean REJECTION): only a real bridged
         // boolean opts in.  A number, string, or any other nonsense falls
@@ -357,7 +391,8 @@ public struct RNISAROverlay: Equatable {
             imageUri: imageUri,
             billboard: billboard,
             depthOcclusion: depthOcclusion,
-            imageScale: imageScale
+            imageScale: imageScale,
+            badgePlacement: badgePlacement
         )
     }
 
@@ -447,11 +482,16 @@ public struct RNISAROverlay: Equatable {
 ///   * `imageScale` — parsed (`RNISAROverlay.from(dictionary:)`) and drawn by both box
 ///     builders through `RNISAROverlay.badgeExtent`; a value outside
 ///     `[min, max]` renders at `default`, not clipped.
-///   * `flatPlaneBadge` — an `orient:'plane'` quad's badge lies IN the quad's
-///     plane and foreshortens with it (`RNSARCameraView.makeQuadOutlineNode`),
-///     instead of billboarding and spilling past an oblique box. iOS only:
-///     Android sizes its badge from the projected screen box, which never
-///     spilled, so it does not list it.
+///   * `flatPlaneBadge` — the overlay's `badgePlacement: 'plane'` opt-in is
+///     honoured (`RNISAROverlay.BadgePlacement`): an `orient:'plane'` quad's
+///     badge lies IN the quad's plane and foreshortens with it
+///     (`RNSARCameraView.makeQuadOutlineNode`) instead of billboarding and
+///     spilling past an oblique box, and on either box the badge draws one
+///     tier above its own box's fill.  WITHOUT the key every badge draws
+///     exactly as before the feature.  iOS only: Android sizes its badge from
+///     the projected screen box, which never spilled, and draws it after the
+///     fill already, so it does not list it (its badge draws the same whatever
+///     the key says).
 public enum RNISAROverlayFeatures {
     public static let contract = "arOverlayFeatures/1"
     public static let platform = "ios"

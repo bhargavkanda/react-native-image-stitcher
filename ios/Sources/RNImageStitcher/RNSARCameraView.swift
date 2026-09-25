@@ -315,7 +315,8 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
                     fillAlpha: overlay.fillAlpha, strokeAlpha: overlay.strokeAlpha,
                     imageUri: overlay.imageUri,
                     imageScale: overlay.imageScale,
-                    depthOcclusion: overlay.depthOcclusion)
+                    depthOcclusion: overlay.depthOcclusion,
+                    badgePlacement: overlay.badgePlacement)
             }
             return Self.makeQuadOutlineNode(
                 relCorners: rel,
@@ -325,7 +326,8 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
                 imageUri: overlay.imageUri,
                 imageScale: overlay.imageScale,
                 camDir: camDir,
-                depthOcclusion: overlay.depthOcclusion)
+                depthOcclusion: overlay.depthOcclusion,
+                badgePlacement: overlay.badgePlacement)
         }
         return Self.makeBillboardNode(
             sizeMeters: overlay.sizeMeters, color: overlay.color,
@@ -489,11 +491,14 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
     /// TWO ORIENTATIONS (round-2 colours review MEDIUM-1, 2026-09-24):
     ///
     ///  • `flat == nil` — fully billboarded (`.all`), EXACTLY as every build
-    ///    before it: the node the gravity-up/yaw-to-camera box
-    ///    (`makeBillboardBoxNode`) draws.  That box never foreshortens, so a
-    ///    camera-facing badge sized from it stays inside it at every angle.
+    ///    before it.  The node for EVERY badge whose overlay did not opt in
+    ///    (`badgePlacement` absent), on either box, and for the
+    ///    gravity-up/yaw-to-camera box (`makeBillboardBoxNode`) always: that
+    ///    box never foreshortens, so a camera-facing badge sized from it stays
+    ///    inside it at every angle.
     ///  • `flat != nil` — laid IN the quad's plane (`makeQuadOutlineNode`, the
-    ///    `orient:'plane'` path): no constraint, oriented by the frame.  A
+    ///    `orient:'plane'` path, ONLY with `badgePlacement: 'plane'` and a
+    ///    known camera direction): no constraint, oriented by the frame.  A
     ///    plane box foreshortens by cos θ with the surface, and a billboarded
     ///    badge sized from its in-plane short side did not: measured at 0.8 m,
     ///    from ~55° off-axis the badge poked out of its box at both scales,
@@ -501,6 +506,29 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
     ///    aisles reach 73°) 35–51% of a 2× badge lay outside it.  Parallel
     ///    to the box (lifted 3 mm along the view ray, see the caller), it
     ///    foreshortens exactly as the box does and stays inside it.
+    ///
+    /// OPT-IN, NOT DEFAULT (round-3 production review MEDIUM-1, 2026-09-25).
+    /// The flat badge first shipped as the `orient:'plane'` default, which
+    /// changed every public consumer's badge — and the host's own flag-off
+    /// render — without asking: it narrows to cos θ of its old width on
+    /// screen (0.57 at 55°, 0.29 at 73°) and stays upright to gravity rather
+    /// than to the screen when the phone rolls.  A consumer now asks for it
+    /// per overlay; without the key this node is the pre-feature billboard.
+    ///
+    /// `renderingOrder` — the tier (default `overlayOrder`, the pre-feature
+    /// value).  A caller passes `badgeOverFillOrder` for an opted-in overlay
+    /// (round-3 iOS review M1): on the SAME tier as an opted-in
+    /// (`depthOcclusion`) box's translucent fill, the fill drew OVER the
+    /// badge — an opaque packshot (315 of the 387 catalogue packshots have alpha
+    /// 255 everywhere) is classified opaque and drawn in the opaque pass,
+    /// BEFORE the fill, on every box at every angle; one with transparency
+    /// went through the back-to-front sort and was covered from ~30° when
+    /// its corner was the far one.  Measured in offscreen SceneKit (Metal)
+    /// with this file's nodes and materials: blue over the packshot 0.645 as
+    /// shipped vs 0.552 clean; one tier up, 0 tint at every pose.  Opt-in
+    /// only, because a tier change is a render change for every consumer
+    /// (a farther box's badge then draws over a nearer box's fill, which is
+    /// this function's "a badge of an occluded box still shows" rule).
     ///
     /// Keeps depth read AND write OFF, deliberately.  A billboarded badge is
     /// NOT parallel to the quad it annotates, so at a grazing angle it
@@ -512,7 +540,8 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
     /// The caller offsets it towards the viewer so the transparent sort puts
     /// it last within its own box.
     private static func makeBadgeImageNode(
-        image: UIImage, extent: CGFloat, flat: BadgePlaneFrame? = nil
+        image: UIImage, extent: CGFloat, flat: BadgePlaneFrame? = nil,
+        renderingOrder: Int = RNSARCameraView.overlayOrder
     ) -> SCNNode {
         let ar = image.size.height > 0 ? image.size.width / image.size.height : 1
         let w = ar >= 1 ? extent : extent * ar
@@ -527,7 +556,9 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
         plane.firstMaterial = mat
 
         let node = SCNNode(geometry: plane)
-        node.renderingOrder = overlayOrder  // ONE tier for every visible part
+        // ONE tier for every visible part (`overlayOrder`) unless an opted-in
+        // overlay asked for the badge-over-fill tier — see the doc comment.
+        node.renderingOrder = renderingOrder
         if let f = flat {
             // In the quad's plane: SCNPlane spans its local XY and faces +Z,
             // so the frame's columns ARE the node's axes.  No constraint —
@@ -632,8 +663,9 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
     // likewise keep depth read OFF: they are chrome, they are small, and a
     // billboarded badge intersects the plane it annotates at a grazing
     // angle, so depth-reading it would clip the badge in half rather than
-    // occlude it.  (A plane quad's badge lies flat in its quad and cannot
-    // intersect it; it keeps the same rule so both orientations sort alike.)
+    // occlude it.  (An opted-in plane quad's badge — `badgePlacement:
+    // 'plane'` — lies flat in its quad and cannot intersect it; it keeps the
+    // same rule so both orientations sort alike.)
     //
     // MIXED SCENES: occlusion is strictly BETWEEN opted-in boxes.  A
     // non-opted-in box writes no depth (it cannot occlude an opted-in box)
@@ -642,6 +674,15 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
     // that did not set it.
     private static let depthWriterOrder = 999
     private static let overlayOrder = 1001
+    /// The tier of a badge whose overlay opted in with `badgePlacement:
+    /// 'plane'` (round-3 iOS review M1): one above `overlayOrder`, so it is
+    /// drawn after — over — its own box's fill, stroke and every other box's
+    /// visible parts, whichever pass (opaque / transparent) SceneKit files
+    /// its image in.  A badge that did not opt in stays on `overlayOrder`,
+    /// the pre-feature tier (see `makeBadgeImageNode`).  Depth read/write
+    /// stay off, so the "strictly two tiers of DEPTH" invariant above is
+    /// unchanged: this tier writes and reads nothing.
+    private static let badgeOverFillOrder = overlayOrder + 1
     /// Legacy per-part tiers for a `.box` that has NOT opted into depth
     /// occlusion (`depthOcclusion` absent/false — every pre-existing public
     /// consumer): fill under edges, exactly the pre-`depthOcclusion`
@@ -838,7 +879,8 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
         strokeAlpha: CGFloat,
         imageUri: String?,
         imageScale: CGFloat = RNISAROverlay.defaultImageScale,
-        depthOcclusion: Bool = false
+        depthOcclusion: Bool = false,
+        badgePlacement: RNISAROverlay.BadgePlacement = .camera
     ) -> SCNNode {
         // Box dims from the quad's own in-plane basis: the edge lengths are
         // the metric width/height whatever the quad's orientation, so the box
@@ -918,10 +960,18 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
         // sizing as the plane-oriented path (≈26% of the shorter side ×
         // `imageScale`, clamped — `RNISAROverlay.badgeExtent`, the one rule
         // both paths ask).
+        //
+        // `badgePlacement: 'plane'` changes ONLY the tier here (round-3 iOS
+        // review M1: the fill above sits on `overlayOrder` too and drew over
+        // the packshot).  The orientation does not change: this
+        // box already faces the camera, so a camera-facing badge IS in its
+        // plane.  Absent ⇒ `overlayOrder`, the pre-field node exactly.
         if let uri = imageUri, w > 0.012, h > 0.012, let img = badgeImage(uri) {
             let extent = RNISAROverlay.badgeExtent(shortSide: min(w, h), imageScale: imageScale)
             let pad = Float(extent) * 0.25
-            let badge = makeBadgeImageNode(image: img, extent: extent)
+            let badge = makeBadgeImageNode(
+                image: img, extent: extent,
+                renderingOrder: badgePlacement == .plane ? badgeOverFillOrder : overlayOrder)
             badge.simdPosition = simd_float3(
                 Float(-w / 2) + Float(extent) / 2 + pad,
                 Float(-h / 2) + Float(extent) / 2 + pad,
@@ -953,7 +1003,8 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
         imageUri: String? = nil,
         imageScale: CGFloat = RNISAROverlay.defaultImageScale,
         camDir: simd_float3? = nil,
-        depthOcclusion: Bool = false
+        depthOcclusion: Bool = false,
+        badgePlacement: RNISAROverlay.BadgePlacement = .camera
     ) -> SCNNode {
         let node = SCNNode()
         node.renderingOrder = overlayOrder
@@ -1046,15 +1097,36 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
                 // — `RNISAROverlay.badgeExtent`, shared with the billboard path.
                 let extent = RNISAROverlay.badgeExtent(shortSide: min(qw, qh), imageScale: imageScale)
                 let pad = Float(extent) * 0.25
-                // FLAT in the quad's plane (round-2 colours review
-                // MEDIUM-1): a billboarded badge sized from the IN-PLANE short
-                // side did not foreshorten with the box and spilled past it
-                // from ~55° off-axis.  In the plane, its extent + inset
-                // (≤ 0.65 of the short side at `imageScale` 2) is inside the
-                // box at every angle.  A degenerate frame (never, for a basis
-                // `quadBasis` returned) falls back to the billboard.
-                let frame = badgePlaneFrame(up: up, front: b.front)
-                let badge = makeBadgeImageNode(image: img, extent: extent, flat: frame)
+                // DEFAULT (`badgePlacement` absent): the pre-feature badge
+                // EXACTLY — the camera-facing billboard node on `overlayOrder`,
+                // lifted along the camera-signed normal (`front`).  Nothing in
+                // this branch changed for a consumer that did not opt in
+                // (round-3 production review MEDIUM-1).
+                //
+                // OPT-IN (`badgePlacement: 'plane'`): FLAT in the quad's plane
+                // (round-2 colours review MEDIUM-1) — a billboarded badge
+                // sized from the IN-PLANE short side did not foreshorten with
+                // the box and spilled past it from ~55° off-axis; in the
+                // plane its extent + inset (≤ 0.65 of the short side at
+                // `imageScale` 2) is inside the box at every angle — and one
+                // tier above the box (`badgeOverFillOrder`, round-3 iOS review
+                // M1), so the box's own fill never tints it.
+                //
+                // FLAT ONLY WITH A CAMERA DIRECTION (round-3 iOS review L1).
+                // Without `camDir` (no `pointOfView`, or the camera within
+                // 0.1 mm of the centroid) `front` is the winding's own normal,
+                // unsigned: a flat frame built on it read MIRRORED for every
+                // reversed winding (6,660 of 13,320 probe cases) and its
+                // normal lift carried it off the box again (up to 100% at 1×).
+                // It then falls back to the billboard, which cannot mirror.
+                // A degenerate frame (never, for a basis `quadBasis` returned)
+                // falls back the same way.  The tier stays opted in either way.
+                let optedIn = badgePlacement == .plane
+                let frame = (optedIn && camDir != nil)
+                    ? badgePlaneFrame(up: up, front: b.front) : nil
+                let badge = makeBadgeImageNode(
+                    image: img, extent: extent, flat: frame,
+                    renderingOrder: optedIn ? badgeOverFillOrder : overlayOrder)
                 // Lifted `2 * layerGapM` towards the viewer — one tier above
                 // the stroke in the transparent sort, for the same tie-break
                 // reason as the stroke — at the in-plane corner it always had.
@@ -1066,10 +1138,9 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
                 // views to 75°: up to 71% of the badge outside it, 81% once
                 // the camera moved ±20 cm without a rebuild), while a lift
                 // along the ray does not move it on screen (0.0% in both).
-                // It is still 3 mm nearer, so the
-                // sort tie-break holds — better than before at an angle.  The
-                // billboard fallback (no frame; never for a real basis) and a
-                // build with no camera direction keep the normal lift.
+                // It is still 3 mm nearer, so the sort tie-break holds.  Every
+                // billboard badge — the default, and an opted-in one without a
+                // frame — keeps the normal lift it always had.
                 let lift = (frame != nil ? camDir : nil) ?? front
                 badge.simdPosition =
                     right * (minR + Float(extent) / 2 + pad)

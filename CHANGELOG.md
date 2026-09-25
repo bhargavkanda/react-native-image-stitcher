@@ -48,20 +48,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`RNSARSession.overlayFeatures()`** (iOS) — the same `arOverlayFeatures/1`
   shape with `platform: 'ios'` and `features: ['imageScale', 'flatPlaneBadge']`
   (`RNISAROverlayFeatures.describe()`). No data parameter, never rejects.
+  `flatPlaneBadge` means the build honours `badgePlacement: 'plane'` (below).
+- **`AROverlay.badgePlacement`** (iOS) — an opt-in for where the `imageUri`
+  badge sits. Omitted (or `'camera'`, or any other value), every badge draws
+  exactly as before: a camera-facing billboard on its box's draw tier, lifted
+  along the box normal. `'plane'` changes two things:
+  - On an `orient: 'plane'` quad the badge lies flat in the quad's plane
+    (upright along world-up projected into the plane, reading unmirrored from
+    the viewer's side whatever the corner winding) and is lifted 3 mm along
+    the view ray rather than the quad normal. A billboarded badge sized from
+    the quad's in-plane short side does not foreshorten with the box: from
+    ~55° off-axis it pokes out of its box, and at `imageScale` 2 it is wider
+    than the whole box from 60°. Flat, it stays inside the box at every angle.
+    It is flat only when the camera direction is known as the node is built
+    (with no direction the normal's sign depends on the corner winding and a
+    flat badge would read mirrored); otherwise it stays a billboard.
+  - On either orientation the badge draws one tier above its box
+    (`renderingOrder` 1002), so a `depthOcclusion` box's translucent fill,
+    which shares the box tier, no longer draws over it. On the shared tier an
+    opaque packshot was covered at every angle and one with transparency from
+    ~30° when its corner was the far one.
 
-### Changed
-
-- **iOS: a plane-oriented box's badge lies flat in the box** (`flatPlaneBadge`).
-  An `orient: 'plane'` quad's `imageUri` badge was a camera-facing billboard
-  sized from the quad's in-plane short side, so it did not foreshorten with
-  the box: from ~55° off-axis it poked out of its box, and at `imageScale` 2 it
-  was wider than the whole box from 60°. It is now laid in the quad's plane
-  (upright along world-up projected into the plane, reading unmirrored from
-  the viewer's side whatever the corner winding) and lifted 3 mm along the
-  view ray rather than the quad normal, so it stays inside its box at every
-  angle. Same size, the same inset corner as before, same depth rules. The
-  `orient: 'camera'` (billboard) box and its badge are unchanged, and Android
-  (which sizes the badge from the projected screen box) is unchanged.
+  It is opt-in because both are visible changes: a flat badge narrows on
+  screen by cos θ (0.57× at 55°, 0.29× at 73°) and stays upright to gravity
+  rather than to the screen when the phone rolls, and a farther box's badge
+  now draws over a nearer box's fill. Same size, same inset corner, same depth
+  rules. Android draws its badge the same whatever the key says: it sizes the
+  badge from the projected screen box and draws it after the fill already.
 
 ### Changed (BREAKING)
 

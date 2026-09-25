@@ -94,11 +94,8 @@ export interface AROverlay {
    * `file://` path (or plain filesystem path); the native renderers decode
    * and CACHE it by URI and silently ignore an undecodable file (the box
    * then draws without it).  When present it REPLACES the centroid `label`.
-   * iOS: on an `orient: 'plane'` quad the badge lies FLAT in the box's plane
-   * and foreshortens with it (it was a camera-facing billboard that spilled
-   * past an oblique box); on `orient: 'camera'` it faces the camera like its
-   * box.  `RNSARSession.overlayFeatures()` lists `'flatPlaneBadge'` on a
-   * build that does this.
+   * iOS draws it as a camera-facing billboard unless the overlay opts in
+   * with {@link badgePlacement} `'plane'`.
    */
   imageUri?: string;
 
@@ -117,6 +114,36 @@ export interface AROverlay {
    * rather than being clipped.  Ignored without an `imageUri`.
    */
   imageScale?: number;
+
+  /**
+   * Where the {@link imageUri} badge sits (iOS renderer).  Omitted (or
+   * `'camera'`, or any other value) = the badge exactly as every build before
+   * the field drew it: a camera-facing billboard on the box's own draw tier.
+   *
+   * `'plane'` — opt-in, two changes:
+   *
+   *   - on an `orient: 'plane'` quad the badge lies FLAT in the box's plane,
+   *     upright along world-up projected into that plane and unmirrored from
+   *     the viewer's side, and foreshortens with the box.  A billboarded badge
+   *     sized from the box's in-plane short side does not foreshorten, so from
+   *     ~55° off-axis it pokes out of its box (at `imageScale` 2 it is wider
+   *     than the whole box from 60°).  Flat, it stays inside at every angle —
+   *     but it narrows on screen by cos θ (0.57× at 55°) and stays upright to
+   *     gravity rather than to the screen when the phone rolls, which is why it
+   *     is opt-in.  It needs the camera direction when the box's node is built;
+   *     without one the badge stays a billboard.
+   *   - on EITHER orientation the badge draws one tier above its box, so a
+   *     `depthOcclusion` box's translucent fill never tints it (on the shared
+   *     tier the fill drew over an opaque packshot at every angle).  A farther
+   *     box's badge then also draws over a nearer box's fill — badges never
+   *     take part in occlusion.
+   *
+   * `RNSARSession.overlayFeatures()` lists `'flatPlaneBadge'` on a build that
+   * honours the key.  Ignored without an `imageUri`.  Android's screen-space
+   * renderer draws its badge the same whatever the key says (it sizes the
+   * badge from the projected box and draws it after the fill already).
+   */
+  badgePlacement?: 'plane' | 'camera';
 
   /**
    * Stroke / fill colour as a hex string (e.g. `'#00E5FF'`).  Defaults to a
@@ -155,8 +182,9 @@ export interface AROverlay {
    * Orientation of a `worldQuad` `'box'` overlay (iOS renderer).  Default
    * `'plane'` — the box is drawn in the plane of its world corners (tilts
    * and foreshortens with the surface it marks), matching every pre-`orient`
-   * build byte-for-byte except its {@link imageUri} badge, which now lies in
-   * the same plane (`flatPlaneBadge`).  `'camera'` re-orients the box to FACE THE CAMERA
+   * build byte-for-byte, its {@link imageUri} badge included (the badge lies
+   * in the box's plane only with {@link badgePlacement} `'plane'`).
+   * `'camera'` re-orients the box to FACE THE CAMERA
    * and stay gravity-upright on screen regardless of the quad's orientation
    * (a billboard sized by the quad's own edge lengths at its centroid) —
    * for a live detection box that must stay readable when the fitted plane
