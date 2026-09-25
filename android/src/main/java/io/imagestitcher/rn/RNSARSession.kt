@@ -435,6 +435,31 @@ class RNSARSession(reactContext: ReactApplicationContext)
         view.clearOverlaysFromJs()
     }
 
+    // The OPTIONAL overlay fields this native build honours — see
+    // [AROverlayFeatures] for the shape and why (a JS `imageScale` sent to a
+    // native side that predates it is silently drawn at 1×, so the host must
+    // not record what it ASKED as what was DRAWN).  A property of the build,
+    // not of a session: it resolves whether or not an AR view is bound, and
+    // it never rejects.  Method absent ⇒ the host records "unknown".
+    @ReactMethod
+    fun overlayFeatures(promise: Promise) {
+        val d = AROverlayFeatures.describe()
+        val out = Arguments.createMap()
+        out.putString("contract", AROverlayFeatures.CONTRACT)
+        out.putString("platform", AROverlayFeatures.PLATFORM)
+        out.putArray(
+            "features",
+            Arguments.createArray().apply { for (f in AROverlayFeatures.FEATURES) pushString(f) },
+        )
+        @Suppress("UNCHECKED_CAST")
+        val scale = d[AROverlayFeatures.IMAGE_SCALE] as Map<String, Double>
+        out.putMap(
+            AROverlayFeatures.IMAGE_SCALE,
+            Arguments.createMap().apply { for ((k, v) in scale) putDouble(k, v) },
+        )
+        promise.resolve(out)
+    }
+
     // v0.20.0 — raycast from the screen-centre crosshair to the nearest real
     // surface; resolves `{ worldPosition: [x,y,z] }` or null.  The hitTest
     // needs the live ARCore frame on the GL thread, so the view fulfils it on

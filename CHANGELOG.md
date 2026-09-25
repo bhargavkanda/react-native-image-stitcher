@@ -29,6 +29,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`RNISAROverlay.badgeExtent` on iOS, `AROverlayImageScale.badgeExtentPx` on
   Android), and both box builders on iOS call it. Android's `updateOverlay`
   patch path carries the field like its siblings.
+- **`RNSARSession.overlayFeatures()`** (Android) — resolves the optional
+  overlay fields this native build honours, so a host can record what native
+  DREW rather than what JS asked (a native side older than `imageScale`
+  ignores the key and draws at 1×):
+  `{ contract: 'arOverlayFeatures/1', platform: 'android', features: ['imageScale'], imageScale: { min: 0.25, max: 2.5, default: 1 } }`.
+  A field is listed only once both the parser and the renderer honour it. It
+  is a property of the build: it resolves whether or not an AR view is bound,
+  and never rejects. Method absent ⇒ the build predates the report (unknown).
+  The iOS side must resolve the same shape (`platform: 'ios'`).
 
 ### Changed (BREAKING)
 
