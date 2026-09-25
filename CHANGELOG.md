@@ -38,6 +38,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is a property of the build: it resolves whether or not an AR view is bound,
   and never rejects. Method absent ⇒ the build predates the report (unknown).
   The iOS side must resolve the same shape (`platform: 'ios'`).
+- **`RNSARSession.overlayFeatures()`** (iOS) — the same `arOverlayFeatures/1`
+  shape with `platform: 'ios'` and `features: ['imageScale', 'flatPlaneBadge']`
+  (`RNISAROverlayFeatures.describe()`). No data parameter, never rejects.
+
+### Changed
+
+- **iOS: a plane-oriented box's badge lies flat in the box** (`flatPlaneBadge`).
+  An `orient: 'plane'` quad's `imageUri` badge was a camera-facing billboard
+  sized from the quad's in-plane short side, so it did not foreshorten with
+  the box: from ~55° off-axis it poked out of its box, and at `imageScale` 2 it
+  was wider than the whole box from 60°. It is now laid in the quad's plane
+  (upright along world-up projected into the plane, reading unmirrored from
+  the viewer's side whatever the corner winding) and lifted 3 mm along the
+  view ray rather than the quad normal, so it stays inside its box at every
+  angle. Same size, the same inset corner as before, same depth rules. The
+  `orient: 'camera'` (billboard) box and its badge are unchanged, and Android
+  (which sizes the badge from the projected screen box) is unchanged.
 
 ### Changed (BREAKING)
 

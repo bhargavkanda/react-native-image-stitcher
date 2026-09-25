@@ -456,26 +456,63 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
         return img
     }
 
-    /// A camera-facing plane textured with the overlay's badge image (no
-    /// outline, no label).  Aspect-preserving: the image fits INSIDE
-    /// `extent` so a tall image and a wide one both read correctly instead
-    /// of being squashed to a square.
+    /// The frame a badge lies in when it is laid FLAT in a plane-oriented
+    /// quad (`makeBadgeImageNode(flat:)`): three orthonormal axes, node-local
+    /// to the quad's parent.  `x` × `y` = `z` (a rotation, never a
+    /// reflection), `z` points at the viewer, so the image reads unmirrored.
+    struct BadgePlaneFrame {
+        let x: simd_float3
+        let y: simd_float3
+        let z: simd_float3
+    }
+
+    /// The flat-badge frame for a quad basis: +Y = the basis's `up` (world-up
+    /// projected into the quad's plane, so the image stays gravity-upright
+    /// within the surface), +Z = `front` (the quad normal signed towards the
+    /// camera), +X = `up × front` — the VIEWER's right whatever the
+    /// producer's corner winding (the basis's own `right` is `up × normal`,
+    /// which is the viewer's LEFT when `front` is the flipped normal; an
+    /// image mapped onto it would read mirrored).  nil when the cross
+    /// product degenerates (never for a basis `quadBasis` returned).
+    static func badgePlaneFrame(up: simd_float3, front: simd_float3) -> BadgePlaneFrame? {
+        let c = simd_cross(up, front)
+        let len = simd_length(c)
+        guard len.isFinite, len > 1e-6 else { return nil }
+        return BadgePlaneFrame(x: c / len, y: up, z: front)
+    }
+
+    /// A plane textured with the overlay's badge image (no outline, no
+    /// label).  Aspect-preserving: the image fits INSIDE `extent` so a tall
+    /// image and a wide one both read correctly instead of being squashed to
+    /// a square.
     ///
-    /// Stays fully billboarded (`.all`): this is a small identification
-    /// BADGE, not the marked object itself — it should read the same however
-    /// the surface is angled, and a badge that rolls with the device is
-    /// exactly what "screen-upright" means for 2-D chrome.
+    /// TWO ORIENTATIONS (round-2 colours review MEDIUM-1, 2026-09-24):
     ///
-    /// Keeps depth read AND write OFF, deliberately.  A camera-facing badge
-    /// is NOT parallel to the quad it annotates, so at a grazing angle it
+    ///  • `flat == nil` — fully billboarded (`.all`), EXACTLY as every build
+    ///    before it: the node the gravity-up/yaw-to-camera box
+    ///    (`makeBillboardBoxNode`) draws.  That box never foreshortens, so a
+    ///    camera-facing badge sized from it stays inside it at every angle.
+    ///  • `flat != nil` — laid IN the quad's plane (`makeQuadOutlineNode`, the
+    ///    `orient:'plane'` path): no constraint, oriented by the frame.  A
+    ///    plane box foreshortens by cos θ with the surface, and a billboarded
+    ///    badge sized from its in-plane short side did not: measured at 0.8 m,
+    ///    from ~55° off-axis the badge poked out of its box at both scales,
+    ///    at 2× it was wider than the whole box from 60°, and at 70–75° (real
+    ///    aisles reach 73°) 35–51% of a 2× badge lay outside it.  Parallel
+    ///    to the box (lifted 3 mm along the view ray, see the caller), it
+    ///    foreshortens exactly as the box does and stays inside it.
+    ///
+    /// Keeps depth read AND write OFF, deliberately.  A billboarded badge is
+    /// NOT parallel to the quad it annotates, so at a grazing angle it
     /// intersects that plane; depth-reading it would slice the badge in half
-    /// against its own box's writer instead of occluding it.  The price is
-    /// that a badge belonging to an occluded box still shows — a ≤5 cm chip,
-    /// and strictly better than the whole box showing.  The caller offsets
-    /// it towards the viewer so the transparent sort puts it last within its
-    /// own box.
+    /// against its own box's writer instead of occluding it.  A flat badge
+    /// keeps the same chrome rule so both orientations sort alike.  The price
+    /// is that a badge belonging to an occluded box still shows — a ≤5 cm
+    /// chip (×`imageScale`), and strictly better than the whole box showing.
+    /// The caller offsets it towards the viewer so the transparent sort puts
+    /// it last within its own box.
     private static func makeBadgeImageNode(
-        image: UIImage, extent: CGFloat
+        image: UIImage, extent: CGFloat, flat: BadgePlaneFrame? = nil
     ) -> SCNNode {
         let ar = image.size.height > 0 ? image.size.width / image.size.height : 1
         let w = ar >= 1 ? extent : extent * ar
@@ -491,9 +528,17 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
 
         let node = SCNNode(geometry: plane)
         node.renderingOrder = overlayOrder  // ONE tier for every visible part
-        let billboard = SCNBillboardConstraint()
-        billboard.freeAxes = .all          // always face the camera, flat
-        node.constraints = [billboard]
+        if let f = flat {
+            // In the quad's plane: SCNPlane spans its local XY and faces +Z,
+            // so the frame's columns ARE the node's axes.  No constraint —
+            // the anchor is translation-only, so this stays in the surface
+            // as the camera moves, foreshortening with the box.
+            node.simdOrientation = simd_quatf(simd_float3x3(columns: (f.x, f.y, f.z)))
+        } else {
+            let billboard = SCNBillboardConstraint()
+            billboard.freeAxes = .all          // always face the camera, flat
+            node.constraints = [billboard]
+        }
         return node
     }
 
@@ -587,7 +632,8 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
     // likewise keep depth read OFF: they are chrome, they are small, and a
     // billboarded badge intersects the plane it annotates at a grazing
     // angle, so depth-reading it would clip the badge in half rather than
-    // occlude it.
+    // occlude it.  (A plane quad's badge lies flat in its quad and cannot
+    // intersect it; it keeps the same rule so both orientations sort alike.)
     //
     // MIXED SCENES: occlusion is strictly BETWEEN opted-in boxes.  A
     // non-opted-in box writes no depth (it cannot occlude an opted-in box)
@@ -1000,14 +1046,35 @@ public final class RNSARCameraView: UIView, ARSCNViewDelegate {
                 // — `RNISAROverlay.badgeExtent`, shared with the billboard path.
                 let extent = RNISAROverlay.badgeExtent(shortSide: min(qw, qh), imageScale: imageScale)
                 let pad = Float(extent) * 0.25
-                let badge = makeBadgeImageNode(image: img, extent: extent)
-                // `front * 2 * layerGapM` — one tier above the stroke in the
-                // transparent sort, for the same tie-break reason as the
-                // stroke.
+                // FLAT in the quad's plane (round-2 colours review
+                // MEDIUM-1): a billboarded badge sized from the IN-PLANE short
+                // side did not foreshorten with the box and spilled past it
+                // from ~55° off-axis.  In the plane, its extent + inset
+                // (≤ 0.65 of the short side at `imageScale` 2) is inside the
+                // box at every angle.  A degenerate frame (never, for a basis
+                // `quadBasis` returned) falls back to the billboard.
+                let frame = badgePlaneFrame(up: up, front: b.front)
+                let badge = makeBadgeImageNode(image: img, extent: extent, flat: frame)
+                // Lifted `2 * layerGapM` towards the viewer — one tier above
+                // the stroke in the transparent sort, for the same tie-break
+                // reason as the stroke — at the in-plane corner it always had.
+                // A FLAT badge is lifted along the VIEW RAY (`camDir`, the
+                // centroid → camera direction at build time), NOT the quad
+                // normal: 3 mm along the normal projects SIDEWAYS by 3 mm ×
+                // sin θ at an oblique view and carried a flat badge off its
+                // own box (a pinhole model at 0.8 m, 4–25 cm boxes, 1× and 2×,
+                // views to 75°: up to 71% of the badge outside it, 81% once
+                // the camera moved ±20 cm without a rebuild), while a lift
+                // along the ray does not move it on screen (0.0% in both).
+                // It is still 3 mm nearer, so the
+                // sort tie-break holds — better than before at an angle.  The
+                // billboard fallback (no frame; never for a real basis) and a
+                // build with no camera direction keep the normal lift.
+                let lift = (frame != nil ? camDir : nil) ?? front
                 badge.simdPosition =
                     right * (minR + Float(extent) / 2 + pad)
                     + up * (minU + Float(extent) / 2 + pad)
-                    + front * (2 * layerGapM)
+                    + lift * (2 * layerGapM)
                 node.addChildNode(badge)
             }
         } else if let label = label, !label.isEmpty {

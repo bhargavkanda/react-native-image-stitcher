@@ -309,6 +309,22 @@ public final class RNSARSessionBridge: RCTEventEmitter {
         resolver(nil)
     }
 
+    /// The OPTIONAL overlay fields this native build honours —
+    /// `RNISAROverlayFeatures.describe()`, the same shape Android's
+    /// `RNSARSession.overlayFeatures()` resolves (`platform: 'ios'`), so a
+    /// host records what native DREW rather than what JS asked (a native
+    /// side older than `imageScale` ignores the key and draws at 1×).  A
+    /// property of the BUILD, not of a session: it resolves whether or not an
+    /// AR view is bound, and never rejects.  Method absent ⇒ the build
+    /// predates the report and the host records "unknown".
+    @objc(overlayFeatures:rejecter:)
+    public func overlayFeatures(
+        resolver: @escaping RCTPromiseResolveBlock,
+        rejecter: @escaping RCTPromiseRejectBlock
+    ) {
+        resolver(RNISAROverlayFeatures.describe())
+    }
+
     // MARK: - v0.20.0 — raycast (crosshair → real-world surface)
 
     /// Raycast from the screen CENTER (the crosshair) along the camera's view

@@ -94,6 +94,11 @@ export interface AROverlay {
    * `file://` path (or plain filesystem path); the native renderers decode
    * and CACHE it by URI and silently ignore an undecodable file (the box
    * then draws without it).  When present it REPLACES the centroid `label`.
+   * iOS: on an `orient: 'plane'` quad the badge lies FLAT in the box's plane
+   * and foreshortens with it (it was a camera-facing billboard that spilled
+   * past an oblique box); on `orient: 'camera'` it faces the camera like its
+   * box.  `RNSARSession.overlayFeatures()` lists `'flatPlaneBadge'` on a
+   * build that does this.
    */
   imageUri?: string;
 
@@ -150,7 +155,8 @@ export interface AROverlay {
    * Orientation of a `worldQuad` `'box'` overlay (iOS renderer).  Default
    * `'plane'` — the box is drawn in the plane of its world corners (tilts
    * and foreshortens with the surface it marks), matching every pre-`orient`
-   * build byte-for-byte.  `'camera'` re-orients the box to FACE THE CAMERA
+   * build byte-for-byte except its {@link imageUri} badge, which now lies in
+   * the same plane (`flatPlaneBadge`).  `'camera'` re-orients the box to FACE THE CAMERA
    * and stay gravity-upright on screen regardless of the quad's orientation
    * (a billboard sized by the quad's own edge lengths at its centroid) —
    * for a live detection box that must stay readable when the fitted plane

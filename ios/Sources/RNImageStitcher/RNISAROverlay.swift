@@ -418,6 +418,65 @@ public struct RNISAROverlay: Equatable {
 }
 
 
+// MARK: - The optional overlay fields this build honours
+
+/// What `RNSARSession.overlayFeatures()` resolves on iOS — the SAME shape as
+/// Android's `AROverlayFeatures.describe()` (`platform: 'ios'`).
+///
+/// WHY. An optional overlay field is silently ignored by a native build that
+/// predates it: JS that asks for `imageScale: 2` on an older native side gets
+/// a 1× badge, and a record that copies the JS request says 2 (round-2 colours
+/// review MEDIUM-3). JS newer than native is routine (a Metro reload without a
+/// rebuild). With this report a host records what native honours:
+///
+///   * method ABSENT (a build before the report)        ⇒ unknown;
+///   * resolves, `features` includes the field          ⇒ honoured;
+///   * resolves, `features` does not include the field  ⇒ NOT honoured.
+///
+///     {
+///       contract: 'arOverlayFeatures/1',
+///       platform: 'ios',
+///       features: ['imageScale', 'flatPlaneBadge'],
+///       imageScale: { min: 0.25, max: 2.5, default: 1 },
+///     }
+///
+/// `features` lists only OPTIONAL behaviours added since the overlay contract
+/// first shipped, in the order they shipped, each appended in the commit that
+/// makes the parser AND the renderer honour it:
+///
+///   * `imageScale` — parsed (`RNISAROverlay.from(dictionary:)`) and drawn by both box
+///     builders through `RNISAROverlay.badgeExtent`; a value outside
+///     `[min, max]` renders at `default`, not clipped.
+///   * `flatPlaneBadge` — an `orient:'plane'` quad's badge lies IN the quad's
+///     plane and foreshortens with it (`RNSARCameraView.makeQuadOutlineNode`),
+///     instead of billboarding and spilling past an oblique box. iOS only:
+///     Android sizes its badge from the projected screen box, which never
+///     spilled, so it does not list it.
+public enum RNISAROverlayFeatures {
+    public static let contract = "arOverlayFeatures/1"
+    public static let platform = "ios"
+    public static let imageScale = "imageScale"
+    public static let flatPlaneBadge = "flatPlaneBadge"
+
+    /// The optional behaviours this build honours, in the order they shipped.
+    public static let features: [String] = [imageScale, flatPlaneBadge]
+
+    /// The resolve, as bridgeable Foundation values.
+    public static func describe() -> [String: Any] {
+        return [
+            "contract": contract,
+            "platform": platform,
+            "features": features,
+            imageScale: [
+                "min": Double(RNISAROverlay.minImageScale),
+                "max": Double(RNISAROverlay.maxImageScale),
+                "default": Double(RNISAROverlay.defaultImageScale),
+            ],
+        ]
+    }
+}
+
+
 // MARK: - UIColor hex parsing
 
 extension UIColor {

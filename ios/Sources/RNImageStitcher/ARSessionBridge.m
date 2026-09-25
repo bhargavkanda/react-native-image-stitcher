@@ -72,6 +72,14 @@ RCT_EXTERN_METHOD(setOverlays:(nonnull NSArray *)overlays
                   resolver:(RCTPromiseResolveBlock)resolver
                   rejecter:(RCTPromiseRejectBlock)rejecter)
 
+// The OPTIONAL overlay fields this native build honours — the same
+// `arOverlayFeatures/1` shape Android resolves (`platform: 'ios'`), so a host
+// records what native DREW, not what JS asked.  ⚠️ NO data param: the
+// resolver is the first selector segment (`overlayFeatures:rejecter:`), like
+// `raycast` below.  Keep in lockstep with the Swift @objc selector.
+RCT_EXTERN_METHOD(overlayFeatures:(RCTPromiseResolveBlock)resolver
+                  rejecter:(RCTPromiseRejectBlock)rejecter)
+
 // v0.20.0 — raycast from the crosshair (screen centre) to the first real
 // surface hit → { worldPosition: [x,y,z] } or null.  Used to place an
 // overlay ON the aimed surface (then anchor it), vs a guessed distance ahead.
