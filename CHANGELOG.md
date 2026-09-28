@@ -18,6 +18,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`RNISARFrameContext.depthConfidenceBuffer` and `.smoothedDepthBuffer`**
+  (iOS) — two more live ARKit buffers for native AR plugins, behind the same
+  `<Camera enableDepth>` gate as `depthBuffer`:
+  - `depthConfidenceBuffer` is the `ARDepthData.confidenceMap` of the depth
+    data `depthBuffer` came from (`OneComponent8`, one `ARConfidenceLevel`
+    raw value per pixel: 0 low, 1 medium, 2 high). `nil` exactly when
+    `depthBuffer` is, or when ARKit attached no confidence map.
+  - `smoothedDepthBuffer` is `smoothedSceneDepth.depthMap` (Float32 metres).
+    `depthBuffer` still prefers the raw `sceneDepth` and is unchanged; when it
+    fell back to the smoothed map, the two properties are the same buffer
+    (`===`), which is how a plugin tells which one `depthBuffer` is.
+
+  Both are references to ARKit's buffers, not copies, valid only during
+  `process(_:)` — copy before offloading, like `depthBuffer`. The two init
+  parameters are trailing and default to `nil`, so existing callers compile
+  unchanged. Android is not covered: ARCore's confidence image belongs to its
+  RAW depth, not to the full depth `ARFrameContext.depthBytes` carries.
 - **`AROverlay.imageScale`** — a size multiplier for the in-box `imageUri`
   badge. Omitted, the badge renders exactly as before (the extent is ~26% of
   the box's shorter side, clamped to 4 mm – 5 cm on iOS and 10 – 110 px on

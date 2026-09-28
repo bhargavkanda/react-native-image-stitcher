@@ -75,7 +75,8 @@ public extension Notification.Name {
     /// non-empty.  Return a light JSON-safe result for the SYNC channel
     /// (NSNumber / NSString / NSArray / NSDictionary leaves) or `nil`.
     ///
-    /// LIFETIME: `context.pixelBuffer` (and `context.depthBuffer`) are the
+    /// LIFETIME: `context.pixelBuffer` (and `context.depthBuffer`,
+    /// `context.depthConfidenceBuffer`, `context.smoothedDepthBuffer`) are the
     /// live ARFrame buffers — VALID ONLY for the duration of this call.
     /// ARKit recycles them once `process(_:)` returns.  If you offload
     /// work to another thread/queue, you MUST copy the bytes you need
@@ -145,12 +146,39 @@ public final class RNISARFrameContext: NSObject {
     /// ARKit and is safe to retain beyond the `process(_:)` call.
     public let featurePoints: [simd_float3]?
 
+    /// ARKit's per-pixel confidence for `depthBuffer` — the
+    /// `ARDepthData.confidenceMap` of the SAME depth data `depthBuffer` came
+    /// from (`sceneDepth`, or `smoothedSceneDepth` when that is the fallback).
+    /// A `kCVPixelFormatType_OneComponent8` buffer with the depth map's
+    /// dimensions; each byte is an `ARConfidenceLevel` raw value (0 low,
+    /// 1 medium, 2 high).  `nil` exactly when `depthBuffer` is `nil`, or
+    /// when ARKit attached no confidence map to that depth.  VALID ONLY
+    /// during `process(_:)`; copy before offloading, like `depthBuffer`.
+    /// iOS only — the Android `ARFrameContext` does not carry a confidence
+    /// map yet.
+    @objc public let depthConfidenceBuffer: CVPixelBuffer?
+
+    /// The frame's `smoothedSceneDepth.depthMap` (Float32 metres, same
+    /// dimensions as `depthBuffer`) — ARKit's temporally smoothed depth,
+    /// offered BESIDE the depth in `depthBuffer`, which is the raw
+    /// `sceneDepth` whenever that exists.  Gated like `depthBuffer` (the
+    /// `<Camera enableDepth>` prop); `nil` when the device produced no
+    /// smoothed depth this frame.  When `sceneDepth` was absent and
+    /// `depthBuffer` fell back to the smoothed map, this is the SAME buffer
+    /// (`depthBuffer === smoothedDepthBuffer`), which is how a plugin can
+    /// tell which one `depthBuffer` is.  VALID ONLY during `process(_:)`;
+    /// copy before offloading.  iOS only, like `depthConfidenceBuffer`.
+    @objc public let smoothedDepthBuffer: CVPixelBuffer?
+
     // NOTE: @objc is intentionally dropped from this init.  Swift refuses to
     // expose an @objc init whose parameter list includes a type that is not
     // ObjC-bridgeable ([simd_float3]? is a Swift-only value type).  The class
     // itself remains @objc(RNISARFrameContext) for ObjC visibility; only the
     // designated init is Swift-only.  All existing callers are Swift
     // (invokeArPlugins in RNSARSession.swift), so nothing breaks.
+    // `depthConfidenceBuffer` / `smoothedDepthBuffer` are trailing and
+    // defaulted to nil, so a caller written before they existed still
+    // compiles and builds the same context it did.
     public init(
         pixelBuffer: CVPixelBuffer,
         timestampNs: Double,
@@ -161,7 +189,9 @@ public final class RNISARFrameContext: NSObject {
         trackingState: String,
         depthBuffer: CVPixelBuffer?,
         anchors: [[String: Any]],
-        featurePoints: [simd_float3]?
+        featurePoints: [simd_float3]?,
+        depthConfidenceBuffer: CVPixelBuffer? = nil,
+        smoothedDepthBuffer: CVPixelBuffer? = nil
     ) {
         self.pixelBuffer = pixelBuffer
         self.timestampNs = timestampNs
@@ -174,6 +204,8 @@ public final class RNISARFrameContext: NSObject {
         self.depthBuffer = depthBuffer
         self.anchors = anchors
         self.featurePoints = featurePoints
+        self.depthConfidenceBuffer = depthConfidenceBuffer
+        self.smoothedDepthBuffer = smoothedDepthBuffer
     }
 }
 

@@ -1773,11 +1773,21 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
         // C++ extraction-config header stays out of Swift).  Prefer
         // `sceneDepth`, fall back to `smoothedSceneDepth` — same precedence
         // as the full extraction path.
+        //
+        // depthConfidenceBuffer / smoothedDepthBuffer ride the SAME gate:
+        // the confidence map of the depth data `depthBuffer` came from, and
+        // the smoothed map beside it (the same buffer as `depthBuffer` when
+        // `sceneDepth` was absent).  Both are references to ARKit's live
+        // buffers, not copies — a plugin that ignores them pays nothing.
         var depthBuffer: CVPixelBuffer? = nil
+        var depthConfidenceBuffer: CVPixelBuffer? = nil
+        var smoothedDepthBuffer: CVPixelBuffer? = nil
         if CameraFrameHostObject.arExtractionDepthEnabled() {
             if let dd = frame.sceneDepth ?? frame.smoothedSceneDepth {
                 depthBuffer = dd.depthMap
+                depthConfidenceBuffer = dd.confidenceMap
             }
+            smoothedDepthBuffer = frame.smoothedSceneDepth?.depthMap
         }
 
         // anchors: reuse the EXACT light dicts the `onArFrame` meta builds
@@ -1807,7 +1817,9 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
             trackingState: Self.trackingStateString(pose.trackingState),
             depthBuffer: depthBuffer,
             anchors: anchors,
-            featurePoints: featurePoints
+            featurePoints: featurePoints,
+            depthConfidenceBuffer: depthConfidenceBuffer,
+            smoothedDepthBuffer: smoothedDepthBuffer
         )
 
         var syncResults: [String: Any] = [:]

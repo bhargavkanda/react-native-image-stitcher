@@ -71,6 +71,13 @@ package io.imagestitcher.rn
  * @property trackingState   Contract enum string: "normal" | "limited" | "notAvailable".
  * @property depthBytes      Row-packed DEPTH16 (uint16/px, w*h*2 bytes) or null
  *                           (null unless `enableDepth` AND depth available this frame).
+ *                           NOT COVERED YET: iOS's context also carries the
+ *                           depth's confidence map and ARKit's smoothed depth
+ *                           (`depthConfidenceBuffer`, `smoothedDepthBuffer`).
+ *                           There is no Android twin: ARCore's confidence image
+ *                           (`acquireRawDepthConfidenceImage`) belongs to the
+ *                           RAW depth, not to the full depth this field carries,
+ *                           so it is a separate design, not a symmetric port.
  * @property depthWidth      Depth map width (px), 0 when [depthBytes] is null.
  * @property depthHeight     Depth map height (px), 0 when [depthBytes] is null.
  * @property anchors         Anchor descriptor maps already collected for the
