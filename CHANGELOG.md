@@ -28,7 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `smoothedDepthBuffer` is `smoothedSceneDepth.depthMap` (Float32 metres).
     `depthBuffer` still prefers the raw `sceneDepth` and is unchanged; when it
     fell back to the smoothed map, the two properties are the same buffer
-    (`===`), which is how a plugin tells which one `depthBuffer` is.
+    (`===`), which is how a plugin tells which one `depthBuffer` is. The
+    session reads each ARFrame depth property once and assigns the fallback
+    from `depthBuffer` itself, so the identity holds by construction rather
+    than by ARKit returning the same buffer from two property reads.
 
   Both are references to ARKit's buffers, not copies, valid only during
   `process(_:)` — copy before offloading, like `depthBuffer`. The two init

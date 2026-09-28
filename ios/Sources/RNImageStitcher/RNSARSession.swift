@@ -1779,15 +1779,25 @@ public final class RNSARSession: NSObject, ARSessionDelegate {
         // the smoothed map beside it (the same buffer as `depthBuffer` when
         // `sceneDepth` was absent).  Both are references to ARKit's live
         // buffers, not copies — a plugin that ignores them pays nothing.
+        //
+        // Each ARFrame depth property is read ONCE, and on the fallback
+        // `smoothedDepthBuffer` is assigned FROM `depthBuffer`, so the
+        // documented `depthBuffer === smoothedDepthBuffer` contract holds by
+        // construction — it never relies on ARKit handing back the same
+        // CVPixelBuffer from two separate property reads.
         var depthBuffer: CVPixelBuffer? = nil
         var depthConfidenceBuffer: CVPixelBuffer? = nil
         var smoothedDepthBuffer: CVPixelBuffer? = nil
         if CameraFrameHostObject.arExtractionDepthEnabled() {
-            if let dd = frame.sceneDepth ?? frame.smoothedSceneDepth {
+            let rawDepth = frame.sceneDepth
+            let smoothedDepth = frame.smoothedSceneDepth
+            if let dd = rawDepth ?? smoothedDepth {
                 depthBuffer = dd.depthMap
                 depthConfidenceBuffer = dd.confidenceMap
             }
-            smoothedDepthBuffer = frame.smoothedSceneDepth?.depthMap
+            smoothedDepthBuffer = rawDepth == nil
+                ? depthBuffer
+                : smoothedDepth?.depthMap
         }
 
         // anchors: reuse the EXACT light dicts the `onArFrame` meta builds
