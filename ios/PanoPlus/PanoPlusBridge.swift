@@ -169,6 +169,38 @@ public class PanoPlusBridge: NSObject, RCTInvalidating {
     /// source is up and stops it rather than orphaning it.
     private static let armLock = NSLock()
 
+    /// ── M8: THE CAMERA-RELEASE POINT OF A STOP ───────────────────────────
+    /// `stop()` tears the arm down (plugin disarmed, camera lock released,
+    /// format restored) and only THEN finalizes the canvas and the pack, which
+    /// takes seconds. JS keeps the camera mounted until this reads true, then
+    /// unmounts it for the rest of the finish — the keyframe engine's
+    /// stitching rule — so nothing native still reads the camera it unmounts.
+    /// False from every start; true from the teardown of a stop or cancel.
+    ///
+    /// ⚠ GENERATION-SCOPED (M8 review). A stop or cancel runs its teardown
+    /// on a global queue; a cancel followed at once by a new start would
+    /// otherwise land its "released" AFTER the new start cleared it, and the
+    /// new sweep's finish would unmount the camera before native let go. So
+    /// each start opens a generation, a stop/cancel captures the generation
+    /// it belongs to on the bridge queue, and only the CURRENT one counts.
+    private static let releaseLock = NSLock()
+    private static var releaseGen: UInt64 = 0
+    private static var releasedGen: UInt64 = .max
+    private static func beginRelease() {
+        releaseLock.lock(); releaseGen &+= 1; releaseLock.unlock()
+    }
+    private static func currentReleaseGen() -> UInt64 {
+        releaseLock.lock(); defer { releaseLock.unlock() }
+        return releaseGen
+    }
+    private static func markReleased(_ g: UInt64) {
+        releaseLock.lock(); if g == releaseGen { releasedGen = g }; releaseLock.unlock()
+    }
+    private static func cameraReleased() -> Bool {
+        releaseLock.lock(); defer { releaseLock.unlock() }
+        return releasedGen == releaseGen
+    }
+
     /// ── ONE CLAIM, TAKEN ONCE, WITH A GENERATION (M5 review) ─────────────
     ///
     /// The two camera arms that pano+ drives itself — the AVF source and the
@@ -319,6 +351,7 @@ public class PanoPlusBridge: NSObject, RCTInvalidating {
             rejecter("invalid-options", "sessionDir must be a non-empty string", nil)
             return
         }
+        Self.beginRelease()
         let preferHighFps = (options["preferHighFps"] as? Bool) ?? true
         // Default ON.  A feature shipped OFF in the field build has not been
         // tested, and this one is the fix for a defect the operator has
@@ -965,8 +998,10 @@ public class PanoPlusBridge: NSObject, RCTInvalidating {
         resolver: @escaping RCTPromiseResolveBlock,
         rejecter: @escaping RCTPromiseRejectBlock
     ) {
+        let releaseGen = Self.currentReleaseGen()
         DispatchQueue.global(qos: .userInitiated).async {
             Self.teardownPlugin()
+            Self.markReleased(releaseGen)   // M8 — before the finalize
             // `isRunning` tracks the SESSION, not the engine: an engine abort
             // (tracking-lost, chain-lost) leaves the session running and its
             // painted content is exactly what the operator wants to see, so
@@ -998,8 +1033,10 @@ public class PanoPlusBridge: NSObject, RCTInvalidating {
         resolver: @escaping RCTPromiseResolveBlock,
         rejecter: @escaping RCTPromiseRejectBlock
     ) {
+        let releaseGen = Self.currentReleaseGen()
         DispatchQueue.global(qos: .userInitiated).async {
             Self.teardownPlugin()
+            Self.markReleased(releaseGen)
             RNISPanoCore.cancel()
             resolver(["cancelled": true])
         }
@@ -1022,6 +1059,9 @@ public class PanoPlusBridge: NSObject, RCTInvalidating {
            let r = RNISPanoVcArm.pluginReport()?["deviceRefusal"] as? String, !r.isEmpty {
             st["vcDeviceRefusal"] = r
         }
+        // M8 — read through the FINISH, when the core may already answer
+        // `running: false`: JS unmounts the camera on it.
+        st["cameraReleased"] = Self.cameraReleased()
         resolver(st)
     }
 

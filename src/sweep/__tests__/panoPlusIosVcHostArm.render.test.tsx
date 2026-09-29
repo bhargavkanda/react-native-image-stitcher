@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 /**
- * M5 — the iOS sweep on `<Camera>`'s own camera, driven through the surface.
+ * M5 — the iOS sweep on `<Camera>`'s own camera, driven through the engine.
+ *
+ * M10 — the sweep's own screen (`PanoPlusCaptureSurface`) is deleted; every
+ * case here was about the ENGINE, so each is kept and mounted through
+ * `SweepEngineHarness` (the real `useSweepEngine`), pressed through its handle.
  *
  * Until M5 an iOS non-AR sweep opened pano+'s OWN AVCaptureSession, read a
  * calibration store for τ and the basis, and fell back to ARKit when either
@@ -19,7 +23,7 @@ import React from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { NativeModules, Platform } from 'react-native';
 
-import { PanoPlusCaptureSurface } from '../PanoPlusCaptureSurface';
+import { SweepEngineHarness } from './sweepEngineHarness';
 
 const NM = NativeModules as Record<string, unknown>;
 
@@ -83,7 +87,13 @@ function mount(
   const handle = React.createRef<Handle | null>() as React.RefObject<Handle | null>;
   let tree!: ReactTestRenderer;
   act(() => {
-    tree = create(<PanoPlusCaptureSurface ref={handle as never} {...(props as any)} />);
+    tree = create(
+      <SweepEngineHarness
+        ref={handle as never}
+        onComplete={() => undefined}
+        {...(props as any)}
+      />,
+    );
   });
   return { tree, handle };
 }

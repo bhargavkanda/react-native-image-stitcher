@@ -97,6 +97,110 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   badge from the projected screen box and draws it after the fill already.
 
 ### Changed (BREAKING)
+- **One output contract (M9, D6).** A finished sweep is `type: 'panorama'`
+  with **`engine: 'sweep'`**; the keyframe engine's panorama carries
+  `engine: 'keyframe'` (or `'batch-keyframe'`). The old `type: 'panoplus'`
+  member is gone. Narrow on `engine` to reach what only one engine has: the
+  keyframe engine's `finalConfidenceThresh`, or the sweep's pack
+  (`kind: 'panoplus'`, `sessionDir`, `summary`, `arms` and `capturedAt`, all
+  still at the top level). The sweep result has the panorama's own fields:
+  - `uri` is a COPY of the canvas in `outputDir` (or the default capture
+    directory), `panorama-<ms>.jpg`. The pack's own canvas is never the
+    output, so the crop editor crops in place on the copy, and the sweep's
+    crop-to-sibling rule is gone;
+  - `framesRequested` = frames the engine saw, `framesIncluded` = frames on
+    the canvas (painted strips + the latch seed), `framesDropped` = frames it
+    refused (duplicate deliveries excluded); `durationMs`;
+  - `liveness: 'unavailable'`, the one named difference;
+  - frames the engine refused fire `onFramesDropped`, and the canvas is
+    written at JPEG quality 90, like a keyframe panorama. The review's crop
+    seed is measured on the pack's canvas (its coverage sidecar), and the
+    output copy carries the sidecar beside it.
+  **`PanoramaCaptureResult` is now the keyframe member only** (`engine:
+  'keyframe' | 'batch-keyframe'`): a handler typed with it no longer accepts
+  a value narrowed only on `type === 'panorama'`. Narrow on `engine` too, or
+  type the sweep with the new `SweepPanoramaResult`. **`FramesDroppedInfo`
+  gains `dropped`**, and on both engines its numbers are the result's own.
+  `PanoPlusCounts` gains `skippedNonmonotonicTs`.
+  Failures follow ONE contract on both engines: `onError` AND
+  `onCapture({ ok: false, type, engine, error })`. The `ok: false` member
+  drops `'panoplus'` and gains `engine`. A sweep that fails to finish is
+  `PANORAMA_FINALIZE_FAILED` (a start refusal keeps its own code), and an
+  output that cannot be written is `OUTPUT_WRITE_FAILED`. **A keyframe START
+  failure now reaches `onCapture` as `ok: false` too**; before, only `onError`
+  heard it (every keyframe start refusal: the native start, a missing
+  frame-processor plugin, a missing native module). `PanoPlusFailure.stage`
+  says where a sweep failed; a failure after the sweep (the canvas never
+  written, the output copy failing) carries the pack's `sessionDir` on the
+  error's `cause`. A failed sweep carries its `HIGH_PAN_SPEED` /
+  `LATERAL_DRIFT_FINALIZE` warnings like a failed stitch. A sweep hold while the
+  previous panorama is still in review is refused as `CAPTURE_IN_PROGRESS`
+  on both channels (the keyframe engine still lets a host start a capture
+  behind a pending review); a hold while a sweep's output is still
+  being written is ignored, as one during a stitch is. Switching the engine
+  away while a sweep is still starting stops it silently (pack kept), as a
+  switch mid-sweep does.
+- **`<Camera engine="sweep">` is one screen with the keyframe engine (M8).**
+  The sweep no longer swaps in a screen of its own. It runs on `<Camera>`'s
+  own camera, shutter and chrome: the vision-camera preview for non-AR, and
+  `<Camera>`'s own `<ARCameraView>` for AR (the sweep mounts no AR view of its
+  own). `engine` changes only what the HOLD runs:
+  - the built-in shutter's hold and `startPanorama`/`stopPanorama` go through
+    ONE dispatcher, so a press on the sweep engine runs the sweep, under the
+    keyframe engine's own guards: panorama on, shutter enabled, no capture in
+    flight, **the `panMode` gate** (a host that sweeps in portrait passes
+    `panMode="both"`; the default `'vertical'` is a landscape hold) and no
+    camera transition in flight. A sweep hold before its frame-processor
+    plugin lands is deferred (with no rotate prompt) and resumed through the
+    whole dispatcher, not refused; if the plugin never lands (1.5 s) it is
+    refused as `ENGINE_UNAVAILABLE`. A release while a hold is deferred
+    abandons it, and so does an engine switch. Only the plugin lookup is
+    waited on: a hold with no camera device is refused at once. A hold in a
+    build without the sweep's session module is refused as
+    `ENGINE_UNAVAILABLE` (it used to do nothing) and leaves `takePhoto()`
+    usable. The `panMode` gate does not apply to the internal DR-1a hatch,
+    which has no rotate prompt;
+  - `takePhoto()` while a panorama is recording or finishing, on either
+    engine, is refused with the new `CAPTURE_IN_PROGRESS` code (D7);
+  - switching the engine at idle no longer unmounts the camera;
+  - the camera stays mounted behind the review on both engines (the sweep
+    engine itself is deselected there);
+  - a sweep's finish is ordered like a keyframe stitch. The camera stays
+    mounted while native tears the sweep down. Once native reports the new
+    status field `cameraReleased` (iOS and Android), the camera unmounts for
+    the rest of the finish and the status overlay reads "Stitching". It
+    mounts again when the finish ends;
+  - AR sweeps are pose-guarded against sideways drift, like AR keyframe
+    captures; the IMU guard no longer stands in for them. Under
+    `panMode="both"` the sweep's axis is not known in advance, so the pose
+    guard stands down for a sweep there and the IMU guard keeps it;
+  - on `<Camera>`'s AR view the sweep may only run the AR arm: a start
+    native answers with any other arm, or with none, is cancelled and
+    refused as `ENGINE_UNAVAILABLE`;
+  - `sweep.onPaintedChange` is called (it was silently replaced);
+  - at idle the sweep draws nothing of its own over the viewfinder; its
+    growing panorama, headline, hard faults and τ chip appear during a sweep;
+  - the settings gear and modal show on both engines.
+  The AR view's session config is the same for both engines (D15):
+  `keyframeQualityCapture` defaults to `enablePanoramaMode`, the new
+  `arSourceMaxLongEdge` sets its CPU-image cap, `arFrameMetaInterval` is at
+  most 100 ms while panorama capture is on, and all three are held while a
+  capture records — and, for a sweep, through its finish until native
+  releases the camera (the vision-camera config is held the same way). New `topChromeInset` moves the top-right pills clear of a
+  host's docked banner on both engines. **`SweepOptions` is now an explicit
+  allow-list** of the engine's own options. Four bag keys moved to
+  `<Camera>` props: `hostChromeTopPt` → `topChromeInset`, `bottomBarOffset` →
+  `bottomBarOffset`, `hideBuiltInControls` → `hideBuiltInShutter`,
+  `arSourceMaxLongEdge` → `arSourceMaxLongEdge`. **`sweep.onControlsState` is
+  removed with no replacement**: a host that draws its own shutter follows
+  `sweep.onSweepingChange`, which is true through every non-idle phase. The AR pill no longer hides under
+  `hideBuiltInShutter` on either engine (D18). It is a camera control, so a
+  keyframe host with its own shutter now shows it. The settings modal takes an
+  `engine` prop: on the sweep, the keyframe-only sections give way to a note
+  saying where the sweep's options are set. The internal
+  `sweep.frameSourceOverride: 'own'` (device round DR-1a only) runs the sweep
+  on pano+'s old own camera, in an internal hatch view under `<Camera>`'s own
+  chrome and shutter (the old sweep screen is gone, see Removed).
 
 - **`<Camera engine="sweep">` runs on `<Camera>`'s own camera on iOS too.** A
   non-AR iPhone sweep used to open pano+'s own `AVCaptureSession` behind the
@@ -180,7 +284,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `config.seedLeadTrim`. `sweep={{ engineOptions: { seedLeadTrim: false } }}`
   selects the control arm on both platforms.
 
+### Removed (BREAKING)
+- **The sweep's own capture screen (M10).** There is one camera screen:
+  `<Camera>`. Deleted, with their exports:
+  - `PanoPlusCaptureSurface` and `PanoPlusCaptureSurfaceProps`, the sweep's
+    stand-alone screen. The engine it drew is `<Camera engine="sweep">`; its
+    options are `SweepOptions` (`<Camera sweep={…}>`).
+  - Its clone chrome: its own AR pill, lens chip and built-in shutter. The
+    sweep uses `<Camera>`'s. `<Camera>`'s shutter does not grey on the sweep's
+    readiness, so on the internal DR-1a hatch a hold while the calibration
+    read is in flight is refused by name (`panoplus-not-ready`), and one in a
+    build without the sweep's session module is refused as
+    `ENGINE_UNAVAILABLE`. The old screen greyed its shutter instead.
+  - `PanoPlusBasisOverlay` and `PanoPlusBasisOverlayProps`, the in-camera
+    first-run basis gesture (D3(a)), with the model only it used:
+    `panoPlusBasisGestureView`, `basisRefusalCoaching`,
+    `PANO_PLUS_BASIS_AXIS_BAR_DEG`, `REFERENCE_GRACE_S`,
+    `PanoPlusBasisAxisMeter` and the `PanoPlusBasisGesture*` types. The basis
+    ladder (`resolvePanoPlusBasis`) is unchanged.
+  - The internal effective-arm feed and lens mask (`sweepEffectiveLens`,
+    never exported). The lens chip paints `lens` on both engines.
+- **The sweep's second result viewer (M10).** `PanoPlusResultView` and
+  `PanoPlusResultViewProps` are no longer exported, and the component is
+  deleted with the three modules only it used (`PinchZoomView`,
+  `zoomTransform`, `packStatus`). A sweep's result is reviewed on the same
+  review surface as a keyframe panorama (M9), and a host that reopens a
+  capture uses that review too.
+
 ### Fixed
+- **A false "NO LIVE CAMERA FEED" on every Android sweep.** The Android live
+  status always carries the state of pano+'s own preview view, which
+  `<Camera>` never mounts (its vision-camera preview is the viewfinder), so
+  the hold overlay showed the notice over a live preview for the whole sweep
+  and every pack's `host_sweep_hud.json` recorded it. The notice now speaks
+  only when the sweep owns its camera.
 
 - **The sweep engine's guard rails follow the keyframe engine's lateral-stop
   policy.** A sideways-drift stop on `engine="sweep"` is judged by the same

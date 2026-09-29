@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 /**
- * `PanoPlusCaptureSurface` with `frameSource="host"` — the arm S7 exists for,
- * mounted DIRECTLY.
+ * The sweep engine with `frameSource="host"` — the arm S7 exists for, mounted
+ * DIRECTLY.
+ *
+ * M10 — `PanoPlusCaptureSurface` (and its "pano+ is not available" card) is
+ * deleted. The engine is mounted through `SweepEngineHarness`: the real
+ * `useSweepEngine`, drawn by the view that is left of its screen
+ * (`SweepHatchScreen`). The root under test is that view's root.
  *
  * ── WHY A SEPARATE FILE ─────────────────────────────────────────────────
  *
@@ -19,24 +24,38 @@
  * The fail-closed guard in `start()` had nothing whatsoever: no test in the
  * package passed `frameSource: 'host'` into the surface.
  *
- * Both need the same arrangement — Android, native installed, the surface
+ * Both needed the same arrangement — Android, native installed, the engine
  * mounted directly — so they live here rather than being bolted onto a suite
- * about `<Camera>`'s delegation. Mounting the surface directly is also the
- * honest shape for these two: they are properties of the SURFACE's contract,
- * and a third-party host can reach them with no `<Camera>` in between.
+ * about `<Camera>`'s delegation.
+ *
+ * ⚠ SINCE M10 NO THIRD-PARTY HOST CAN REACH EITHER. The surface is deleted
+ * and neither `useSweepEngine` nor `SweepHatchScreen` is exported; the only
+ * caller is `<Camera>`. So the guard cases below pin a BACKSTOP behind
+ * `<Camera>`'s own gates (it defers a hold through its handoff window, and
+ * never sends a host-owned sweep the AR arm), and the root cases pin the
+ * hatch view — the one place the sweep still draws its own root. The
+ * black-screen property S7 was about now lives in `<Camera>`'s main tree,
+ * which draws the host arm's hold overlay over `<Camera>`'s own preview;
+ * nothing in this file reaches that tree.
  */
 import React from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { NativeModules, Platform, StyleSheet } from 'react-native';
 
-import { PanoPlusCaptureSurface } from '../PanoPlusCaptureSurface';
+import { SweepEngineHarness } from './sweepEngineHarness';
+import type { PanoPlusFailure, SweepSurfaceState } from '../panoPlusTypes';
 
 const NM = NativeModules as Record<string, unknown>;
 
 let startedWith: Record<string, unknown> | null = null;
+/** Every `onControlsState` report, and every `onFailure`, the engine made. */
+let controls: SweepSurfaceState[] = [];
+let failures: PanoPlusFailure[] = [];
 
 function installNative(): void {
   startedWith = null;
+  controls = [];
+  failures = [];
   NM.RNISPanoPlus = {
     start: (o: Record<string, unknown>) => {
       startedWith = o;
@@ -70,7 +89,7 @@ afterEach(() => {
   delete NM.RNISPanoPlus;
 });
 
-/** The surface's imperative handle — `holdStart` is what a shutter press
+/** The engine's imperative handle — `holdStart` is what a shutter press
  *  calls, and it is the only route into `start()` from outside. */
 interface Handle { holdStart: () => void; holdEnd: () => void }
 
@@ -82,40 +101,34 @@ function mount(
   let tree!: ReactTestRenderer;
   act(() => {
     tree = create(
-      <PanoPlusCaptureSurface ref={handle as never} {...(props as any)} />,
+      <SweepEngineHarness
+        ref={handle as never}
+        onComplete={() => undefined}
+        onControlsState={(c) => { controls.push(c); }}
+        onFailure={(f) => { failures.push(f); }}
+        {...(props as any)}
+      />,
     );
   });
   return { tree, handle };
 }
 
-/** True when the surface fell back to the "pano+ is not available" card —
- *  the state that silently invalidated the previous version of this test. */
-function isUnavailableCard(tree: ReactTestRenderer): boolean {
-  return tree.root.findAll(
-    (n) => n.props?.testID === 'panoplus-unavailable', { deep: true },
-  ).length > 0;
-}
-
 /**
- * The resolved `backgroundColor` of the surface's outermost View.
+ * The resolved `backgroundColor` of the sweep's outermost View.
  *
- * ⚠ THE UNAVAILABLE-CARD CHECK IS INSIDE THIS HELPER, not in a separate
- * precondition case. That card's style is `{flex: 1, backgroundColor:
- * '#000'}` — byte-identical in the property read here to `styles.fill` — so
- * a probe that lands on it silently reports the own-arm answer whatever the
- * surface actually did. A precondition case guarding only ONE of the two
- * mounts is how this file's predecessor passed on the pre-fix code.
+ * ⚠ IT MUST BE THE SWEEP ROOT — the View that measures itself (`onLayout`).
+ * The first version of this probe read the "pano+ is not available" card,
+ * whose style was byte-identical in this property to the root's, and passed
+ * on the pre-fix code. The card is gone (M10), but "the first View is the
+ * root" is still an assumption, so it is checked rather than trusted.
  */
 function rootBackground(tree: ReactTestRenderer): unknown {
-  if (isUnavailableCard(tree)) {
-    throw new Error(
-      'the surface fell back to the "pano+ is not available" card, so this '
-      + 'probe is reading that card\'s #000 and not the sweep root',
-    );
-  }
   const root = tree.root.findAll(
     (n) => (n.type as unknown) === 'View', { deep: true },
   )[0];
+  if (typeof root?.props?.onLayout !== 'function') {
+    throw new Error('the first View is not the sweep root (no onLayout)');
+  }
   const flat = ([] as unknown[])
     .concat(root.props.style as unknown[])
     .filter(Boolean) as Array<Record<string, unknown>>;
@@ -125,21 +138,24 @@ function rootBackground(tree: ReactTestRenderer): unknown {
   );
 }
 
-describe('the surface root does not paint over the host preview', () => {
-  it('⚑ PRECONDITION: the arrangement gets past the unavailable card', () => {
-    // Without this the two cases below assert the style of a completely
-    // different View and pass on the pre-fix code — measured, that is exactly
-    // what the previous version of this test did.
+describe('the hatch view\'s root, and its explainer in the handoff', () => {
+  // M10 — the precondition used to be "the arrangement gets past the
+  // unavailable card"; the card is deleted. Its fact survives as the engine's
+  // availability, which reaches the host as `canCapture`: this rig must be a
+  // LIVE sweep, or the cases below are about an engine that would refuse
+  // every hold `panoplus-unavailable`.
+  it('⚑ PRECONDITION: the arrangement is an AVAILABLE sweep', () => {
     const { tree } = mount({ frameSource: 'host' });
-    expect(isUnavailableCard(tree)).toBe(false);
+    expect(controls[controls.length - 1]).toMatchObject({ canCapture: true });
     act(() => { tree.unmount(); });
   });
 
-  it('is TRANSPARENT on the host arm — something else is drawing behind it', () => {
-    const { tree } = mount({ frameSource: 'host' });
-    expect(rootBackground(tree)).toBe('transparent');
-    act(() => { tree.unmount(); });
-  });
+  // ⚠ 'is TRANSPARENT on the host arm' WAS DELETED IN THE M10 REVIEW, with
+  // the branch it pinned. It mounted this view with `frameSource: 'host'` and
+  // a live host preview — a pair `<Camera>` never sends the hatch, whose own
+  // preview is never in the tree — so it checked code no product path ran.
+  // The hatch view's root is now opaque in every state, which the two cases
+  // below pin in the two states `<Camera>` does produce.
 
   it('stays BLACK on its own arm — it is the only thing on screen', () => {
     const { tree } = mount({ frameSource: 'own' });
@@ -147,13 +163,11 @@ describe('the surface root does not paint over the host preview', () => {
     act(() => { tree.unmount(); });
   });
 
-  it('⚑ stays BLACK in the HANDOFF window — nothing is drawing behind us', () => {
-    // The third state, and the one the first version of this fix missed:
-    // `frameSource: 'host'` with no preview mounted. A transparent root
-    // there is not a viewfinder, it is a window onto whatever the platform
-    // leaves behind. Reverting the `hostPreviewLive` term in the root style
-    // leaves every OTHER case in the package green — measured — so this row
-    // is the only thing standing between that term and a silent deletion.
+  it('⚑ stays BLACK in the HANDOFF window — nothing is drawing behind it', () => {
+    // The state `<Camera>` does send the hatch for ~600 ms on every ownership
+    // flip: `frameSource: 'host'` with nothing mounted. A transparent root
+    // there would not be a viewfinder, it would be a window onto whatever
+    // the platform leaves behind.
     const { tree } = mount({ frameSource: 'host', hostPreviewLive: false });
     expect(rootBackground(tree)).toBe('#000');
     act(() => { tree.unmount(); });
@@ -173,7 +187,11 @@ describe('the surface root does not paint over the host preview', () => {
     act(() => { tree.unmount(); });
   });
 
-  it('⚑ NEGATIVE CONTROL: with the preview live it says nothing at all', () => {
+  it('⚑ NEGATIVE CONTROL: the caption follows hostPreviewLive, not frameSource', () => {
+    // A control on the ENGINE's input, stated explicitly: `<Camera>` never
+    // sends the hatch a live host preview (the harness defaults it false for
+    // that reason). Without this, the case above passes for any reason the
+    // caption might always be drawn on `'host'`.
     const { tree } = mount({ frameSource: 'host', hostPreviewLive: true });
     expect(tree.root.findAll(
       (n) => n.props?.testID === 'panoplus-camera-off', { deep: true },
@@ -217,6 +235,21 @@ describe('start() fails closed rather than opening a camera the host holds', () 
     act(() => { handle.current?.holdStart(); });
     act(() => { jest.advanceTimersByTime(1500); });
     expect(startedWith).toBeNull();
+    // M10 review — and BY NAME, on `onFailure`, like its sibling guards: it
+    // used to set the on-screen line only, so `<Camera>`'s `onError` heard
+    // nothing.
+    expect(failures.map((f) => f.code)).toEqual(['panoplus-camera-not-ready']);
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ M10 review: the genuine wrong-arm refusal reaches onFailure by name too', () => {
+    const { tree, handle } = mount({
+      frameSource: 'host', poseSource: 'ar', vcPluginArm: true, vcCameraId: '2',
+    });
+    act(() => { handle.current?.holdStart(); });
+    act(() => { jest.advanceTimersByTime(1500); });
+    expect(startedWith).toBeNull();
+    expect(failures.map((f) => f.code)).toEqual(['panoplus-refused-wrong-arm']);
     act(() => { tree.unmount(); });
   });
 

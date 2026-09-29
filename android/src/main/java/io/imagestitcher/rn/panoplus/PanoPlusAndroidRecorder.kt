@@ -472,6 +472,34 @@ private class Stat(private val cap: Int = 512) {
 //  The module
 // ════════════════════════════════════════════════════════════════════════
 
+/**
+ * M8 — THE CAMERA-RELEASE POINT OF A STOP. A stop disarms the plugin arm,
+ * releases the AE/AWB lock, stops ARCore and closes any Camera2 client of its
+ * own, and only THEN finalizes the canvas and the pack, which takes seconds.
+ * JS keeps the camera mounted until this reads true, then unmounts it for the
+ * rest of the finish — the keyframe engine's stitching rule — so nothing
+ * native still reads the camera it unmounts. Process-wide because the session
+ * object is detached the moment `stop()` begins. False from every start.
+ */
+internal object PanoPlusCameraRelease {
+    private val gen = java.util.concurrent.atomic.AtomicLong(0)
+    @Volatile private var releasedGen: Long = -1L
+    /**
+     * A session was INSTALLED: its generation, and nothing is released for it
+     * yet. Taken at install, not at `start()` entry — a start that loses the
+     * install race, or a superseded session's teardown, must never mark the
+     * sweep that did install as released (M8 review).
+     */
+    fun begin(): Long = gen.incrementAndGet()
+    /** The session of generation `g` has let every camera go. A stale
+     *  session's report is ignored. */
+    fun release(g: Long) {
+        if (g == gen.get()) releasedGen = g
+    }
+    /** Has the CURRENT sweep passed its camera-release point? */
+    val released: Boolean get() = releasedGen == gen.get()
+}
+
 class PanoPlusAndroidRecorder(private val reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext), LifecycleEventListener {
 
@@ -624,8 +652,8 @@ class PanoPlusAndroidRecorder(private val reactContext: ReactApplicationContext)
      *
      * The idle viewfinder has nothing to protect — no pack, no evidence, no
      * engine — and no claim on the camera at all when nothing is on screen. It
-     * also loses nothing by being torn down: the panel re-arms it on
-     * foreground (`PanoPlusCaptureSurface`'s AppState listener) and its idle
+     * also loses nothing by being torn down: the JS side re-arms it on
+     * foreground (`useSweepEngine`'s AppState listener) and its idle
      * heartbeat catches the case where that misses.
      *
      * ⚠ ASYNC, NOT `stopIdlePreview`. This is `@ThreadConfined(UI)`; the
@@ -903,7 +931,10 @@ class PanoPlusAndroidRecorder(private val reactContext: ReactApplicationContext)
             // torn-down Rec installed, and the next start() reports
             // `recorder-busy` for a session that no longer exists.
             rec.onTeardown = { session.compareAndSet(rec, null) }
-            if (!session.compareAndSet(null, rec)) {
+            if (session.compareAndSet(null, rec)) {
+                // M8 — THIS session's generation for the camera-release point.
+                rec.releaseGen = PanoPlusCameraRelease.begin()
+            } else {
                 // Another start() raced in and installed its own session.
                 PanoPlusArFramePlugin.shared.disarm()
                 try { rec.shutdown("lost-start-race") } catch (_: Throwable) {}
@@ -2138,6 +2169,10 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
      *  drop its pointer, so status()/stop() stop reporting on a dead session
      *  instead of pretending a torn-down recorder is still live. */
     @Volatile var onTeardown: (() -> Unit)? = null
+    /** M8 — this session's camera-release generation (`PanoPlusCameraRelease`),
+     *  set when it is INSTALLED; -1 (never current) for a session that lost
+     *  the install race. */
+    @Volatile var releaseGen: Long = -1L
 
     private val state = AtomicInteger(ST_IDLE)
     private val settled = AtomicBoolean(false)   // promise settle guard
@@ -7376,6 +7411,9 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
             try { PanoPlusPreview.release() } catch (t: Throwable) {
                 Log.w(TAG, "releasing the preview surface threw", t)
             }
+            // M8 — every camera this stop can hold is let go; the finalize
+            // below needs none of them. Reported for THIS session only.
+            PanoPlusCameraRelease.release(releaseGen)
 
             try { sensorMgr?.unregisterListener(sensorListener) } catch (t: Throwable) {
                 Log.w(TAG, "unregisterListener threw", t)

@@ -72,7 +72,6 @@ jest.mock('react-native-vision-camera', () => ({
 
 import {
   SWEEP_HOST_OWNS_INPUT_KEYS,
-  sweepEffectiveLens,
   sweepHostArmRefusal,
   colourLensTypeCount,
   sweepFailureCameraCode,
@@ -82,6 +81,7 @@ import {
   _sweepCameraHandoffForTests as handoff,
   _sweepPreviewLiveForTests as previewLive,
   _sweepShouldSettleForTests as shouldSettle,
+  cameraKindFor,
 } from '../Camera';
 
 /** The state in which the host owns the camera: non-AR, no hatch (M5: both platforms). */
@@ -104,10 +104,13 @@ describe('sweepHostOwnsCamera — the camera state alone decides', () => {
     expect(hostOwns(OK)).toBe(true);
   });
 
-  it('the full truth table — true exactly when non-AR and no hatch', () => {
+  it('the full truth table — false ONLY for the DR-1a hatch on a non-AR sweep (M8)', () => {
+    // M8: the AR sweep runs on `<Camera>`'s own AR view too, so ownership is
+    // `<Camera>`'s on every cell but the reference hatch — and the hatch is
+    // inert with AR on.
     for (const isAR of [true, false]) {
       for (const frameSourceOverride of [undefined, 'own' as const]) {
-        const want = !isAR && frameSourceOverride !== 'own';
+        const want = !(frameSourceOverride === 'own' && !isAR);
         expect({ isAR, frameSourceOverride, owns: hostOwns({ isAR, frameSourceOverride }) })
           .toEqual({ isAR, frameSourceOverride, owns: want });
       }
@@ -115,13 +118,16 @@ describe('sweepHostOwnsCamera — the camera state alone decides', () => {
   });
 
   it('⚑ every input key has a value that flips the answer, on its own', () => {
+    // From the hatch state (non-AR + 'own' → false), each key alone flips it.
+    const HATCH: SweepHostOwnsCameraInput = { isAR: false, frameSourceOverride: 'own' };
     const flip: { [K in keyof SweepHostOwnsCameraInput]: SweepHostOwnsCameraInput[K] } = {
       isAR: true,
-      frameSourceOverride: 'own',
+      frameSourceOverride: undefined,
     };
+    expect(hostOwns(HATCH)).toBe(false);
     for (const key of SWEEP_HOST_OWNS_INPUT_KEYS) {
-      expect({ key, owns: hostOwns({ ...OK, [key]: flip[key] }) })
-        .toEqual({ key, owns: false });
+      expect({ key, owns: hostOwns({ ...HATCH, [key]: flip[key] }) })
+        .toEqual({ key, owns: true });
     }
   });
 });
@@ -222,6 +228,10 @@ describe('sweepFailureCameraCode — only a missing plugin is a BUILD failure', 
   it('the plugin-missing refusal reaches the host as ENGINE_UNAVAILABLE', () => {
     expect(sweepFailureCameraCode('panoplus-plugin-unavailable')).toBe('ENGINE_UNAVAILABLE');
     expect(sweepFailureCameraCode('panoplus-vc-arm-unavailable')).toBe('ENGINE_UNAVAILABLE');
+    // M8 review — the session module itself missing (JS synthesises it; the
+    // Android module says it of a missing engine). Every emitter means "not
+    // in this build", and since M8 a hold reports it instead of dying silent.
+    expect(sweepFailureCameraCode('panoplus-unavailable')).toBe('ENGINE_UNAVAILABLE');
   });
   it('M5: a camera that cannot carry a sweep is named by what is wrong with it', () => {
     expect(sweepFailureCameraCode('panoplus-vc-device-unsupported')).toBe('SWEEP_DEVICE_UNSUPPORTED');
@@ -234,7 +244,7 @@ describe('sweepFailureCameraCode — only a missing plugin is a BUILD failure', 
   it('every other refusal is this attempt failing', () => {
     for (const c of ['panoplus-not-ready', 'panoplus-camera-not-ready',
       'panoplus-refused-drawable-processor',
-      'panoplus-panorama-disabled', 'panoplus-busy', 'panoplus-unavailable',
+      'panoplus-panorama-disabled', 'panoplus-busy',
       'panoplus-io', '', null, undefined]) {
       expect(sweepFailureCameraCode(c as string | null | undefined)).toBe('PANORAMA_START_FAILED');
     }
@@ -243,26 +253,26 @@ describe('sweepFailureCameraCode — only a missing plugin is a BUILD failure', 
 
 describe('sweepCameraHandoff — the loser releases first, the winner waits', () => {
   it('steady state, host owns: mounts the preview and says so', () => {
-    expect(handoff({ live: true, latch: null, settling: false }))
+    expect(handoff({ live: true, latch: null, settling: false, isAR: false }))
       .toEqual({ mountHostPreview: true, surfaceFrameSource: 'host' });
   });
 
   it('steady state, surface owns: no preview, and the surface is told', () => {
-    expect(handoff({ live: false, latch: null, settling: false }))
+    expect(handoff({ live: false, latch: null, settling: false, isAR: false }))
       .toEqual({ mountHostPreview: false, surfaceFrameSource: 'own' });
   });
 
   it('⚑ own → host, mid-handoff: the surface lets go BEFORE we mount', () => {
     // It is told 'host' immediately (so it closes its idle preview) while
     // the preview waits. The reverse order is two clients on one device.
-    expect(handoff({ live: true, latch: null, settling: true }))
+    expect(handoff({ live: true, latch: null, settling: true, isAR: false }))
       .toEqual({ mountHostPreview: false, surfaceFrameSource: 'host' });
   });
 
   it('⚑ host → own, mid-handoff: we unmount BEFORE the surface opens', () => {
     // Still told 'host', which is what keeps it from opening anything while
     // vision-camera's session is still going down.
-    expect(handoff({ live: false, latch: null, settling: true }))
+    expect(handoff({ live: false, latch: null, settling: true, isAR: false }))
       .toEqual({ mountHostPreview: false, surfaceFrameSource: 'host' });
   });
 
@@ -270,17 +280,30 @@ describe('sweepCameraHandoff — the loser releases first, the winner waits', ()
     // The property that makes the window safe, asserted as a property
     // rather than inferred from the two rows above.
     for (const live of [true, false]) {
-      expect(handoff({ live, latch: null, settling: true }).mountHostPreview)
+      expect(handoff({ live, latch: null, settling: true, isAR: false }).mountHostPreview)
         .toBe(false);
     }
   });
 
   it('⚑ the LATCH outranks the live value while a sweep runs', () => {
     // Native latched the arm at start and never re-reads it.
-    expect(handoff({ live: false, latch: true, settling: false }))
+    expect(handoff({ live: false, latch: true, settling: false, isAR: false }))
       .toEqual({ mountHostPreview: true, surfaceFrameSource: 'host' });
-    expect(handoff({ live: true, latch: false, settling: false }))
+    expect(handoff({ live: true, latch: false, settling: false, isAR: false }))
       .toEqual({ mountHostPreview: false, surfaceFrameSource: 'own' });
+  });
+});
+
+describe('sweepCameraHandoff — M8: the AR kind is <Camera>\'s AR view', () => {
+  it('owned + AR: the engine is told host-ar (it mounts no AR view of its own)', () => {
+    expect(handoff({ live: true, latch: null, settling: false, isAR: true }).surfaceFrameSource)
+      .toBe('host-ar');
+  });
+  it('the hatch and the settle window never say host-ar', () => {
+    expect(handoff({ live: false, latch: null, settling: false, isAR: true }).surfaceFrameSource)
+      .toBe('own');
+    expect(handoff({ live: false, latch: null, settling: true, isAR: true }).surfaceFrameSource)
+      .toBe('host');
   });
 });
 
@@ -308,9 +331,9 @@ describe('sweepShouldSettle — and never under a running sweep', () => {
   it('⚑ …and the state it refuses really would drop the preview', () => {
     // Pins WHY the guard above matters, so deleting it cannot be argued as
     // harmless: with a sweep latched to `host`, a settle turns the mount off.
-    expect(handoff({ live: false, latch: true, settling: true }).mountHostPreview)
+    expect(handoff({ live: false, latch: true, settling: true, isAR: false }).mountHostPreview)
       .toBe(false);
-    expect(handoff({ live: false, latch: true, settling: false }).mountHostPreview)
+    expect(handoff({ live: false, latch: true, settling: false, isAR: false }).mountHostPreview)
       .toBe(true);
   });
 });
@@ -347,46 +370,20 @@ describe('sweepPreviewLive — mounted is not drawing', () => {
   });
 });
 
-// ── THE LENS THE CHIP IS ALLOWED TO CLAIM ──────────────────────────────────
-//
-// Field report, 2026-09-19: "0.5x lens does not go to that camera — shows the
-// same view as 1x." Every layer below the chip was correct: 0.5× moves the arm
-// (Pano's rule), the iOS IMU arm has no τ for that key so it declines, and
-// ARKit is structurally wide-only. The CHIP went on claiming the lens anyway.
-describe('sweepEffectiveLens', () => {
-  type Arm = { poseSource: 'ar' | 'imu'; resolving: boolean };
-  const AR: Arm = { poseSource: 'ar', resolving: false };
-  const IMU: Arm = { poseSource: 'imu', resolving: false };
-  const PENDING_AR: Arm = { poseSource: 'ar', resolving: true };
+// `sweepEffectiveLens` (the chip's mask over an ARKit fallback) was deleted in
+// M10 with the effective-arm feed that fed it: on `<Camera>`'s own camera the
+// vision-camera arm has no ARKit fallback, and 0.5× already turns AR off.
 
-  it('⚑ THE DEFECT: the AR arm masks 0.5× back to 1×', () => {
-    // ARKit publishes no ultra-wide format and `start` deletes the lens key on
-    // that arm, so a chip painting 0.5× names a camera nothing ever opened.
-    expect(sweepEffectiveLens('0.5x', AR)).toBe('1x');
+describe('cameraKindFor — M8: the camera is <Camera>\'s state, never the engine\'s', () => {
+  it('the table', () => {
+    expect(cameraKindFor(true, true)).toBe('none');
+    expect(cameraKindFor(true, false)).toBe('none');
+    expect(cameraKindFor(false, true)).toBe('ar');
+    expect(cameraKindFor(false, false)).toBe('vc');
   });
-
-  it('⚑ the decoupled arm HONOURS it — the mask is not a veto', () => {
-    // Without this the "fix" could be `always 1x`, which would delete the
-    // ultra-wide from the product on the one arm that can open it.
-    expect(sweepEffectiveLens('0.5x', IMU)).toBe('0.5x');
-  });
-
-  it('⚑ while the arm read is in flight it follows the REQUEST', () => {
-    // The courtesy the surface's start button and AR pill already give: a
-    // label that may be taken back one frame later is not offered.
-    expect(sweepEffectiveLens('0.5x', PENDING_AR)).toBe('0.5x');
-  });
-
-  it('⚑ no arm at all (keyframe engine) is untouched, on BOTH lenses', () => {
-    // `engine` selects which engine the hold runs and changes nothing else —
-    // so the mask must be invisible to the engine that has no sweep arm.
-    expect(sweepEffectiveLens('0.5x', null)).toBe('0.5x');
-    expect(sweepEffectiveLens('1x', null)).toBe('1x');
-  });
-
-  it('⚑ 1× is 1× under every arm — the mask never invents a lens', () => {
-    for (const arm of [AR, IMU, PENDING_AR, null]) {
-      expect(sweepEffectiveLens('1x', arm)).toBe('1x');
-    }
+  it('⚑ has NO engine input — flipping the engine cannot change the camera', () => {
+    // Two parameters, both camera state. An engine argument added here is
+    // the regression this pins.
+    expect(cameraKindFor.length).toBe(2);
   });
 });

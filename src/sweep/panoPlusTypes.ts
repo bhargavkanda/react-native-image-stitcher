@@ -333,10 +333,11 @@ export interface PanoPlusEngineOptions {
    *  shipped and what pinned this arm to FAILED.
    *
    *  ⚠ REACHING IT ON DEVICE STILL NEEDS A REBUILD, and the claim that it does
-   *  not was wrong: `PanoPlusCaptureSurface` spreads `packOptions` into the
-   *  start call, but `DebugCameraScreen` — the only host that mounts pano+ —
-   *  passes none, and there is no capture flag for it. A knob the field build
-   *  cannot set is a knob only the offline twin can A/B. */
+   *  not was wrong: `useSweepEngine` spreads `packOptions` into the start
+   *  call (`<Camera>` passes `sweep.packOptions` through), but the field
+   *  host's bag set no such key when this was measured, and there is no
+   *  capture flag for it. A knob the field build cannot set is a knob only the
+   *  offline twin can A/B. */
   crossAvgWindows?: boolean;
   crossSpanFrac?: number;
   crossGradMaxPerFrame?: number;
@@ -815,12 +816,14 @@ export interface PanoPlusStartOptions
    */
   vcViewTag?: number;
   /**
-   * Android — THIS caller owns no camera arm and wants pano+ to open its own
-   * (the standalone `PanoPlusCaptureSurface`). Since M3 a live Android sweep
-   * with neither a plugin arm ({@link vcPluginArm}, or an AR sweep on the
-   * stitcher's AR session) nor this flag is REFUSED with
-   * `live-sweep-without-camera`, so a host that lost its arm never opens a
-   * second camera behind the one on screen. Ignored on iOS.
+   * Android — THIS caller owns no camera arm and wants pano+ to open its own.
+   * `useSweepEngine` sends it only on `frameSource: 'own'`, which `<Camera>`
+   * produces only on the DR-1a hatch (`frameSourceOverride: 'own'`, non-AR).
+   * Since M3 a live Android sweep with neither a plugin arm
+   * ({@link vcPluginArm}, or an AR sweep on the stitcher's AR session) nor
+   * this flag is REFUSED with `live-sweep-without-camera`, so a host that
+   * lost its arm never opens a second camera behind the one on screen.
+   * Ignored on iOS.
    */
   allowOwnCamera?: boolean;
 }
@@ -943,6 +946,12 @@ export interface PanoPlusCounts {
   rejectedTracking: number;
   rejectedRectify: number;
   rejectedInput: number;
+  /** A frame whose timestamp did not advance — a duplicate or a small
+   *  reordering under delivery pressure. BENIGN: the engine skips it. It is
+   *  ALSO counted in {@link rejectedInput} (the engine's row outcome), so a
+   *  consumer that wants frames the engine REFUSED subtracts this. Absent on
+   *  an older binary ⇒ 0. */
+  skippedNonmonotonicTs: number;
   warmingUp: number;
   bootstrap: number;
   gapExtended: number;
@@ -1263,6 +1272,14 @@ export interface PanoPlusStatus {
    * appears rather than letting it run on showing nothing.
    */
   vcDeviceRefusal: string | null;
+  /**
+   * M8 — native has passed the CAMERA-RELEASE point of a stop: the plugin arm
+   * is disarmed, the camera lock released and any camera of pano+'s own
+   * closed, and what remains of the stop (the canvas, the pack) needs no
+   * camera. Read through the finish; `<Camera>` unmounts its camera on it.
+   * False from every start, and on a binary that predates it.
+   */
+  cameraReleased: boolean;
   droppedQueue: number;
   droppedPack: number;
   engineMs: number;
@@ -1948,6 +1965,13 @@ export interface PanoPlusCaptureResult {
  * pack the residual analysis wants.
  */
 export interface PanoPlusFailure {
+  /**
+   * M9 — where the sweep failed: refused or failed at START, ended by a
+   * device refusal while it SWEPT, or failed to FINISH (the stop's finalize).
+   * `<Camera>` reports a finish failure as `PANORAMA_FINALIZE_FAILED`, like a
+   * keyframe stitch failure. Absent means start.
+   */
+  stage?: 'start' | 'sweep' | 'finish';
   /** `'panoplus-unavailable' | 'panoplus-busy' | 'invalid-options' |
    *  'panoplus-io' | 'panoplus-not-running' | 'panoplus-empty' | 'unknown'` */
   code: string;
@@ -1974,9 +1998,12 @@ export interface PanoPlusFailure {
  * the sweep buildable outside the host that first drew a shutter for it.
  */
 export interface SweepSurfaceHandle {
-  /** Fire a capture — the shutter tap. No-ops internally when not ready. */
+  /** The shutter TAP. Always inert: a sweep has no photo (see `holdStart`). */
   capture: () => void;
-  /** Finalize the sweep — the Done button. No-ops when there is nothing to finalize. */
+  /**
+   * Always inert: there is no finalize control, and the release (`holdEnd`)
+   * is what finishes a sweep.
+   */
   finalize: () => void;
   /**
    * The shutter's HOLD gesture. `CameraShutter` fires `onHoldStart` once a
@@ -2002,12 +2029,40 @@ export interface SweepSurfaceHandle {
   abandon?: (reason: string) => void;
 }
 
-/** How that shutter should LOOK, reported up as the sweep changes state. */
+/**
+ * The sweep engine's CONTROLS REPORT, sent through
+ * `SweepEngineProps.onControlsState` when the engine becomes enabled and
+ * again each time `canCapture` or `busy` changes while it is. (`<Camera>`
+ * enables it while `engine === 'sweep'` and no crop review is pending.)
+ *
+ * ⚠ A REPORT, NOT A PAINT ORDER. Outside the test suites its only consumer
+ * is `<Camera>`, and `<Camera>` reads only `busy`. No shutter paints
+ * `canCapture` or `canFinalize` — `<Camera>`'s own shutter, the only one
+ * since M10 (the DR-1a hatch's included), has no term for either.
+ * `SweepOptions` does not carry this callback, so a host never receives it;
+ * a host follows `onSweepingChange`.
+ */
 export interface SweepSurfaceState {
-  /** Shutter looks enabled (a capture would actually do something). */
+  /**
+   * Whether the engine is ready for a hold: `available && !armResolving`
+   * (not phase-gated; a finishing sweep is reported through `busy`). Nothing
+   * paints it, so the shutter looks live while it is false. A hold then is
+   * REFUSED BY NAME instead — `panoplus-unavailable` when this build has no
+   * sweep session module or nowhere to write the pack (`ENGINE_UNAVAILABLE`
+   * to a `<Camera>` host), `panoplus-not-ready` while the arm is still
+   * resolving.
+   */
   canCapture: boolean;
-  /** Finalize looks enabled (there is a sweep to finalize). */
+  /**
+   * Always `false`. There is no finalize control: the RELEASE of the hold is
+   * what finishes a sweep.
+   */
   canFinalize: boolean;
-  /** A capture or finalize is in flight → the shutter shows its busy visual. */
+  /**
+   * A finished sweep is being written (the engine's phase is `'finishing'`).
+   * `<Camera>` shows its shutter's busy visual (the grey ring) and refuses a
+   * new press while this is true. A sweep in progress is NOT busy: the finger
+   * is already down.
+   */
   busy: boolean;
 }

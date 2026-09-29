@@ -2,9 +2,10 @@
 /**
  * SweepHoldOverlay — what the sweep draws over the camera while it is armed
  * and running (M7): the growing-panorama capsule, and the governor / HUD
- * block with its τ chip and arm notice. MOVED VERBATIM from
- * `PanoPlusCaptureSurface`, which renders it at the same place in its tree;
- * from M8 `<Camera>` renders it over its own camera instead.
+ * block with its τ chip and arm notice. Moved verbatim (M7) from the sweep's
+ * old screen, which M10 deleted. `<Camera>` renders it over its own camera in
+ * its main tree; on the DR-1a hatch only, `SweepHatchScreen` renders it over
+ * the hatch's own camera.
  *
  * Pure drawing: every value comes from `useSweepEngine`.
  */
@@ -17,7 +18,6 @@ export interface SweepHoldOverlayProps {
   armContract: SweepEngine['armContract'];
   armDetailOpen: SweepEngine['armDetailOpen'];
   armNotice: SweepEngine['armNotice'];
-  basisWriteDisagreement: SweepEngine['basisWriteDisagreement'];
   drops: SweepEngine['drops'];
   error: SweepEngine['error'];
   guidance: SweepEngine['guidance'];
@@ -44,7 +44,6 @@ export function SweepHoldOverlay({
   armContract,
   armDetailOpen,
   armNotice,
-  basisWriteDisagreement,
   drops,
   error,
   guidance,
@@ -493,8 +492,8 @@ export function SweepHoldOverlay({
         )}
         </View>
         {/* The lens chip and its Android "readout" that lived here until
-            2026-09-03 moved to Pano's bottom bar as Pano's own switcher — see
-            `lensChipVisible` and the bottom of this render. */}
+            2026-09-03 moved to Pano's bottom bar; since M10 the only lens
+            chip is `<Camera>`'s own, on both engines. */}
         {/* ── THE ARM NOTICE — HEADLINE ALWAYS, DETAIL ON A TAP ──────────
             2026-09-02. The headline is the summary and it never moves: it
             names the arm and what is wrong with it in one line, which is
@@ -569,17 +568,6 @@ export function SweepHoldOverlay({
             Same reason as run 1: nothing below here is interactive, so it
             is fenced off from touch explicitly rather than by inspection. */}
         <View pointerEvents="none">
-        {/* THE WRITE/READ DISAGREEMENT. Not an error the operator caused and
-            not something he can fix at the shelf — but the τ half of this
-            same store shipped exactly this bug once, and it was only visible
-            because a panel said two contradictory things one line apart. */}
-        {basisWriteDisagreement != null && (
-          <Text
-            style={styles.hudError}
-            testID="panoplus-basis-write-disagreement">
-            {basisWriteDisagreement}
-          </Text>
-        )}
         {error != null && (
           <Text style={styles.hudError} testID="panoplus-error">
             {error}

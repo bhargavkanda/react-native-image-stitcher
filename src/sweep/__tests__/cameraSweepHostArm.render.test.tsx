@@ -22,9 +22,12 @@
  * The overrides live HERE, in the one file whose subject is the arm that
  * needs them, and every other suite keeps the honest no-device default.
  */
+// M8 — the REAL sweep engine, with what `<Camera>` passes it recorded.
+jest.mock('../useSweepEngine', () =>
+  require('./sweepEngineSpy').sweepEngineSpyFactory());
 import React from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
-import { Platform } from 'react-native';
+import { Platform, StyleSheet } from 'react-native';
 import { VisionCameraProxy } from 'react-native-vision-camera';
 
 // ⚠ THE STUB THIS PARAGRAPH USED TO DESCRIBE IS GONE. `PanoPlusResultView`
@@ -65,8 +68,10 @@ import { NativeModules } from 'react-native';
 
 import { ARToggle, Camera } from '../../camera/Camera';
 import { CameraView } from '../../camera/CameraView';
+import { CameraShutter } from '../../camera/CameraShutter';
+import { SweepHoldOverlay } from '../SweepHoldOverlay';
 import { __resetHardwareVideoSizesCache } from '../../camera/androidHardwareVideoSizes';
-import { PanoPlusCaptureSurface } from '../PanoPlusCaptureSurface';
+import { lastSweepEngineCall, lastSweepProps } from './sweepEngineSpy';
 import { selectCaptureDevice } from '../../camera/selectCaptureDevice';
 import {
   coercePanoPlusSummary,
@@ -210,9 +215,21 @@ async function setEngine(
   });
   await act(async () => { await Promise.resolve(); });
 }
-const surfaceProps = (t: ReactTestRenderer): Record<string, unknown> =>
-  t.root.findByType(PanoPlusCaptureSurface).props as Record<string, unknown>;
+const surfaceProps = (_t: ReactTestRenderer): Record<string, unknown> =>
+  lastSweepProps() as Record<string, unknown>;
 const cameraViews = (t: ReactTestRenderer) => t.root.findAllByType(CameraView);
+/** M9 — `onComplete` awaits the canvas COPY (and the inscribed rect) before
+ *  the review opens or the result is emitted, so drive it asynchronously. */
+async function completeSweep(tree: ReactTestRenderer, r: unknown): Promise<void> {
+  await act(async () => {
+    void (surfaceProps(tree).onComplete as (x: unknown) => Promise<void> | void)(r);
+    for (let i = 0; i < 6; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await Promise.resolve();
+    }
+  });
+}
+const COPY_RE = /^\/tmp\/rnis-captures\/panorama-\d+\.jpg$/;
 
 /**
  * Flip `<Camera>`'s OWN AR pill.
@@ -391,28 +408,15 @@ describe('⚑ THE ERROR CHANNEL — driven through <Camera>, not just the pure f
   });
 });
 
-describe('⚑ THE REVIEW CYCLE — where ownership does NOT move but the element goes', () => {
-  it('a preview remounted after the result viewer is not reported as live', async () => {
-    // THE DISTINGUISHING PATH, and the one three drafts of this coverage
-    // missed. On sweep → review → dismiss → sweep, `mountHostPreview` never
-    // changes: the latch clears, no ownership term moves, `statusPhase`
-    // never reaches 'stitching' on the sweep path. What unmounts the
-    // preview is `sweepReview != null` alone.
-    //
-    // So a "started" flag cleared on the OWNERSHIP change is never cleared
-    // here, and the remounted `<CameraView>` — a new instance with no
-    // session — was reported as drawing. Transparent root, explainer
-    // suppressed, black underneath, on every capture after the first.
-    //
-    // The ownership round-trip case above cannot see this: ownership DOES
-    // move there, so both the right and the wrong keying clear the flag.
-    //
-    // `showPreview` is explicit because the subject is the REVIEW CYCLE, and
-    // a sweep only opens a review when the host asked for one — the same
-    // `(rectCrop || showPreview)` gate the keyframe engine uses. `rectCrop`
-    // is pinned OFF: it defaults ON since 2026-09-23, and the crop editor
-    // opens only after the inscribed-rect decode is awaited, so the
-    // preview-only branch (which stashes in the same tick) is the subject.
+describe('⚑ THE REVIEW CYCLE — M8: the preview stays up, the engine stands down', () => {
+  it('the camera is NOT unmounted behind the review, and the engine is deselected there', async () => {
+    // ⚠ INVERTED BY M8, and the old hazard went with the old shape. The
+    // surface owned a camera and unmounted behind the review, so the
+    // remounted `<CameraView>` could be reported "live" before it drew — the
+    // case this used to pin. Now the sweep runs on `<Camera>`'s own preview,
+    // which stays mounted behind the review exactly as the keyframe engine's
+    // always has (M8 plan), while the ENGINE is deselected (`enabled: false`),
+    // so nothing sweeps under the review. No remount, so nothing to mis-report.
     const tree = await render({ rectCrop: false, showPreview: true });
     act(() => {
       (cameraViews(tree)[0].props.cameraProps as {
@@ -420,13 +424,8 @@ describe('⚑ THE REVIEW CYCLE — where ownership does NOT move but the element
       }).onPreviewStarted?.();
     });
     expect(surfaceProps(tree).hostPreviewLive).toBe(true);
-    const armBefore = surfaceProps(tree).vcPluginArm;
-
-    // `coercePanoPlusSummary({})` fills every field a real summary has, so
-    // the viewer renders without a hand-built fixture drifting from it.
-    const onComplete = surfaceProps(tree).onComplete as (r: unknown) => void;
-    act(() => {
-      onComplete({
+    await act(async () => {
+      void (surfaceProps(tree).onComplete as (r: unknown) => Promise<void>)({
         uri: 'file:///x.jpg',
         width: 4000,
         height: 1200,
@@ -434,115 +433,108 @@ describe('⚑ THE REVIEW CYCLE — where ownership does NOT move but the element
         arms: { rectify: true, gainMatch: true },
         summary: coercePanoPlusSummary({}),
       });
+      for (let i = 0; i < 6; i += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        await Promise.resolve();
+      }
     });
-    // The surface unmounts behind the review (it owns a camera, and
-    // leaving it mounted while the operator reads holds the device), so
-    // its props are unreadable until the review closes.
-    expect(cameraViews(tree)).toHaveLength(0);
-
-    // ⚠ THE SHARED REVIEW NOW, NOT A SWEEP-ONLY VIEWER. The sweep defers
-    // into `cropPending` exactly as a panorama does, so it is reviewed by
-    // the same `<RectCropPreview>` and Retake is possible for the first
-    // time. This case pins the CAMERA property across that cycle, which is
-    // unchanged; only the component that closes it moved.
+    const behind = cameraViews(tree);
+    expect(behind).toHaveLength(1);                       // still mounted
+    expect(lastSweepEngineCall().enabled).toBe(false);    // …the engine is not
     const viewer = tree.root.findAll(
       (n) => typeof n.props?.onRetake === 'function', { deep: true },
     )[0];
     act(() => { (viewer.props.onRetake as () => void)(); });
     expect(cameraViews(tree)).toHaveLength(1);
-
-    // ⚠ THE PRECONDITION THAT MAKES THIS CASE DISTINGUISHING, asserted on
-    // the far side because the surface is unreadable mid-review: ownership
-    // did NOT move across the cycle. If it ever does, this case silently
-    // degrades into a duplicate of the ownership round-trip above, which
-    // both the right and the wrong keying already pass.
-    expect(surfaceProps(tree).vcPluginArm).toBe(armBefore);
-    expect(armBefore).toBe(true);
-
-    // And the new element, which has had no `onPreviewStarted`, is not
-    // reported as drawing.
-    expect(surfaceProps(tree).hostPreviewLive).toBe(false);
+    expect(lastSweepEngineCall().enabled).toBe(true);
+    // The same element drew the whole time, so "live" is simply true.
+    expect(surfaceProps(tree).hostPreviewLive).toBe(true);
     act(() => { tree.unmount(); });
   });
 });
 
-describe('⚑ THE ENGINE ROUND TRIP — the keyframe preview is not the sweep\'s', () => {
-  it('sweep → keyframe → sweep does not inherit the keyframe preview\'s "drawing"', async () => {
-    // THE SIXTH ROUND'S BLOCKER, and the fifth defect of this exact shape:
-    // one `<Camera>`-scoped flag written by an element rendered from TWO
-    // places. `hostPreviewElement` is mounted by the sweep cell AND by the
-    // main keyframe tree, and it carried the sweep's `onPreviewStarted` in
-    // both — so the KEYFRAME preview's first frame set a flag that means
-    // "the SWEEP's host preview is drawing", while the clearing effect,
-    // keyed on a value that was already false, never ran.
-    //
-    // Coming back to the sweep then handed a brand-new, session-less
-    // element the answer "live": transparent root, explainer suppressed,
-    // black underneath. The callbacks are now passed in by the owning cell,
-    // so the keyframe tree structurally cannot write it.
+describe('⚑ THE ENGINE ROUND TRIP — M8: ONE preview, not two', () => {
+  const placeholder = (t: ReactTestRenderer) => t.root.findAll(
+    (n) => n.props != null && n.props.children === 'Switching camera…',
+  ).length > 0;
+
+  it('sweep → keyframe → sweep never unmounts the camera, and "drawing" carries', async () => {
+    // INVERTED BY M8. The flag used to be written by an element rendered
+    // from TWO places, and the keyframe copy was kept from writing it. There
+    // is one element now, in one tree, on both engines: switching the engine
+    // switches what the HOLD runs, not the camera (DR-2 I3/A7). The preview
+    // that was drawing is still drawing.
     const tree = await render();
     expect(cameraViews(tree)).toHaveLength(1);
-
-    await setEngine(tree, 'keyframe');
-    act(() => { jest.advanceTimersByTime(2000); });
-    const kf = cameraViews(tree);
-    expect(kf.length).toBeGreaterThan(0);
-    // The keyframe preview starts drawing — and must write nothing of ours.
     act(() => {
-      (kf[0].props.cameraProps as { onPreviewStarted?: () => void })
+      (cameraViews(tree)[0].props.cameraProps as { onPreviewStarted?: () => void })
         .onPreviewStarted?.();
     });
-
-    await setEngine(tree, 'sweep');
-    act(() => { jest.advanceTimersByTime(2000); });
+    await setEngine(tree, 'keyframe');
+    expect(placeholder(tree)).toBe(false);
     expect(cameraViews(tree)).toHaveLength(1);
-    // No `onPreviewStarted` has fired for THIS element.
-    expect(surfaceProps(tree).hostPreviewLive).toBe(false);
-
-    // …and it still reports correctly once it really does draw.
-    act(() => {
-      (cameraViews(tree)[0].props.cameraProps as {
-        onPreviewStarted?: () => void;
-      }).onPreviewStarted?.();
-    });
+    await setEngine(tree, 'sweep');
+    expect(placeholder(tree)).toBe(false);
+    expect(cameraViews(tree)).toHaveLength(1);
     expect(surfaceProps(tree).hostPreviewLive).toBe(true);
+    // …and a real stop still reads as a stop.
+    act(() => {
+      (cameraViews(tree)[0].props.cameraProps as { onPreviewStopped?: () => void })
+        .onPreviewStopped?.();
+    });
+    expect(surfaceProps(tree).hostPreviewLive).toBe(false);
     act(() => { tree.unmount(); });
   });
 
-  it('⚑ the keyframe cell is given NO sweep lifecycle callbacks at all', async () => {
-    // The structural statement behind the case above, asserted directly so
-    // a future edit that re-adds them to the shared element fails here
-    // rather than in a capture session.
+  it('⚑ the preview carries the SAME lifecycle wiring on both engines', async () => {
     const tree = await render();
+    const wiring = () => {
+      const v = cameraViews(tree)[0];
+      const cp = v.props.cameraProps as Record<string, unknown>;
+      return {
+        started: typeof cp.onPreviewStarted,
+        stopped: typeof cp.onPreviewStopped,
+        anyError: typeof v.props.onAnyError,
+        frameProcessor: typeof cp.frameProcessor,
+      };
+    };
+    const onSweep = wiring();
     await setEngine(tree, 'keyframe');
-    act(() => { jest.advanceTimersByTime(2000); });
-    const props = cameraViews(tree)[0].props.cameraProps as
-      Record<string, unknown> | undefined;
-    expect(props?.onPreviewStarted).toBeUndefined();
-    expect(props?.onPreviewStopped).toBeUndefined();
-    expect(cameraViews(tree)[0].props.onAnyError).toBeUndefined();
+    expect(wiring()).toEqual(onSweep);
+    expect(onSweep.started).toBe('function');
     act(() => { tree.unmount(); });
   });
 });
 
 describe('⚑ THE OWNERSHIP FLIP — a handoff, not an instant swap', () => {
-  it('hands the camera over with NEITHER side holding one', async () => {
-    // The AR pill moves ownership at idle. Done in one commit, <CameraView>
-    // unmounts and the surface opens its own client in the same frame while
-    // Camera2 is still releasing — ERROR_CAMERA_IN_USE for an ordering bug.
+  it('M8: the AR pill is NOT a handoff — the sweep follows <Camera>\'s own transition', async () => {
+    // Both kinds are `<Camera>`'s cameras now, so the AR pill moves the sweep
+    // from `<CameraView>` to `<Camera>`'s AR view the way it moves the keyframe
+    // engine: through `<Camera>`'s own transition. The engine never opens one.
     const tree = await render();
     expect(cameraViews(tree)).toHaveLength(1);
-
     toggleAr(tree);
+    expect(cameraViews(tree)).toHaveLength(0);
+    act(() => { jest.advanceTimersByTime(1000); });
+    await act(async () => { await Promise.resolve(); });
+    expect(surfaceProps(tree).frameSource).toBe('host-ar');
+    expect(surfaceProps(tree).vcPluginArm).toBe(false);
+    act(() => { tree.unmount(); });
+  });
 
-    // Mid-handoff: the surface is told 'host' so it lets go, and nothing is
-    // mounted so nothing contends.
+  it('hands the camera over with NEITHER side holding one — the DR-1a hatch', async () => {
+    // The hatch toggled on at idle moves the camera to pano+'s own. Done in
+    // one commit, <CameraView> unmounts and the surface opens its own client
+    // in the same frame while Camera2 is still releasing — ERROR_CAMERA_IN_USE
+    // for an ordering bug. So: a window in which neither side holds one.
+    const tree = await render();
+    expect(cameraViews(tree)).toHaveLength(1);
+    await setEngine(tree, 'sweep', { sweep: { frameSourceOverride: 'own' } });
     expect(cameraViews(tree)).toHaveLength(0);
     expect(surfaceProps(tree).frameSource).toBe('host');
     expect(surfaceProps(tree).vcPluginArm).toBe(false);
-
-    // After the window, the surface owns its own camera.
     act(() => { jest.advanceTimersByTime(1000); });
+    await act(async () => { await Promise.resolve(); });
     expect(cameraViews(tree)).toHaveLength(0);
     expect(surfaceProps(tree).frameSource).toBe('own');
     act(() => { tree.unmount(); });
@@ -670,8 +662,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
     const tree = await render({
       rectCrop: false, showPreview: true, onCapture: (r: unknown) => { seen.push(r); },
     });
-    const onComplete = surfaceProps(tree).onComplete as (r: unknown) => void;
-    act(() => { onComplete(RESULT); });
+    await completeSweep(tree, RESULT);
     expect(seen).toHaveLength(0);          // nothing emitted yet
     expect(review(tree)).toHaveLength(1);  // …and the review is up
     // ⚠ AND IT IS SHOWING THE PANORAMA. `<Image>` renders nothing for a
@@ -679,20 +670,24 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
     // the right modal around an empty frame — which is how the operator's
     // defect #4 was "fixed". The public result keeps the bare path; only
     // what the viewer is handed is schemed.
-    expect(RESULT.uri).toBe(CANVAS);                       // bare, by contract
-    expect(review(tree)[0].props.imageUri).toBe(`file://${CANVAS}`);
+    // M9 — the review shows the OUTPUT, a COPY in the capture directory; the
+    // pack's canvas is left as the engine painted it.
+    expect(RESULT.uri).toBe(CANVAS);
+    const shown = String(review(tree)[0].props.imageUri);
+    expect(shown.startsWith('file://')).toBe(true);
+    expect(shown.replace('file://', '')).toMatch(COPY_RE);
     // …and the surface is gone behind it, so two cameras cannot be open.
-    expect(tree.root.findAllByType(PanoPlusCaptureSurface)).toHaveLength(0);
+    expect(lastSweepEngineCall().enabled).toBe(false);
     act(() => { tree.unmount(); });
   });
 
-  it('⚑ Confirm emits it, exactly once, with the panoplus discriminant', async () => {
+  it('⚑ Confirm emits it, exactly once — a PANORAMA with engine "sweep", its pack kept (M9)', async () => {
     const seen: Array<Record<string, unknown>> = [];
     const tree = await render({
       rectCrop: false, showPreview: true,
       onCapture: (r: Record<string, unknown>) => { seen.push(r); },
     });
-    act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT); });
+    await completeSweep(tree, RESULT);
     // The emit must come from CONFIRM, not from `onComplete`. Without this
     // the count of 1 cannot tell the fix from the emit-first defect it
     // replaced — measured: a mutation restoring emit-first kept this green.
@@ -700,8 +695,20 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
     act(() => { (review(tree)[0].props.onUseOriginal as (u?: string) => void)(); });
     expect(seen).toHaveLength(1);
     expect(review(tree)).toHaveLength(0);   // …and it closed
-    expect(seen[0].type).toBe('panoplus');
+    // M9 (D6): one panorama shape for both engines, the engine named, and the
+    // pack at the top level exactly as before.
+    expect(seen[0].type).toBe('panorama');
+    expect(seen[0].engine).toBe('sweep');
     expect(seen[0].ok).toBe(true);
+    expect(seen[0].kind).toBe('panoplus');
+    expect(seen[0].sessionDir).toBe(RESULT.sessionDir);
+    expect(seen[0].summary).toBe(RESULT.summary);
+    expect(seen[0].liveness).toBe('unavailable');
+    expect(seen[0].framesRequested).toBe(120);   // counts.seen
+    expect(seen[0].framesIncluded).toBe(96);     // painted (no seed, no tail here)
+    expect(seen[0].framesDropped).toBe(0);
+    expect(typeof seen[0].durationMs).toBe('number');
+    expect('finalConfidenceThresh' in seen[0]).toBe(false);
     act(() => { tree.unmount(); });
   });
 
@@ -711,12 +718,12 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
     const tree = await render({
       rectCrop: false, showPreview: true, onCapture: (r: unknown) => { seen.push(r); },
     });
-    act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT); });
+    await completeSweep(tree, RESULT);
     act(() => { (review(tree)[0].props.onRetake as () => void)(); });
     expect(seen).toHaveLength(0);
     // …and the surface comes BACK, which is what makes a retake possible.
     expect(review(tree)).toHaveLength(0);
-    expect(tree.root.findAllByType(PanoPlusCaptureSurface)).toHaveLength(1);
+    expect(lastSweepEngineCall().enabled).toBe(true);
     act(() => { tree.unmount(); });
   });
 
@@ -732,7 +739,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
   it('⚑ every sweep writes host_verdict.json into its own session dir', async () => {
     written.length = 0;
     const tree = await render({ rectCrop: false, showPreview: true });
-    act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT); });
+    await completeSweep(tree, RESULT);
     await act(async () => { await Promise.resolve(); });
     const verdict = written.filter((w) => w.uri.endsWith('/host_verdict.json'));
     expect(verdict).toHaveLength(1);
@@ -759,7 +766,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
     // reason the call sits where it does.
     written.length = 0;
     const tree = await render({ rectCrop: false, showPreview: true });
-    act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT); });
+    await completeSweep(tree, RESULT);
     await act(async () => { await Promise.resolve(); });
     act(() => { (review(tree)[0].props.onRetake as () => void)(); });
     await act(async () => { await Promise.resolve(); });
@@ -773,11 +780,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
     // unconditionally and puts `host_verdict.json` at the filesystem root.
     written.length = 0;
     const tree = await render({});
-    act(() => {
-      (surfaceProps(tree).onComplete as (r: unknown) => void)({
-        ...RESULT, sessionDir: '',
-      });
-    });
+    await completeSweep(tree, { ...RESULT, sessionDir: '' });
     await act(async () => { await Promise.resolve(); });
     expect(written.filter((w) => w.uri.endsWith('/host_verdict.json')))
       .toHaveLength(0);
@@ -808,7 +811,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
       rectCrop: false, showPreview: true,
       onCapture: (r: Record<string, unknown>) => { seen.push(r); },
     });
-    act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(holed); });
+    await completeSweep(tree, holed);
     // The BANNER gets the message strings…
     expect((review(tree)[0].props.warnings as string[]).join(' ')).not.toBe('');
     // …and the HOST gets the coded warning on the result, which is the
@@ -828,7 +831,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
       rectCrop: false, showPreview: true,
       onCapture: (r: Record<string, unknown>) => { seen.push(r); },
     });
-    act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT); });
+    await completeSweep(tree, RESULT);
     act(() => { (review(tree)[0].props.onUseOriginal as () => void)(); });
     expect((seen[0].warnings as Array<{ code: string }>).map((x) => x.code))
       .not.toContain('SWEEP_NOT_INTACT');
@@ -848,9 +851,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
     // `cropQuad` now takes a destination (both natives) and `<Camera>` hands
     // a pano+ crop a SIBLING of the canvas, so `canvas.jpg` is untouched.
     const tree = await render({ rectCrop: true });
-    await act(async () => {
-      (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT);
-    });
+    await completeSweep(tree, RESULT);
     expect(review(tree)[0].props.showCropControls).toBe(true);
     // …AND THE QUAD OPENS ON THE INSCRIBED RECTANGLE, which is the half the
     // operator actually asked for ("cropped to the maximum inscribable
@@ -861,7 +862,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
     act(() => { tree.unmount(); });
   });
 
-  it('⚑ …and the crop lands on a SIBLING — canvas.jpg is never overwritten', async () => {
+  it('⚑ …and the crop runs IN PLACE on the COPY — canvas.jpg is never touched (M9)', async () => {
     // ⚠ THE WHOLE REASON THE EDITOR WAS WITHHELD. A pano+ canvas is
     // referenced by its pack, so an in-place crop leaves every offline
     // harness reading a pack whose seam residuals, coverage mask and ledger
@@ -872,9 +873,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
       rectCrop: true,
       onCapture: (r: Record<string, unknown>) => { seen.push(r); },
     });
-    await act(async () => {
-      (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT);
-    });
+    await completeSweep(tree, RESULT);
     await act(async () => {
       (review(tree)[0].props.onConfirm as (q: unknown) => void)({
         quad: [
@@ -884,12 +883,11 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
       });
     });
     expect(cropCalls).toHaveLength(1);
-    expect(cropCalls[0]!.imagePath)
-      .toBe('/data/user/0/com.x/files/panoplus/pp_1/canvas.jpg');
-    expect(cropCalls[0]!.outputPath)
-      .toBe('/data/user/0/com.x/files/panoplus/pp_1/canvas.cropped.jpg');
+    expect(cropCalls[0]!.imagePath).toMatch(COPY_RE);
+    expect(cropCalls[0]!.imagePath).not.toContain('canvas.jpg');
+    expect(cropCalls[0]!.outputPath).toBeUndefined();
     // …and the HOST is handed the crop, not the canvas.
-    expect(String(seen[0]!.uri)).toContain('canvas.cropped.jpg');
+    expect(String(seen[0]!.uri)).toContain('/tmp/rnis-captures/panorama-');
     act(() => { tree.unmount(); });
   });
 
@@ -921,9 +919,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
       rectCrop: false, showPreview: true,            // preview-only — NOT the crop editor
       onCapture: (r: Record<string, unknown>) => { seen.push(r); },
     });
-    await act(async () => {
-      (surfaceProps(tree).onComplete as (r: unknown) => void)(bootstrapOnly);
-    });
+    await completeSweep(tree, bootstrapOnly);
     // ON THE BANNER…
     const banner = (review(tree)[0].props.warnings as string[]).join(' | ');
     expect(banner).toContain('single frame');
@@ -937,7 +933,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
     act(() => { tree.unmount(); });
   });
 
-  it('⚑ …and a STALE native is refused before it can overwrite the canvas', async () => {
+  it('⚑ …and a STALE native still crops — in place on the copy needs no output path (M9)', async () => {
     // ⚠ JS NEWER THAN NATIVE IS THE ROUTINE STATE HERE — a Metro reload
     // without a rebuild. Such a build ignores the unknown `outputPath` key
     // and rewrites `imagePath` in place, and on this path `imagePath` IS the
@@ -956,9 +952,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
       onCapture: (r: Record<string, unknown>) => { seen.push(r); },
       onError: (e: unknown) => { errs.push(e); },
     });
-    await act(async () => {
-      (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT);
-    });
+    await completeSweep(tree, RESULT);
     await act(async () => {
       (review(tree)[0].props.onConfirm as (q: unknown) => void)({
         quad: [
@@ -967,12 +961,14 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
         ],
       });
     });
-    expect(cropCalls).toHaveLength(0);     // native was never asked
-    expect(errs).toHaveLength(1);          // …the host is told
-    // …and the capture is NOT lost: the un-cropped panorama is emitted, and
-    // it is SCHEMED, which the sweep's bare `canvasPath` is not.
+    // Until M9 the sweep cropped to a SIBLING of the pack's canvas, which an
+    // older native could not do, so the crop was refused. Its output is now a
+    // standalone copy, cropped in place like every other engine's.
+    expect(cropCalls).toHaveLength(1);
+    expect(cropCalls[0]!.outputPath).toBeUndefined();
+    expect(errs).toHaveLength(0);
     expect(seen).toHaveLength(1);
-    expect(String(seen[0]!.uri)).toMatch(/^file:\/\//);
+    expect(String(seen[0]!.uri)).toMatch(/^file:\/\/\/tmp\/rnis-captures\/panorama-/);
     act(() => { tree.unmount(); });
   });
 
@@ -993,7 +989,7 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
       rectCrop: false, showPreview: false,
       onCapture: (r: unknown) => { seen.push(r); },
     });
-    act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT); });
+    await completeSweep(tree, RESULT);
     expect(review(tree)).toHaveLength(0);
     expect(seen).toHaveLength(1);          // …and it emitted immediately
     act(() => { tree.unmount(); });
@@ -1007,14 +1003,116 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
     // case above is therefore opt-in: it has to say `rectCrop: false`.
     const seen: unknown[] = [];
     const tree = await render({ onCapture: (r: unknown) => { seen.push(r); } });
-    await act(async () => {
-      (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT);
-    });
+    await completeSweep(tree, RESULT);
     expect(review(tree)).toHaveLength(1);
     expect(review(tree)[0].props.showCropControls).toBe(true);
     expect(review(tree)[0].props.initialRect)
       .toEqual({ x: 12, y: 8, width: 3600, height: 1100 });
     expect(seen).toHaveLength(0);
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ M9: the output lands in the host\'s outputDir', async () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const tree = await render({
+      rectCrop: false, showPreview: false, outputDir: 'file:///host/out/',
+      onCapture: (r: Record<string, unknown>) => { seen.push(r); },
+    });
+    await completeSweep(tree, RESULT);
+    expect(String(seen[0].uri)).toMatch(/^file:\/\/\/host\/out\/panorama-\d+\.jpg$/);
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ M9: frames the engine REFUSED reach onFramesDropped', async () => {
+    const dropped: Array<{ requested: number; included: number }> = [];
+    const refused = panoPlusResultOf(
+      coercePanoPlusSummary({
+        canvasPath: CANVAS, sessionDir: '/data/user/0/com.x/files/panoplus/pp_1',
+        width: 4000, height: 1200,
+        counts: { seen: 120, painted: 96, rejectedOutOfCage: 7, rejectedTracking: 3 },
+      }),
+      { rectify: true, gainMatch: true, packFrames: 'all', poseSource: 'imu' },
+      '2026-09-24T00:00:00.000Z',
+    );
+    const tree = await render({
+      rectCrop: false, showPreview: false,
+      onFramesDropped: (d: { requested: number; included: number }) => { dropped.push(d); },
+    });
+    await completeSweep(tree, refused);
+    // M9 review — the result's OWN numbers (framesIncluded is painted + seed,
+    // 96 here), plus the refused count; not `requested − dropped`.
+    expect(dropped).toEqual([{ requested: 120, included: 96, dropped: 10 }]);
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ NEGATIVE CONTROL: a sweep with no refusals fires no onFramesDropped', async () => {
+    const dropped: unknown[] = [];
+    const tree = await render({
+      rectCrop: false, showPreview: false,
+      onFramesDropped: (d: unknown) => { dropped.push(d); },
+    });
+    await completeSweep(tree, RESULT);
+    expect(dropped).toEqual([]);
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ M9: an output that cannot be written is OUTPUT_WRITE_FAILED on both channels', async () => {
+    const NM = require('react-native').NativeModules as Record<string, any>;
+    const realCopy = NM.RNImageStitcherFileUtils.copyFile;
+    NM.RNImageStitcherFileUtils.copyFile = () => Promise.reject(new Error('disk full'));
+    const seen: Array<Record<string, any>> = [];
+    const errs: Array<{ code: string }> = [];
+    try {
+      const tree = await render({
+        rectCrop: false, showPreview: true,
+        onCapture: (r: Record<string, any>) => { seen.push(r); },
+        onError: (e: { code: string }) => { errs.push(e); },
+      });
+      await completeSweep(tree, RESULT);
+      expect(errs.map((e) => e.code)).toEqual(['OUTPUT_WRITE_FAILED']);
+      expect(seen).toHaveLength(1);
+      expect([seen[0].ok, seen[0].type, seen[0].engine]).toEqual([false, 'panorama', 'sweep']);
+      expect(review(tree)).toHaveLength(0);     // nothing to review
+      act(() => { tree.unmount(); });
+    } finally {
+      NM.RNImageStitcherFileUtils.copyFile = realCopy;
+    }
+  });
+
+  it('⚑ M9: a failure reaches onCapture as ok:false, and a FINISH failure is a finalize failure', async () => {
+    const seen: Array<Record<string, any>> = [];
+    const errs: Array<{ code: string }> = [];
+    const tree = await render({
+      onCapture: (r: Record<string, any>) => { seen.push(r); },
+      onError: (e: { code: string }) => { errs.push(e); },
+    });
+    const fail = surfaceProps(tree).onFailure as (f: unknown) => void;
+    act(() => { fail({ code: 'panoplus-io', message: 'x', sessionDir: null, counts: null, abort: null }); });
+    act(() => {
+      fail({ code: 'panoplus-io', message: 'y', sessionDir: null, counts: null, abort: null, stage: 'finish' });
+    });
+    expect(errs.map((e) => e.code)).toEqual(['PANORAMA_START_FAILED', 'PANORAMA_FINALIZE_FAILED']);
+    expect(seen.map((r) => [r.ok, r.type, r.engine, r.error.code])).toEqual([
+      [false, 'panorama', 'sweep', 'PANORAMA_START_FAILED'],
+      [false, 'panorama', 'sweep', 'PANORAMA_FINALIZE_FAILED'],
+    ]);
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ NEGATIVE CONTROL: an abandon is a guard rail, not a failure — neither channel hears it', async () => {
+    const seen: unknown[] = [];
+    const errs: unknown[] = [];
+    const tree = await render({
+      onCapture: (r: unknown) => { seen.push(r); },
+      onError: (e: unknown) => { errs.push(e); },
+    });
+    act(() => {
+      (surfaceProps(tree).onFailure as (f: unknown) => void)({
+        code: 'panoplus-abandoned', message: 'x', sessionDir: null, counts: null, abort: null,
+      });
+    });
+    expect(seen).toEqual([]);
+    expect(errs).toEqual([]);
     act(() => { tree.unmount(); });
   });
 
@@ -1030,11 +1128,12 @@ describe('⚑ THE RESULT CHANNEL — the same review every engine uses', () => {
       rectCrop: false, showPreview: false,
       onCapture: (r: Record<string, unknown>) => { seen.push(r); },
     });
-    act(() => { (surfaceProps(tree).onComplete as (r: unknown) => void)(RESULT); });
+    await completeSweep(tree, RESULT);
     expect(seen).toHaveLength(1);
-    expect(seen[0].uri).toBe(`file://${CANVAS}`);
-    // …and the PACK's own path is untouched, which is why the scheming
-    // happens at the emit boundary and not in `panoPlusResultOf`.
+    // M9 — the emitted uri is the COPY, schemed like every other engine's…
+    expect(String(seen[0].uri).startsWith('file://')).toBe(true);
+    expect(String(seen[0].uri).replace('file://', '')).toMatch(COPY_RE);
+    // …and the PACK's own path is untouched.
     expect(RESULT.uri).toBe(CANVAS);
     act(() => { tree.unmount(); });
   });
@@ -1215,7 +1314,7 @@ describe('M3 — the frame processor vision-camera sees is one composed worklet'
     const host = { type: 'readonly', frameProcessor: () => { hostCalls.push('host'); } };
     const tree = await render({ engine: 'sweep', frameProcessor: host });
     await act(async () => { jest.advanceTimersByTime(700); await Promise.resolve(); });
-    const surface = tree.root.findByType(PanoPlusCaptureSurface);
+    const surface = { props: lastSweepProps() as Record<string, any> };
     expect(surface.props.frameSource).toBe('host');
     expect(surface.props.hostArmRefusal).toBeNull();
     const fp = fpOf(tree) as { frameProcessor: (f: unknown) => void };
@@ -1230,8 +1329,94 @@ describe('M3 — the frame processor vision-camera sees is one composed worklet'
     const tree = await render({ engine: 'sweep', frameProcessor: host });
     await act(async () => { jest.advanceTimersByTime(700); await Promise.resolve(); });
     expect(fpOf(tree)).toBe(host);
-    const surface = tree.root.findByType(PanoPlusCaptureSurface);
+    const surface = { props: lastSweepProps() as Record<string, any> };
     expect(surface.props.hostArmRefusal?.code).toBe('panoplus-refused-drawable-processor');
+    act(() => { tree.unmount(); });
+  });
+});
+
+// ── THE HOLD OVERLAY, OVER THE LIVE PREVIEW (M10 review) ────────────────────
+//
+// On this arm the viewfinder IS `<Camera>`'s `<CameraView>`, and while a sweep
+// is held `<Camera>` draws `SweepHoldOverlay` over it, in an absolute-fill
+// wrapper rendered after the preview. Anything between that overlay and the
+// preview that paints a background blacks the viewfinder out for the whole
+// hold. The cases that used to guard this ('is TRANSPARENT on the host arm',
+// panoPlusHostArm) check the hatch's own view, which `<Camera>` never mounts
+// over a live host preview — so this one checks the tree that ships.
+describe('⚑ the sweep\'s hold overlay paints NOTHING over the live preview', () => {
+  const NM = NativeModules as Record<string, unknown>;
+  beforeEach(() => {
+    // Just enough of the session module for the REAL engine to start a
+    // sweep and hold it: the overlay is drawn only while one is live.
+    NM.RNSSweepSession = {
+      start: (o: Record<string, unknown>) => Promise.resolve({
+        sessionDir: o.sessionDir, startedAtMs: 1, pluginAvailable: true,
+        poseSource: 'imu', frameSource: 'vc-plugin',
+      }),
+      stop: () => Promise.resolve({}),
+      cancel: () => Promise.resolve({ cancelled: true }),
+      getStatus: () => Promise.resolve({ running: true, seq: 1, painted: 5 }),
+      setIdlePreview: () => Promise.resolve({ on: false }),
+      getConstants: () => ({ documentDirectory: 'file:///data/files/', vcArmSupported: true }),
+      documentDirectory: 'file:///data/files/',
+      vcArmSupported: true,
+    };
+  });
+  afterEach(() => { delete NM.RNSSweepSession; });
+
+  /** Does this style paint anything? `transparent` and a zero alpha do not. */
+  const paints = (bg: unknown): boolean => bg != null
+    && bg !== 'transparent'
+    && !/^rgba\(.*,\s*0(\.0*)?\s*\)$/.test(String(bg));
+
+  it('no view between SweepHoldOverlay and the preview sets a background, while a sweep is held', async () => {
+    // MUTATIONS: the overlay's absolute-fill wrapper in `<Camera>`'s main tree
+    // given `backgroundColor: '#000'` → the viewfinder is black for every
+    // non-AR hold, and before this case the whole suite stayed green; the
+    // same wrapper given a translucent scrim → the preview is dimmed. Both
+    // killed.
+    // `panMode: 'both'`: the portrait-hold gate would otherwise park the hold
+    // behind a rotate prompt (this harness holds the phone in portrait).
+    const tree = await render({ panMode: 'both' });
+    // `findByType` throws unless there is exactly ONE of each.
+    act(() => {
+      (tree.root.findByType(CameraView).props.cameraProps as {
+        onPreviewStarted?: () => void;
+      }).onPreviewStarted?.();
+    });
+    // PRECONDITIONS: the preview is drawing, and a hold really started —
+    // without them there is nothing live to paint over, and no overlay.
+    expect(surfaceProps(tree).hostPreviewLive).toBe(true);
+    act(() => {
+      (tree.root.findByType(CameraShutter).props.onHoldStart as () => void)();
+    });
+    for (let i = 0; i < 3; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await act(async () => {
+        jest.advanceTimersByTime(300);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+    }
+    const overlay = tree.root.findAllByType(SweepHoldOverlay);
+    expect(overlay).toHaveLength(1);
+    // The walk stops at the first view the PREVIEW also sits in: a background
+    // there (the container's own black) is painted BENEATH the preview.
+    const underPreview = new Set<unknown>();
+    for (let n = tree.root.findByType(CameraView).parent; n != null; n = n.parent) {
+      underPreview.add(n);
+    }
+    const painters: string[] = [];
+    for (let n = overlay[0].parent; n != null && !underPreview.has(n); n = n.parent) {
+      const bg = (StyleSheet.flatten(n.props?.style) as { backgroundColor?: unknown } | undefined)
+        ?.backgroundColor;
+      if (paints(bg)) {
+        const name = (n.type as { displayName?: string }).displayName ?? String(n.type);
+        painters.push(`${name}: ${String(bg)}`);
+      }
+    }
+    expect(painters).toEqual([]);
     act(() => { tree.unmount(); });
   });
 });

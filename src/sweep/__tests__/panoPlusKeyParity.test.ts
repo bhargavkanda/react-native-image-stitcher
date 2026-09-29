@@ -96,6 +96,13 @@ const KOTLIN_CHAINS: Record<'status' | 'summary', Record<string, Array<[string, 
       ['PanoPlusAndroidRecorder.kt', 'statusMap', 'putString("arTrackingFailure"'],
       ['PanoPlusLiveModule.kt', 'getStatus', 'copyString(rec, out, "arTrackingFailure")'],
     ],
+    // BOTH branches of getStatus, each by a form only it has: the main path
+    // (`out.`) and the no-engine early return (inside `apply`). One shared
+    // form let the main path's line be deleted with this gate green.
+    cameraReleased: [
+      ['PanoPlusLiveModule.kt', 'getStatus', 'out.putBoolean("cameraReleased", PanoPlusCameraRelease.released)'],
+      ['PanoPlusLiveModule.kt', 'getStatus', '\n                putBoolean("cameraReleased", PanoPlusCameraRelease.released)'],
+    ],
     vcDeviceRefusal: [
       ['PanoPlusAndroidRecorder.kt', 'statusMap', 'putString(\n            "vcDeviceRefusal"'],
       ['PanoPlusLiveModule.kt', 'getStatus', 'copyString(rec, out, "vcDeviceRefusal")'],
@@ -312,6 +319,7 @@ function iosProducedPaths(src: string): { status: Set<string>; summary: Set<stri
  */
 const IOS_BRIDGE_STATUS: Record<string, [string, string, string, string]> = {
   vcDeviceRefusal: ['ios/PanoPlus/PanoPlusBridge.swift', 'getStatus', 'st["vcDeviceRefusal"] = r', 'st'],
+  cameraReleased: ['ios/PanoPlus/PanoPlusBridge.swift', 'getStatus', 'st["cameraReleased"] = Self.cameraReleased()', 'st'],
 };
 
 /** Swift source with `//` and `/* *\/` comments removed (strings are not parsed). */

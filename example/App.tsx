@@ -166,13 +166,13 @@ function App(): React.JSX.Element {
    *
    * `'keyframe'` is the shipped path: vision-camera frames, a keyframe gate,
    * cv::Stitcher at the end. `'sweep'` is the slit-scan engine — it paints
-   * strips continuously off an AR session's pose and writes a pack rather
-   * than a single JPEG, so it has its own on-screen surface and its own
-   * result shape (`type: 'panoplus'`).
+   * strips continuously during the hold and also writes a pack. Since M8–M10
+   * it runs on `<Camera>`'s own camera, shutter and chrome, and its result is
+   * a panorama with `engine: 'sweep'`: the engine changes only what the hold
+   * runs.
    *
-   * ⚠ A REMOUNT, not a prop flip, hence the `key` on <Camera>. The two
-   * engines own different camera sessions; swapping them in place would have
-   * both alive for a commit.
+   * A PROP FLIP, not a remount: `engine` is deliberately NOT in <Camera>'s
+   * `key` (see the key below) — one camera session serves both engines.
    */
   const [engine, setEngine] = useState<'keyframe' | 'sweep'>('keyframe');
 
@@ -430,14 +430,12 @@ function App(): React.JSX.Element {
         result.warnings.map((w) => `${w.code}: ${w.message}`),
       );
     }
-    // A SWEEP is the third result kind. It writes a PACK; `sessionDir` is
-    // where the strips, the poses and the meta live, and that is what a host
-    // wants. `tailFlushColumns` is printed because it is the ONLY channel
-    // this app has for the lead-out's extent — `panoPlusResidualLines`'s
-    // LEAD-OUT sentence renders through `PanoPlusResultView`, which
-    // `<Camera>` no longer mounts, and `host_verdict.json` needs
-    // `expo-file-system`, which this example does not depend on.
-    if (result.type === 'panoplus') {
+    // A SWEEP is a panorama with `engine: 'sweep'` (M9), and it also writes a
+    // PACK: `sessionDir` is where the strips, the poses and the meta live.
+    // `tailFlushColumns` is printed because it is the ONLY channel this app
+    // has for the lead-out's extent (`host_verdict.json` needs
+    // `expo-file-system`, which this example does not depend on).
+    if (result.type === 'panorama' && result.engine === 'sweep') {
       // eslint-disable-next-line no-console
       console.log(
         `[example] sweep complete · ${result.width}×${result.height} · `
@@ -561,14 +559,9 @@ function App(): React.JSX.Element {
       title:
         preview.type === 'photo'
           ? `Photo · ${preview.width}×${preview.height}`
-          : preview.type === 'panoplus'
-            // Unreachable today — a sweep is reviewed in its own surface and
-            // never parks here — but the discriminant has three members now
-            // and narrowing that ignores one is how a third kind reaches a
-            // branch written for two.
-            ? `Sweep · ${preview.width}×${preview.height}`
-            : `Panorama · ${preview.framesIncluded}/${preview.framesRequested} frames`
-              + (preview.stitchModeResolved
+          : `Panorama · ${preview.framesIncluded}/${preview.framesRequested} frames`
+              // Keyframe-only: a sweep has no stitch mode, so it narrows first.
+              + (preview.engine !== 'sweep' && preview.stitchModeResolved
                 ? ` · ${preview.stitchModeResolved}`
                 : ''),
     };
@@ -651,30 +644,32 @@ function App(): React.JSX.Element {
           // the key because they are mount-time native props.
           key={`cam-kfq-${kfQuality ? 'hi' : 'lo'}-ab${antiBlurOn ? 1 : 0}`}
           engine={engine}
-          // ⚠ THE ONLY ROUTE THAT DELIVERS 0.5× ON iOS TODAY.
+          // ── 0.5× ON iOS NEEDS NO CALIBRATION STEP FROM THIS APP.
           //
           // ARKit publishes no ultra-wide format at all (0 of 22 on
-          // iPhone17,1), so 0.5× needs the DECOUPLED arm — and that arm
-          // needs a calibration. It has two halves and only one of them is
-          // reachable from this package:
+          // iPhone17,1), so a 0.5× sweep runs on <Camera>'s own
+          // vision-camera camera with CoreMotion attitude (the decoupled
+          // arm). That arm needs two things, and neither is the host's job:
           //
-          //   BASIS  — the device→camera rotation. Measured ONCE per phone
-          //            by the first-run acquisition overlay, which IS in
-          //            this package and comes up automatically.
-          //   τ      — the rolling-shutter constant, keyed
-          //            `model | lens | W×H | fps`. Needs the gear's IMU cal
-          //            stage 1, which lives in the private shell, not here.
-          //            It was also MEASURED and deliberately not persisted:
-          //            8 of 12 runs scattered 5.03 ms, wider than the
-          //            3.08 ms it was meant to buy back.
-          //
-          // So τ=0 is not a degradation from a known-good τ — it is the
-          // state of the art on this arm, and `tauUncorrected` is the branch
-          // that runs it on a real basis. Without this the arm declines,
-          // falls back to ARKit, and 0.5× silently does nothing.
+          //   BASIS  — the device→camera rotation. DERIVED natively from the
+          //            open camera when the hold starts. A camera whose basis
+          //            has not been measured is refused THEN, by name
+          //            (`SWEEP_DEVICE_UNSUPPORTED`, on `onError` and on
+          //            `onCapture({ ok: false })`). There is no calibration
+          //            overlay or gesture in this package, and no fallback to
+          //            ARKit.
+          //   τ      — the rolling-shutter constant. The arm runs τ=0 by
+          //            default. τ was MEASURED and deliberately not persisted:
+          //            8 of 12 runs scattered 5.03 ms, wider than the 3.08 ms
+          //            it was meant to buy back. So τ=0 is not a degradation
+          //            from a known-good τ — it is the state of the art on
+          //            this arm. Android has no τ at all; every IMU sweep
+          //            there is τ=0 too.
           //
           // The pack records `tauProvenance: uncorrected` and never claims a
-          // τ it does not have.
+          // τ it does not have. That is also why this bag passes no
+          // `tauUncorrected`: the arm sets it itself, and on every route this
+          // app reaches the flag changes nothing.
           sweep={{
             // ⚠ THE COMPASS A/B, REACHABLE AT LAST. Measured 2026-09-22 over
             // 73 A35 packs: `crossRectifyDeg` — the quantity the rectifier
@@ -692,7 +687,6 @@ function App(): React.JSX.Element {
             // thing that turns the analytic 75% prediction into a measurement,
             // and it matters most where the field is worst: steel racking.
             attitudeMagFree: magFree,
-            tauUncorrected: true,
             // (The Android AR arm used to need `arPluginArm: true` here to run
             // on the stitcher's ARCore session; since M2 it is the only
             // Android AR arm, so there is nothing to pass.)
@@ -725,7 +719,11 @@ function App(): React.JSX.Element {
                   preferHighFpsFormat: false,
                 }
           }
-          panMode={panMode}
+          // M8 — the hold dispatcher applies the pan-mode gate to BOTH engines,
+          // and the default 'vertical' is a landscape hold. A sweep is held in
+          // portrait, so this host passes 'both' for it — the library keeps no
+          // per-engine default. The chip below still drives keyframe captures.
+          panMode={engine === 'sweep' ? 'both' : panMode}
           // Lateral-guard experiment knobs.  There are FOUR independent
           // triggers and each is gated by its OWN prop -- `lateralBudgetCm`
           // does NOT disable the turn channels -- so an honest OFF run has
@@ -853,11 +851,9 @@ function App(): React.JSX.Element {
           </Text>
         </Pressable>
 
-        {/* The ENGINE the hold runs. `sweep` replaces the whole preview with
-            the slit-scan surface — that is expected: the two engines own
-            different camera sessions and only one can be mounted. A sweep
-            completes on the same `onCapture` as a panorama, discriminated by
-            `type: 'panoplus'`. */}
+        {/* The ENGINE the hold runs. Same camera, same screen, same
+            controls; a sweep completes on the same `onCapture` as a keyframe
+            panorama, with `engine: 'sweep'`. */}
         <Pressable
           style={[styles.devToggle, { top: 310 }]}
           onPress={() => setEngine((e) => (e === 'sweep' ? 'keyframe' : 'sweep'))}

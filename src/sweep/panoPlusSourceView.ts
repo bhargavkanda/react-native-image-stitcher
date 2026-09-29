@@ -23,9 +23,11 @@
  * `createCaptureSession` (Camera2 fixes a session's outputs at configure time,
  * so a surface arriving later cannot join and the sweep records headless).
  * Folding them into one component would mount the Android view too late and
- * produce a black rectangle with nothing to explain it. `PanoPlusCaptureSurface`
- * resolves both and mounts from its FIRST render, which is what satisfies the
- * Android ordering.
+ * produce a black rectangle with nothing to explain it. `useSweepEngine`
+ * resolves both (`AvfViewfinder`), and `SweepHatchScreen` mounts the result
+ * from its FIRST render on the own arm (`frameSource === 'own' && !arArmed`),
+ * which is what satisfies the Android ordering. That is the DR-1a hatch only:
+ * every other sweep runs on `<Camera>`'s camera and mounts neither view.
  */
 
 import { Platform, UIManager, requireNativeComponent } from 'react-native';

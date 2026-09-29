@@ -88,6 +88,7 @@ function statusFixture(over: Partial<PanoPlusStatus> = {}): PanoPlusStatus {
   const base: PanoPlusStatus = {
     running: true,
     vcDeviceRefusal: null,
+    cameraReleased: false,
     // The drift verdict a CLEAN sweep reports: level 0, no arm, never fired.
     // Spelled out rather than defaulted so a test that means to exercise the
     // guard has to say so.
@@ -2719,6 +2720,23 @@ describe('the preview publish, as JS sees it', () => {
     });
     expect(old!.previewRenders).toBe(0);
     expect(old!.previewFails).toBe(0);
+  });
+
+  it('M8 review: cameraReleased is true ONLY on an explicit boolean true', () => {
+    // It unmounts `<Camera>`'s camera mid-finish. A binary that predates the
+    // field (absent), or anything truthy that is not `true`, must read as "not
+    // released" — the camera staying up through a finish is the old, safe
+    // behaviour; unmounting it under a session that still holds the device is
+    // two clients on one camera.
+    const read = (v: unknown) => readPanoPlusStatus({
+      plugins: { [PANO_PLUS_PLUGIN_KEY]: v === undefined ? { running: false } : { running: false, cameraReleased: v } },
+    })!.cameraReleased;
+    expect(read(undefined)).toBe(false);
+    expect(read(false)).toBe(false);
+    expect(read('true')).toBe(false);
+    expect(read(1)).toBe(false);
+    expect(read(null)).toBe(false);
+    expect(read(true)).toBe(true);
   });
 
   it('makes the finished sweep say the preview never published', () => {

@@ -9,8 +9,8 @@
  * lived in exactly that untestable HUD layer — the maths under them was tested
  * and correct, the WIRING was not. So the status parse, the governor copy, the
  * HUD line, the integrity verdict, the session naming and the result shape all
- * live here, and `PanoPlusCaptureSurface` is left holding only React state and
- * native calls.
+ * live here, and the React side (`useSweepEngine`, since M10 its only one) is
+ * left holding only React state and native calls.
  *
  * PURE + TOTAL: no `react-native`, no `expo-*`, no throws. Every function
  * takes `unknown` where the value crosses a bridge, because a native module on
@@ -463,6 +463,7 @@ export function coercePanoPlusStatus(raw: unknown): PanoPlusStatus | null {
     viewfinderAttached: s.viewfinderAttached === true,
     viewfinderNote: str(s.viewfinderNote),
     vcDeviceRefusal: nullableStr(s.vcDeviceRefusal),
+    cameraReleased: s.cameraReleased === true,
     droppedQueue: num(s.droppedQueue),
     droppedPack: num(s.droppedPack),
     engineMs: num(s.engineMs),
@@ -2907,6 +2908,7 @@ function countsOf(raw: unknown): PanoPlusCounts {
     rejectedTracking: num(c.rejectedTracking),
     rejectedRectify: num(c.rejectedRectify),
     rejectedInput: num(c.rejectedInput),
+    skippedNonmonotonicTs: num(c.skippedNonmonotonicTs),
     warmingUp: num(c.warmingUp),
     bootstrap: num(c.bootstrap),
     gapExtended: num(c.gapExtended),
@@ -4891,12 +4893,13 @@ export function panoPlusSweepHudSidecar(
 export const PANO_PLUS_VERDICT_FILE = 'host_verdict.json';
 
 /**
- * The bytes of {@link PANO_PLUS_VERDICT_FILE} — the WHOLE output-screen
- * report, in the exact words the screen would have printed.
+ * The bytes of {@link PANO_PLUS_VERDICT_FILE} — the WHOLE residual report, in
+ * the exact words the output screen printed until that screen was deleted
+ * (M10). No screen shows it now; this file is where it lives.
  *
- * PURE, so the shape is testable off-device (the write happens in
- * `PanoPlusResultView`, where nothing can be asserted, and a sidecar that
- * silently emitted `{}` would look exactly like a sweep with no residuals).
+ * PURE, so the shape is testable off-device. The write is `<Camera>`'s
+ * `writeSweepVerdictSidecar`, on every delivered sweep, and a sidecar that
+ * silently emitted `{}` would look exactly like a sweep with no residuals.
  *
  * ⚠ THE RENDERED PROSE, NOT JUST ITS INPUTS. `meta.json` already carries every
  * NUMBER these sentences are computed from, so a reader could in principle
@@ -5237,12 +5240,18 @@ export function panoPlusVerdictSidecar(
   const residuals = panoPlusResidualLines(result.summary, result.arms);
   return JSON.stringify(
     {
-      schema: 'panoplus-host-verdict/1',
+      // /2 since the M10 review. NO FIELD CHANGED: what changed is that
+      // `headline` and `note` stopped saying a screen shows the verdict. A /1
+      // pack's note claims the output screen showed the headline, which was
+      // true only while `PanoPlusResultView` mounted — `<Camera>` stopped
+      // mounting it on 2026-09-19 (ef4e95a), and M10 deleted it.
+      schema: 'panoplus-host-verdict/2',
       writtenAtMs: ctx?.writtenAtMs ?? Date.now(),
       capturedAt: result.capturedAt,
       canvas: { width: result.width, height: result.height },
-      // The one line the screen still shows. Repeated here so the file can be
-      // read on its own without joining it back to `verdict.lines`.
+      // The verdict in one line. NO SCREEN SHOWS IT (see `note`): it is
+      // recorded here, so the file can be read on its own without joining it
+      // back to `verdict.lines`.
       headline: panoPlusVerdictHeadline(integrity),
       isIntact: integrity.isIntact,
       verdict: {
@@ -5252,8 +5261,9 @@ export function panoPlusVerdictSidecar(
         seamMeasured: integrity.seamMeasured,
         photoMeasured: integrity.photoMeasured,
         clippedFrames: integrity.clippedFrames,
-        // THE SENTENCES, in the screen's own order and with the nulls dropped
-        // — a null in this list would read as a line that rendered empty.
+        // THE SENTENCES, in the order the output screen printed them and
+        // with the nulls dropped — a null in this list would read as a line
+        // that rendered empty.
         lines: [
           integrity.line,
           integrity.clipLine,
@@ -5274,10 +5284,13 @@ export function panoPlusVerdictSidecar(
       // only in the commit that added it is a sidecar the next reader deletes.
       note:
         'The pano+ residual diagnostic. ADVISORY: it gates nothing and no '
-        + 'pixel depends on it. It lived on the output screen until 2026-09-02, '
-        + 'where it covered the picture and pushed the Close/Save/Share controls '
-        + 'off the bottom of the display; the screen now shows the headline with '
-        + 'an expander and writes the full text here.',
+        + 'pixel depends on it. NO SCREEN SHOWS IT. It lived on the output '
+        + 'screen until 2026-09-02, which then showed only the headline; that '
+        + 'screen is deleted. The review shows capture warnings instead '
+        + '(panoPlusCaptureWarnings, which names measured defects only, and '
+        + 'the lead-out warning), and they are not this verdict: a sweep can '
+        + 'be NOT MEASURED here with no warning at all. The full verdict, '
+        + 'headline included, is recorded here and nowhere else.',
     },
     null,
     2,
@@ -5285,12 +5298,15 @@ export function panoPlusVerdictSidecar(
 }
 
 /**
- * The ONE line the output screen shows.
+ * The verdict in ONE line — written to `host_verdict.json`, and shown on no
+ * screen.
  *
- * Extracted from the view's JSX so the screen and the sidecar cannot disagree
- * about the verdict — the failure this repo has already paid for twice, where
- * two spellings of one decision drifted apart and the pack and the screen said
- * different things about the same sweep.
+ * Extracted from the output screen's JSX so that screen and the sidecar could
+ * not disagree about the verdict — the failure this repo has already paid for
+ * twice, where two spellings of one decision drifted apart and the pack and
+ * the screen said different things about the same sweep. The screen is
+ * deleted (M10). The review's warning banner is `panoPlusCaptureWarnings`, a
+ * different ladder (see `panoPlusDefectHeadline`).
  */
 export function panoPlusVerdictHeadline(i: PanoPlusIntegrity): string {
   if (i.isIntact) return '✓ Intact — no breaks, nothing truncated, seams inside bars';

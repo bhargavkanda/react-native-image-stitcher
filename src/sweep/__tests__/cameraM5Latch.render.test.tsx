@@ -11,6 +11,9 @@
  *     then is discarded by name (`CAPTURE_INTERRUPTED`), not finished on a
  *     camera that stopped.
  */
+// M8 — the REAL sweep engine, with what `<Camera>` passes it recorded.
+jest.mock('../useSweepEngine', () =>
+  require('./sweepEngineSpy').sweepEngineSpyFactory());
 import React from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { NativeModules, Platform } from 'react-native';
@@ -28,7 +31,7 @@ jest.mock('expo-file-system/legacy', () => ({
 
 import { Camera } from '../../camera/Camera';
 import { useLatchedWhile } from '../../camera/CameraView';
-import { PanoPlusCaptureSurface } from '../PanoPlusCaptureSurface';
+import { lastSweepProps } from './sweepEngineSpy';
 
 const RN = require('react-native') as { __emitAppState: (s: string) => void };
 const vc = require('react-native-vision-camera') as {
@@ -70,7 +73,7 @@ async function flush(): Promise<void> {
 }
 const vcCamera = (t: ReactTestRenderer) =>
   t.root.findAll((n) => n.type === vc.Camera)[0]!;
-const surface = (t: ReactTestRenderer) => t.root.findByType(PanoPlusCaptureSurface);
+const surface = (_t: ReactTestRenderer) => ({ props: lastSweepProps() as Record<string, any> });
 
 describe('useLatchedWhile', () => {
   function Probe({ latched, value, out }: { latched: boolean; value: number; out: number[] }) {

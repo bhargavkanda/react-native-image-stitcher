@@ -20,6 +20,9 @@
  * sweep: holding the preview back must not hand the sweep a camera of its
  * own.
  */
+// M8 — the REAL sweep engine, with what `<Camera>` passes it recorded.
+jest.mock('../useSweepEngine', () =>
+  require('./sweepEngineSpy').sweepEngineSpyFactory());
 import React from 'react';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { NativeModules, Platform } from 'react-native';
@@ -54,7 +57,7 @@ jest.mock('../../camera/CameraView', () => {
 
 import { ARToggle, Camera } from '../../camera/Camera';
 import { CameraView } from '../../camera/CameraView';
-import { PanoPlusCaptureSurface } from '../PanoPlusCaptureSurface';
+import { lastSweepProps } from './sweepEngineSpy';
 
 const vc = require('react-native-vision-camera') as {
   useCameraDevice: unknown;
@@ -113,8 +116,8 @@ async function advance(ms: number, steps = 1): Promise<void> {
     await flush();
   }
 }
-const surface = (t: ReactTestRenderer): Record<string, unknown> =>
-  t.root.findByType(PanoPlusCaptureSurface).props as Record<string, unknown>;
+const surface = (_t: ReactTestRenderer): Record<string, unknown> =>
+  lastSweepProps() as Record<string, unknown>;
 const cameraViews = (t: ReactTestRenderer) => t.root.findAllByType(CameraView);
 const fpOf = (t: ReactTestRenderer): unknown =>
   t.root.findAll((n) => n.type === vc.Camera)[0]?.props.frameProcessor;

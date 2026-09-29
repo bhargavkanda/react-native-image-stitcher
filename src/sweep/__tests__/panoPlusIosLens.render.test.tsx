@@ -23,6 +23,11 @@
 // The property under test: WHAT CROSSES THE BRIDGE IS THE LENS THE FLAG NAMED.
 // A viewfinder framing through the ultra-wide for a sweep recorded on the wide
 // is 1.85× of picture the operator will not get.
+//
+// M10 — the sweep's own screen and its lens chip are deleted, and with the
+// chip the lens-AVAILABILITY probe that fed it (`panoPlusLensAvailability`).
+// The engine is mounted through `SweepEngineHarness`; the lens arrives as the
+// host's `lens` prop, exactly as before — only the chip that wrote it is gone.
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -47,7 +52,8 @@ jest.mock(
   { virtual: true },
 );
 
-import { PanoPlusCaptureSurface } from '../PanoPlusCaptureSurface';
+import { SweepEngineHarness } from './sweepEngineHarness';
+import { ARCameraView } from '../../camera/ARCameraView';
 import { PANO_PLUS_SWAP_GRACE_MS } from '../panoPlusModel';
 
 const NM = NativeModules as Record<string, unknown>;
@@ -65,12 +71,6 @@ let idleCalls: Array<{ on: boolean; options: Record<string, unknown> }> = [];
 let idleFormatApplied: boolean | null = null;
 /** Every `plannedCaptureFormat` key, in order. */
 let planKeys: Array<Record<string, unknown>> = [];
-/**
- * Lenses the planner REFUSES, and with which code — a body that publishes no
- * ultra-wide, or one whose lens has no 4:3 format at 60 fps. Empty by default:
- * both lenses open, which is every phone this arm has run on.
- */
-let planRefuse: Partial<Record<Lens, string>> = {};
 /**
  * HOLD THE PLANNER OPEN, so the window the calibration cache exists to close
  * can actually be looked into.
@@ -95,7 +95,6 @@ const DEVICE_TYPE: Record<Lens, string> = {
 function installNative(): void {
   idleCalls = [];
   planKeys = [];
-  planRefuse = {};
   planPending = [];
   planHangs = false;
   startedWith = null;
@@ -154,18 +153,6 @@ function installNative(): void {
     plannedCaptureFormat: (o: Record<string, unknown>) => {
       planKeys.push(o);
       const lens: Lens = o.lens === 'wide' ? 'wide' : 'ultraWide';
-      const refused = planRefuse[lens];
-      if (refused != null) {
-        // Native's refusal shape: no format, the code, and the REQUEST kept
-        // beside it so the caller never has to match a bare reason back to
-        // its own question.
-        return Promise.resolve({
-          ok: false, reason: refused, detail: `${refused} on this body`,
-          lens: null, lensRequested: lens,
-          width: null, height: null, fps: 60,
-          tauKey: null, basisKey: 'iPhone17,1',
-        });
-      }
       const answer = {
         ok: true,
         lens: DEVICE_TYPE[lens],
@@ -193,38 +180,40 @@ function installNative(): void {
 }
 
 interface Rig {
+  /** Is the stitcher's `<ARCameraView>` mounted? Found by TYPE — the harness
+   *  draws the real component. */
+  hasArView: () => boolean;
   has: (testID: string) => boolean;
-  /** Re-render with a new `lens` prop — what the host does when the chip
+  /** Re-render with a new `lens` prop — what the host does when ITS chip
    *  writes `panoPlusLens`. */
   setLens: (lens: Lens) => void;
   unmount: () => void;
 }
 
-function element(lens: Lens, onLensChange: (l: Lens) => void): React.ReactElement {
+function element(lens: Lens): React.ReactElement {
   return (
-    <PanoPlusCaptureSurface
+    <SweepEngineHarness
       onComplete={() => undefined}
       onCancel={() => undefined}
       poseSource="imu"
       lens={lens}
-      onLensChange={onLensChange}
     />
   );
 }
 
 function mount(lens: Lens): Rig {
   let renderer!: ReactTestRenderer;
-  const onLensChange = (): void => undefined;
   act(() => {
-    renderer = TestRenderer.create(element(lens, onLensChange));
+    renderer = TestRenderer.create(element(lens));
   });
   act(() => {
     jest.advanceTimersByTime(PANO_PLUS_SWAP_GRACE_MS + 1);
   });
   return {
+    hasArView: () => renderer.root.findAllByType(ARCameraView).length > 0,
     has: (testID) => renderer.root.findAllByProps({ testID }).length > 0,
     setLens: (next) => {
-      act(() => { renderer.update(element(next, onLensChange)); });
+      act(() => { renderer.update(element(next)); });
     },
     unmount: () => { act(() => { renderer.unmount(); }); },
   };
@@ -261,7 +250,7 @@ describe('the idle viewfinder frames with the lens the flag named (iOS, decouple
     await settle();
     // The IMU arm is confirmed usable (calibrated), so ARKit is not mounted
     // and the arm's own viewfinder is what the operator frames through.
-    expect(r.has('ar-camera')).toBe(false);
+    expect(r.hasArView()).toBe(false);
     const asked = onCalls();
     expect(asked.length).toBeGreaterThan(0);
     const last = asked[asked.length - 1]!;
@@ -312,10 +301,10 @@ describe('the idle viewfinder frames with the lens the flag named (iOS, decouple
     // which is the operator's own report — "I saw the camera has not opened
     // yet for ~5 sec going from AR to 0.5×; it is almost instant in pano".
     //
-    // The snapshot is keyed by lens and the store only moves through the
-    // gear (which bumps `calibEpoch` and drops the cache), so a flip BACK to
-    // a lens already read can reuse its answer, keep the viewfinder up, and
-    // still re-read in the background.
+    // The snapshot is keyed by lens and nothing on this screen writes the
+    // store (M10 removed the in-camera gesture, and with it `calibEpoch`), so
+    // a flip BACK to a lens already read can reuse its answer, keep the
+    // viewfinder up, and still re-read in the background.
     const r = mount('wide');
     await settle();
     r.setLens('ultraWide');
@@ -379,18 +368,18 @@ describe('the arm precondition is read for the lens the sweep will open', () => 
     // sweep opens the wide would gate this arm on a calibration for a camera
     // it is not about to use.
     //
-    // ⚠ THE FIRST CALL, NOT THE LAST, AND THE ORDER IS THE POINT. The lens
-    // AVAILABILITY probe (`panoPlusLensAvailability`, the chip's `has0_5x`)
-    // asks this same planner once per lens at mount — so a "last call" here
-    // would be satisfied by a probe that asks for BOTH lenses regardless of
-    // the flag. The arm read's effect is declared first and therefore runs
-    // first, so `planKeys[0]` is it.
-    expect(planKeys[0]?.lens).toBe('wide');
+    // ⚠ EVERY CALL, NOT JUST THE FIRST (M10). This used to read `planKeys[0]`
+    // because the lens-AVAILABILITY probe (the chip's `has0_5x`) asked the
+    // same planner for BOTH lenses at mount. The probe is deleted with the
+    // chip, so the arm read is the only thing that asks — and every question
+    // it asks is about the lens the flag names.
+    expect(planKeys.length).toBeGreaterThan(0);
+    expect(planKeys.map((k) => k.lens)).toEqual(planKeys.map(() => 'wide'));
     const before = planKeys.length;
     r.setLens('ultraWide');
     await settle();
-    expect(planKeys.length).toBeGreaterThan(before);
-    expect(planKeys[planKeys.length - 1]?.lens).toBe('ultraWide');
+    // Exactly ONE new question, about the new lens.
+    expect(planKeys.slice(before).map((k) => k.lens)).toEqual(['ultraWide']);
     r.unmount();
   });
 
@@ -405,23 +394,7 @@ describe('the arm precondition is read for the lens the sweep will open', () => 
   // under mutation. A rig limitation is worth naming; it is not worth
   // believing without trying to remove it.
 
-  it('the availability probe asks BOTH lenses, in the flag spelling', async () => {
-    // The chip's `has0_5x`. It is a hardware question, so it is asked once at
-    // mount and not re-asked on a flip — and it is asked with the flag's
-    // words, because native refuses '0.5x' / '1x' by design.
-    const r = mount('wide');
-    await settle();
-    const spellings = planKeys.map((k) => k.lens);
-    expect(spellings).toContain('ultraWide');
-    expect(spellings).toContain('wide');
-    expect(spellings.every((s) => s === 'ultraWide' || s === 'wide')).toBe(true);
-    const before = planKeys.length;
-    r.setLens('ultraWide');
-    await settle();
-    // Exactly ONE new call — the arm read. The hardware did not change.
-    expect(planKeys.length).toBe(before + 1);
-    r.unmount();
-  });
+  // The lens-availability probe (`panoPlusLensAvailability`, the chip's `has0_5x`) — deleted in M10.
 
   it('nothing here touched start(): no sweep was begun by mounting or flipping', async () => {
     const r = mount('wide');
@@ -433,41 +406,7 @@ describe('the arm precondition is read for the lens the sweep will open', () => 
   });
 });
 
-describe('the chip offers only lenses this body can open', () => {
-  it('shows both pills on a body that publishes both — the phones this arm runs on', async () => {
-    const r = mount('wide');
-    await settle();
-    expect(r.has('panoplus-lens-chip-0_5x')).toBe(true);
-    expect(r.has('panoplus-lens-chip-1x')).toBe(true);
-    r.unmount();
-  });
-
-  it('collapses to Pano’s static 1× when the planner refuses the ultra-wide', async () => {
-    // An iPhone with no `builtInUltraWideCamera` (or one with no 4:3 format
-    // at 60 fps on it). A `0.5×` pill there is a control that moves the flag
-    // into a sweep the planner will refuse — Pano hides it, and so does this.
-    planRefuse.ultraWide = 'panoplus-no-ultrawide';
-    const r = mount('wide');
-    await settle();
-    expect(r.has('panoplus-lens-chip')).toBe(true);
-    expect(r.has('panoplus-lens-chip-0_5x')).toBe(false);
-    expect(r.has('panoplus-lens-chip-1x')).toBe(false);
-    r.unmount();
-  });
-
-  it('still shows both pills on ANDROID, where the recorder resolves the camera', async () => {
-    // `panoPlusLensAvailability` answers null off iOS, and null means "not
-    // measured" — never "no 0.5×". The Android recorder picks the lens by
-    // facing/FOV, so the chip must not make a hardware claim for it.
-    Platform.OS = 'android';
-    planRefuse.ultraWide = 'panoplus-no-ultrawide';
-    const r = mount('ultraWide');
-    await settle();
-    expect(r.has('panoplus-lens-chip-0_5x')).toBe(true);
-    expect(r.has('panoplus-lens-chip-1x')).toBe(true);
-    r.unmount();
-  });
-});
+// The clone lens chip's offer (both pills / static 1× / Android both pills) — deleted in M10.
 
 describe('iOS says on SCREEN when the viewfinder does not match the sweep', () => {
   // ── THE FAULT THAT REACHED NATIVE AND STOPPED THERE ──────────────────────

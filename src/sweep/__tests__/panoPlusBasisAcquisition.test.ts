@@ -18,14 +18,9 @@
 // this is the assertion that makes the argument enforceable.
 
 import {
-  PANO_PLUS_BASIS_AXIS_BAR_DEG,
-  REFERENCE_GRACE_S,
-  basisRefusalCoaching,
   panoPlusBasisCapability,
-  panoPlusBasisGestureView,
   resolvePanoPlusBasis,
 } from '../panoPlusBasisAcquisition';
-import { parseLiveStatus } from '../panoPlusCalibration';
 
 const IOS = panoPlusBasisCapability('ios');
 const ANDROID = panoPlusBasisCapability('android');
@@ -210,127 +205,5 @@ describe('PROVENANCE — the word the pack is allowed to use', () => {
       return r.provenance === 'measured';
     });
     expect(claimed).toEqual(['stored']);
-  });
-});
-
-// ════════════════════════════════════════════════════════════════════════
-//  The overlay's model
-// ════════════════════════════════════════════════════════════════════════
-
-function live(over: Record<string, unknown> = {}) {
-  return parseLiveStatus({
-    recording: true,
-    ok: true,
-    steps: 200,
-    sweptDeg: 40,
-    spanDeg: 30,
-    perAxisDeg: { tilt: 2, pan: 38, roll: 1 },
-    eig: [100, 0.2, 0.05],
-    rank2: 0.04,
-    rank3: 0.02,
-    sufficient: false,
-    reason: 'single-axis',
-    needMore: { tilt: true, pan: false, roll: true },
-    exercisedAxes: 1,
-    progress: 0.33,
-    imuSamples: 900,
-    refSamples: 240,
-    ...over,
-  });
-}
-
-describe('the gesture view — what the operator reads while moving', () => {
-  it('a PAN-ONLY gesture is coached toward the axis that breaks the tie', () => {
-    // A careful straight sweep is the worst possible calibration motion and is
-    // exactly what every other capture in this app has trained him to do, so
-    // this is the case the overlay exists for.
-    const v = panoPlusBasisGestureView('recording', live());
-    expect(v.sufficient).toBe(false);
-    expect(v.coach).toMatch(/NOD it up and down/);
-    expect(v.tone).toBe('warn');
-  });
-
-  it('the per-axis meters mirror the C++ bar and clamp at full', () => {
-    const v = panoPlusBasisGestureView(
-      'recording', live({ perAxisDeg: { tilt: 0, pan: 400, roll: 0 } }),
-    );
-    const pan = v.axes.find((a) => a.axis === 'pan');
-    expect(pan?.barDeg).toBe(PANO_PLUS_BASIS_AXIS_BAR_DEG);
-    // A bar that reads past full is a bar that has stopped meaning anything.
-    expect(pan?.fraction).toBe(1);
-    expect(pan?.done).toBe(true);
-    const tilt = v.axes.find((a) => a.axis === 'tilt');
-    expect(tilt?.fraction).toBe(0);
-    expect(tilt?.done).toBe(false);
-  });
-
-  it('progress is the LEAST-complete requirement, never "nearly there"', () => {
-    const v = panoPlusBasisGestureView('recording', live({ progress: 0.33 }));
-    expect(v.progress).toBeCloseTo(0.33, 5);
-  });
-
-  it('ZERO reference frames blames the AR session, not the hands', () => {
-    // The meters measure nothing when no reference arrives, and coaching a
-    // still hand would be a wrong diagnosis with a wrong fix.
-    const v = panoPlusBasisGestureView(
-      'recording', live({ refSamples: 0, elapsedS: REFERENCE_GRACE_S + 1 }),
-    );
-    expect(v.referenceMissing).toBe(true);
-    expect(v.tone).toBe('stop');
-    expect(v.coach).toMatch(/AR camera is not feeding/);
-  });
-
-  it('…but only AFTER the grace — a healthy session is never accused', () => {
-    // The first coaching poll lands 250 ms in and a healthy ARKit session
-    // takes a beat to produce its first `normal` pose. Without the grace the
-    // screen whose job is naming the fault opens by naming the wrong one.
-    for (const elapsedS of [0, 0.25, REFERENCE_GRACE_S - 0.01]) {
-      const v = panoPlusBasisGestureView('recording', live({ refSamples: 0, elapsedS }));
-      expect(v.referenceMissing).toBe(false);
-    }
-  });
-
-  it('the grace does not silence a genuinely dead session forever', () => {
-    // The complement of the test above: it is a DELAY, not a suppression.
-    const v = panoPlusBasisGestureView('recording', live({ refSamples: 0, elapsedS: 30 }));
-    expect(v.referenceMissing).toBe(true);
-  });
-
-  it('a sufficient gesture flips to the solve without another tap', () => {
-    const v = panoPlusBasisGestureView(
-      'recording',
-      live({ sufficient: true, reason: 'ok', exercisedAxes: 2, progress: 1,
-        needMore: { tilt: false, pan: false, roll: true } }),
-    );
-    expect(v.sufficient).toBe(true);
-    expect(v.tone).toBe('ok');
-  });
-
-  it('a REFUSAL keeps coaching and never reads as a measurement', () => {
-    const v = panoPlusBasisGestureView('refused', live(), 'ambiguous-axis');
-    expect(v.tone).toBe('stop');
-    expect(v.headline).not.toMatch(/DONE|SAVED/);
-    expect(v.coach).toMatch(/FOUR/);
-  });
-
-  it('every refusal names a DIFFERENT motion — "try again" is not coaching', () => {
-    const reasons = [
-      'ambiguous-axis', 'excitation-insufficient', 'stationary',
-      'too-few-pairs', 'rms-too-large', 'winner-changed',
-    ];
-    const lines = reasons.map((r) => basisRefusalCoaching(r));
-    expect(new Set(lines).size).toBe(lines.length);
-    // An unknown token still produces a sentence AND carries the token, so a
-    // field report is actionable instead of being "it said no".
-    expect(basisRefusalCoaching('brand-new-reason')).toMatch(/brand-new-reason/);
-  });
-
-  it('the ARMING phase never shows a progress bar it has not earned', () => {
-    const v = panoPlusBasisGestureView('arming', null);
-    expect(v.progress).toBe(0);
-    expect(v.sufficient).toBe(false);
-    // With no live read at all the meters must still render, at zero, rather
-    // than the overlay collapsing to nothing while the recorder starts.
-    expect(v.axes).toHaveLength(3);
   });
 });

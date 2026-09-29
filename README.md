@@ -312,7 +312,7 @@ Setting `headerTitle` renders a built-in top header; the settings gear is absorb
 | `onCapture` | `(result: CameraCaptureResult) => void` | Fires once per capture attempt. **Gate on `result.ok` first** (`true` = output present, discriminated further by `result.type`; `false` carries `result.error`). Both carry `result.warnings: CaptureWarning[]` (e.g. `LOW_FRAME_UTILIZATION`). |
 | `onCaptureSourceChange` | `(source: CaptureSource) => void` | Effective source changes (AR toggle, or 0.5× forcing non-AR). |
 | `onLensChange` | `(lens: CameraLens) => void` | User taps the 1×/0.5× chip. |
-| `onFramesDropped` | `(info: FramesDroppedInfo) => void` | cv::Stitcher's confidence retry dropped input frame(s). |
+| `onFramesDropped` | `(info: FramesDroppedInfo) => void` | The capture dropped input frame(s): cv::Stitcher's confidence retry (keyframe), or frames the sweep engine refused. `{ requested, included, dropped }` — the result's own counts. |
 | `onCaptureAbandoned` | `(reason: 'orientation-drift' \| 'lateral-drift') => void` | SDK auto-cancelled an in-flight capture, producing **no** output (no `onCapture` fires). `'orientation-drift'` = mid-capture rotation; `'lateral-drift'` = a sideways drift the [`lateralStopFinalizeMinFrames`](#panorama-guidance--auto-stop) policy declined to finalize. |
 | `onError` | `(err: CameraError) => void` | Classified error — fires on failure as an unchanged mirror of the `ok:false` `onCapture` result. See codes below. |
 | `outputDir` | `string` | Directory for saved JPEGs. The lib creates it if missing. |

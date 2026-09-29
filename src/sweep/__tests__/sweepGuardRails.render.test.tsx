@@ -5,7 +5,7 @@
  * ── WHY THIS FILE EXISTS AND `cameraSweepEngine.render.test.tsx` IS NOT
  *    ENOUGH ────────────────────────────────────────────────────────────
  *
- * That suite drives a REAL `PanoPlusCaptureSurface`, which is the right rig
+ * That suite drives the REAL sweep engine through `<Camera>`, which is the right rig
  * for the questions it asks (which arm, which props, which chrome). But it
  * installs no native fakes, so the surface never leaves `'idle'` — and every
  * imperative call `<Camera>` makes into it (`holdEnd`, `abandon`) is
@@ -42,7 +42,6 @@ const sensorsMock = require('react-native-sensors') as {
 };
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 
-import type { SweepSurfaceHandle } from '../panoPlusTypes';
 import { coercePanoPlusSummary, panoPlusResultOf } from '../panoPlusModel';
 
 /** Every imperative call `<Camera>` made into the surface, in order. */
@@ -50,12 +49,23 @@ const calls: string[] = [];
 /** The props of the live stub, so a test can drive its callbacks. */
 let surfaceProps: Record<string, any> = {};
 
-jest.mock('../PanoPlusCaptureSurface', () => {
+// ⚠ M8: THE ENGINE IS A HOOK `<Camera>` CALLS, SO THE STUB IS THE HOOK. The
+// surface component this used to replace is no longer in `<Camera>`'s tree:
+// `<Camera>` calls `useSweepEngine` on every engine and draws
+// `SweepHoldOverlay` from it (M10: the sweep's own screen is gone). The stub keeps the contract the real hook keeps:
+//   · not SELECTED (`enabled: false`) → the handle is inert and nothing is
+//     recorded, as the unmounted surface was;
+//   · deselected → `onSweepingChange(false)`, which the real hook reports on
+//     every falling edge (M8a).
+jest.mock('../useSweepEngine', () => {
   const ReactLocal = require('react') as typeof React;
-  const actual = jest.requireActual('../PanoPlusCaptureSurface');
-  const Stub = ReactLocal.forwardRef<SweepSurfaceHandle, any>((props, ref) => {
-    surfaceProps = props;
-    ReactLocal.useImperativeHandle(ref, () => ({
+  function useSweepEngine(props: any, ref: any, options: { enabled?: boolean } = {}) {
+    const enabled = options.enabled !== false;
+    if (enabled) surfaceProps = props;
+    const inert = () => undefined;
+    ReactLocal.useImperativeHandle(ref, () => (!enabled ? {
+      capture: inert, finalize: inert, holdStart: inert, holdEnd: inert, abandon: inert,
+    } : {
       capture: () => { calls.push('capture'); },
       finalize: () => { calls.push('finalize'); },
       holdStart: () => {
@@ -92,16 +102,21 @@ jest.mock('../PanoPlusCaptureSurface', () => {
         calls.push(`abandon:${reason}`);
         props.onSweepingChange?.(false);
       },
-    }), [props]);
-    return null;
-  });
-  Stub.displayName = 'PanoPlusCaptureSurfaceStub';
-  return {
-    __esModule: true,
-    ...actual,
-    PanoPlusCaptureSurface: Stub,
-  };
+    }), [props, enabled]);
+    const wasEnabled = ReactLocal.useRef(enabled);
+    ReactLocal.useEffect(() => {
+      const was = wasEnabled.current;
+      wasEnabled.current = enabled;
+      if (was && !enabled) props.onSweepingChange?.(false);
+    }, [enabled]);
+    // The fields `<Camera>`'s own tree reads off the engine.
+    return { phase: 'idle', setSurfaceBox: () => undefined, handleArFrame: () => undefined };
+  }
+  return { __esModule: true, useSweepEngine };
 });
+// The DR-1a hatch's view (the only one that reads the engine's viewfinder
+// fields) draws nothing here: the stub engine has none of them.
+jest.mock('../SweepHatchScreen', () => ({ __esModule: true, SweepHatchScreen: () => null }));
 
 // eslint-disable-next-line import/first
 import { Camera } from '../../camera/Camera';
@@ -276,6 +291,115 @@ describe('the rotation guard STOPS THE SWEEP, not just the host callback', () =>
   });
 });
 
+/** Settle mount AND let `<Camera>`'s AR transition finish: a hold inside it
+ *  is (correctly) deferred by the dispatcher. */
+async function settleAr(): Promise<void> {
+  await settle();
+  await act(async () => { jest.advanceTimersByTime(1000); await Promise.resolve(); });
+}
+/** A steady upright phone, so the orientation guard sees portrait. */
+async function upright(): Promise<void> {
+  await act(async () => { sensorsMock.__emitAccelerometer({ x: 0, y: 9.8, z: 0 }); });
+}
+
+describe('M8 — the built-in shutter\'s hold runs the SELECTED engine', () => {
+  it('a press-and-hold on <Camera>\'s own shutter reaches the sweep, and its release ends it', async () => {
+    // One shutter for both engines: its hold goes through the same dispatch
+    // as `startPanorama`, so on the sweep engine it is the sweep's hold.
+    const { CameraShutter } = require('../../camera/CameraShutter');
+    // The AR arm (no plugin to wait for) and `panMode="both"` (the pan-mode
+    // gate applies to the sweep too — see the dispatcher's own cases).
+    const tree = render({ captureSources: 'both', defaultCaptureSource: 'ar', panMode: 'both' });
+    await settleAr();
+    const shutter = tree.root.findByType(CameraShutter);
+    await act(async () => { shutter.props.onHoldStart(); });
+    expect(calls).toContain('holdStart');
+    await act(async () => { shutter.props.onHoldComplete(); });
+    expect(calls).toContain('holdEnd');
+    act(() => { tree.unmount(); });
+  });
+});
+
+describe('M8 — ONE hold dispatcher: the keyframe engine\'s guards apply to the sweep', () => {
+  const AR = { captureSources: 'both', defaultCaptureSource: 'ar' };
+
+  it('the pan-mode gate: a portrait hold under the default "vertical" is DEFERRED, not started', async () => {
+    const ref = React.createRef<any>();
+    let tree!: ReactTestRenderer;
+    act(() => { tree = create(<Camera ref={ref} engine="sweep" {...(AR as any)} />); });
+    await settleAr();
+    await upright();
+    await act(async () => { ref.current.startPanorama(); });
+    expect(calls).not.toContain('holdStart');
+    // …and the rotate prompt says why, as it does for a keyframe capture.
+    const { RotateToLandscapePrompt } = require('../../camera/RotateToLandscapePrompt');
+    expect(tree.root.findAllByType(RotateToLandscapePrompt)
+      .some((n: any) => n.props.visible === true)).toBe(true);
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ NEGATIVE CONTROL: panMode="both" starts the same hold at once', async () => {
+    const ref = React.createRef<any>();
+    let tree!: ReactTestRenderer;
+    act(() => { tree = create(<Camera ref={ref} engine="sweep" panMode="both" {...(AR as any)} />); });
+    await settleAr();
+    await act(async () => { ref.current.startPanorama(); });
+    expect(calls).toContain('holdStart');
+    act(() => { tree.unmount(); });
+  });
+
+  it('a release while the hold is still DEFERRED abandons it — it never starts later', async () => {
+    const ref = React.createRef<any>();
+    let tree!: ReactTestRenderer;
+    act(() => { tree = create(<Camera ref={ref} engine="sweep" {...(AR as any)} />); });
+    await settleAr();
+    await upright();
+    await act(async () => { ref.current.startPanorama(); });
+    await act(async () => { await ref.current.stopPanorama(); });
+    // Rotating now would have resumed a still-pending hold.
+    await act(async () => { sensorsMock.__emitAccelerometer({ x: 9.8, y: 0, z: 0 }); });
+    await act(async () => { jest.advanceTimersByTime(1500); });
+    expect(calls).not.toContain('holdStart');
+    act(() => { tree.unmount(); });
+  });
+
+  it('D7: takePhoto() during a sweep is refused BY NAME, even in the same tick as the start', async () => {
+    const errors: string[] = [];
+    const ref = React.createRef<any>();
+    let tree!: ReactTestRenderer;
+    act(() => {
+      tree = create(
+        <Camera ref={ref} engine="sweep" panMode="both" {...(AR as any)}
+          onError={(e: { code: string }) => { errors.push(e.code); }} />,
+      );
+    });
+    await settleAr();
+    await act(async () => {
+      ref.current.startPanorama();
+      await ref.current.takePhoto();          // same tick: no state has landed
+    });
+    expect(calls).toContain('holdStart');
+    expect(errors).toEqual(['CAPTURE_IN_PROGRESS']);
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ the shutter\'s hold stays ENABLED on the sweep whatever the engine says — a long press is never a tap', async () => {
+    // `holdEnabled` false turns a release into `onTap`, so a hold the sweep
+    // would refuse must still arrive as a HOLD and be refused by name, never
+    // become a silent photo.
+    const { CameraShutter } = require('../../camera/CameraShutter');
+    for (const engine of ['sweep', 'keyframe'] as const) {
+      let tree!: ReactTestRenderer;
+      act(() => { tree = create(<Camera engine={engine} />); });
+      // eslint-disable-next-line no-await-in-loop
+      await settleAr();
+      expect({ engine, holdEnabled: tree.root.findByType(CameraShutter).props.holdEnabled })
+        .toEqual({ engine, holdEnabled: true });
+      act(() => { tree.unmount(); });
+    }
+  });
+});
+
 describe('the sideways-drift guard is ARMED, and armed on EVERY arm', () => {
   /**
    * Let the ORIENTATION guard see a steady phone first.
@@ -305,15 +429,15 @@ describe('the sideways-drift guard is ARMED, and armed on EVERY arm', () => {
     }
   }
 
-  it('⚑ ON THE AR ARM — the configuration the product actually ships', async () => {
-    // ⚠ THE OPERATOR'S FIRST NAMED GUARD, ON HIS OWN PLATFORM. `usePanMotion`
-    // was gated `active: captureRecording && isNonAR`, a term carried over
-    // from `useIMUTranslationGate` — where it is CORRECT, because in AR the
-    // native side really does use pose-derived translation. This hook has no
-    // such substitute: nothing in this library consumes ARKit translation for
-    // a lateral budget and no ARKit pose stream reaches JS. So on the AR arm
-    // the sideways-drift guard was not "owned by the session"; it was absent,
-    // and the iOS sweep runs ARKit.
+  it('⚑ ON THE AR ARM the IMU guard STANDS DOWN — the pose guard owns lateral drift (M8)', async () => {
+    // ⚠ INVERTED BY M8, and on purpose. This case used to prove the IMU guard
+    // fired on an AR sweep, because the sweep drew its OWN AR view and no pose
+    // reached `<Camera>`: the accelerometer was the only lateral guard it had
+    // (M0's stand-in). The sweep now runs on `<Camera>`'s AR view, its poses
+    // reach `handleArFrame`, and AR is pose-guarded on both engines — exactly
+    // as the keyframe engine has always been. The pose guard firing on an AR
+    // sweep is pinned in `mergeGuardRegressions` ("an AR SWEEP is
+    // pose-guarded"), where the drift latch is controllable.
     const tree = render({
       captureSources: 'both', defaultCaptureSource: 'ar', lateralBudgetCm: 1,
     });
@@ -322,10 +446,24 @@ describe('the sideways-drift guard is ARMED, and armed on EVERY arm', () => {
     await settleUpright();
     await startSweep();
     await slideSideways();
-    // The cap on a sideways drift is a FINALIZE, not a discard: what was
-    // painted is the deliverable. So the handle sees `holdEnd`.
-    expect(calls).toContain('holdEnd');
+    expect(calls).not.toContain('holdEnd');
     expect(calls.some((c) => c.startsWith('abandon:'))).toBe(false);
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ …but under panMode "both" (axis unknown) the IMU guard keeps the AR sweep (M8 review)', async () => {
+    // The pose guard would measure a portrait sweep on the landscape axis, so
+    // it stands down there and the IMU guard that held AR sweeps through
+    // M0–M7 does the job.
+    const tree = render({
+      captureSources: 'both', defaultCaptureSource: 'ar', lateralBudgetCm: 1, panMode: 'both',
+    });
+    await settle();
+    expect(surfaceProps.poseSource).toBe('ar');
+    await settleUpright();
+    await startSweep();
+    await slideSideways();
+    expect(calls).toContain('holdEnd');
     act(() => { tree.unmount(); });
   });
 

@@ -30,6 +30,7 @@ export type {
   CameraHandle,
   CameraCaptureResult,
   PanoramaCaptureResult,
+  SweepPanoramaResult,
   CameraErrorCode,
   CaptureSource,
   CaptureSourcesMode,
@@ -408,26 +409,16 @@ export type {
 // half arrived as the `PanoPlus` subspec / `libimage_stitcher_panoplus.so`; this is its
 // JS surface.
 //
-// ⚠ `<Camera engine="sweep">` IS WIRED. This comment used to say it was the
-// "intended end state", "NOT wired yet", with "both natives still answering
-// `engine-unavailable`" — none of which is true any more, and leaving it
-// stated the OPPOSITE of the standing objective in the public API's own docs.
-// `Camera.tsx:4368` mounts the surface on every sweep, and
-// `cameraSweepEngine.render.test.tsx` pins the behaviour across 1,096 lines.
+// `<Camera engine="sweep">` is how a host runs it. `engine` is a PROP, not a
+// screen: it changes ONLY what the hold runs. The sweep runs on `<Camera>`'s
+// own camera, shutter and chrome, and its result is `type: 'panorama'` with
+// `engine: 'sweep'` on the same `onCapture` (M8, M9).
 //
-// `engine` is a PROP, not a screen: it changes ONLY what the hold runs. Tap
-// still takes a photo, hold still runs the sweep, and everything else about
-// the camera is the same on both engines.
-//
-// The surface remains exported because it is still a valid direct-mount
-// entry point for a host that wants the sweep WITHOUT `<Camera>`'s shutter
-// and chrome — but that is now a choice, not the only route.
-export { PanoPlusCaptureSurface } from './sweep/PanoPlusCaptureSurface';
-export type { PanoPlusCaptureSurfaceProps } from './sweep/PanoPlusCaptureSurface';
-export { PanoPlusResultView } from './sweep/PanoPlusResultView';
-export type { PanoPlusResultViewProps } from './sweep/PanoPlusResultView';
-export { PanoPlusBasisOverlay } from './sweep/PanoPlusBasisOverlay';
-export type { PanoPlusBasisOverlayProps } from './sweep/PanoPlusBasisOverlay';
+// M10: the sweep's OWN screen is gone — the `PanoPlusCaptureSurface`
+// composite, its clone AR pill / lens chip / shutter, the in-camera basis
+// gesture (`PanoPlusBasisOverlay`) and its second result viewer. There is
+// one camera screen. What stays public here is the engine's data layer: the
+// types, the pure model, the native bridge and the calibration store.
 export * from './sweep/panoPlusTypes';
 export * from './sweep/panoPlusModel';
 export * from './sweep/panoPlusNative';
