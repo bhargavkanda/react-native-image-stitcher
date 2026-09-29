@@ -90,7 +90,7 @@ function sweepingStatus(over: Record<string, unknown> = {}): Record<string, unkn
 function installNative(): void {
   startedWith = null;
   statusReply = { running: false };
-  NM.RNISPanoPlus = {
+  NM.RNSSweepSession = {
     start: (o: Record<string, unknown>) => {
       startedWith = o;
       return Promise.resolve({
@@ -185,7 +185,7 @@ beforeEach(() => {
 afterEach(() => {
   jest.useRealTimers();
   Platform.OS = 'ios';
-  delete NM.RNISPanoPlus;
+  delete NM.RNSSweepSession;
 });
 
 describe('the growing canvas reaches the screen', () => {

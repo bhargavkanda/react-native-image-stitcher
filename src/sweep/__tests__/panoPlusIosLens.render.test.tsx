@@ -7,10 +7,10 @@
 // `panoPlusLens`, the host hands it to this surface as `lens`, and on the
 // decoupled iOS arm two native calls must carry it in the flag's own spelling:
 //
-//   * `RNISPanoPlus.setIdlePreview(true, { lens, poseSource })` — the
+//   * `RNSSweepSession.setIdlePreview(true, { lens, poseSource })` — the
 //     viewfinder must show the camera the sweep will open, and a flip at idle
 //     must be a clean off→on on the new lens (never two requests live at once);
-//   * `RNISPanoCalib.plannedCaptureFormat({ lens })` — τ is keyed per
+//   * `RNSSweepCalibration.plannedCaptureFormat({ lens })` — τ is keyed per
 //     lens, so the precondition that gates the arm must be read for the camera
 //     the sweep will actually open, and re-read when the lens changes.
 //
@@ -98,7 +98,7 @@ function installNative(): void {
   planPending = [];
   planHangs = false;
   startedWith = null;
-  NM.RNISPanoPlus = {
+  NM.RNSSweepSession = {
     start: (o: Record<string, unknown>) => {
       startedWith = o;
       return Promise.resolve({
@@ -138,7 +138,7 @@ function installNative(): void {
         : { on: false });
     },
   };
-  NM.RNISPanoCalib = {
+  NM.RNSSweepCalibration = {
     startBasisCalibration: () => Promise.resolve({}),
     basisCalibrationStatus: () => Promise.resolve({}),
     stopBasisCalibration: () => Promise.resolve({}),
@@ -240,8 +240,8 @@ beforeEach(() => {
 afterEach(() => {
   jest.useRealTimers();
   Platform.OS = 'ios';
-  delete NM.RNISPanoPlus;
-  delete NM.RNISPanoCalib;
+  delete NM.RNSSweepSession;
+  delete NM.RNSSweepCalibration;
 });
 
 describe('the idle viewfinder frames with the lens the flag named (iOS, decoupled arm)', () => {

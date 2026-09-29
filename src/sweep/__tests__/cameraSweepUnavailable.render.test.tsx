@@ -75,7 +75,6 @@ beforeEach(() => {
   proxy.initFrameProcessorPlugin = () => ({ call: () => undefined });
   starts.length = 0;
   delete NM.RNSSweepSession;
-  delete NM.RNISPanoPlus;
 });
 afterEach(() => {
   jest.runOnlyPendingTimers();

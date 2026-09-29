@@ -30,22 +30,8 @@ import type {
   PanoPlusSummary,
 } from './panoPlusTypes';
 
-/**
- * ── DUAL-NAME ACCEPTANCE ────────────────────────────────────────────────
- * pano+ is moving out of the private native overlay and into the public
- * stitcher package, and its React Native identifiers are being renamed on
- * the way (`the host app*` -> `RNSSweep*`).  There is no atomic commit across
- * two npm packages, so this SDK accepts BOTH spellings: the new name first,
- * the old one as a fallback.  That makes every later native rename invisible
- * here, and it means a device can run an old binary against new JS or the
- * reverse without a coordinated release.
- *
- * Delete the legacy branch once no supported binary predates the rename.
- */
 /** The RN module name declared by `RCT_EXTERN_MODULE(RNSSweepSession, …)`. */
 const MODULE_NAME = 'RNSSweepSession';
-/** The pre-migration spelling. */
-const LEGACY_MODULE_NAME = 'RNISPanoPlus';
 
 interface PanoPlusModule {
   start(options: Record<string, unknown>): Promise<unknown>;
@@ -67,12 +53,8 @@ function looksLikeTheModule(native: unknown): native is PanoPlusModule {
 }
 
 function getModule(): PanoPlusModule | null {
-  const mods = NativeModules as Record<string, unknown>;
-  for (const name of [MODULE_NAME, LEGACY_MODULE_NAME]) {
-    const native = mods[name];
-    if (looksLikeTheModule(native)) return native;
-  }
-  return null;
+  const native = (NativeModules as Record<string, unknown>)[MODULE_NAME];
+  return looksLikeTheModule(native) ? native : null;
 }
 
 /** True when this binary carries the pano+ session module. */
@@ -111,8 +93,8 @@ export function panoPlusVcArmSupported(platformOS: string): boolean {
  *  shape a native rejection carries so ONE `panoPlusErrorInfo` handles both. */
 function unavailable(): Error & { code: string } {
   const e = new Error(
-    `pano+ is not available in this build (neither NativeModules.${MODULE_NAME} `
-    + `nor NativeModules.${LEGACY_MODULE_NAME} is registered).`,
+    `pano+ is not available in this build (NativeModules.${MODULE_NAME} `
+    + 'is not registered).',
   ) as Error & { code: string };
   e.code = 'panoplus-unavailable';
   return e;

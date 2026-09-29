@@ -43,7 +43,7 @@ let statusReply: Record<string, unknown> = { running: false };
 
 function installNative(): void {
   statusReply = { running: false };
-  NM.RNISPanoPlus = {
+  NM.RNSSweepSession = {
     start: () => Promise.resolve({
       sessionDir: '/var/mobile/Documents/pano_1', startedAtMs: 1, pluginAvailable: true,
     }),
@@ -91,7 +91,7 @@ beforeEach(() => {
 afterEach(() => {
   jest.useRealTimers();
   Platform.OS = 'ios';
-  delete NM.RNISPanoPlus;
+  delete NM.RNSSweepSession;
 });
 
 const last = (xs: number[]): number | undefined => xs[xs.length - 1];

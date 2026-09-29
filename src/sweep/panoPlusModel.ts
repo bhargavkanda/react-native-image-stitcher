@@ -53,12 +53,6 @@ import type {
  * perfectly — silent, and indistinguishable from "the plugin never ran".
  */
 export const PANO_PLUS_PLUGIN_KEY = 'sweep';
-/**
- * The pre-migration registry key.  Read as a fallback so a pack or a live
- * frame produced by an older binary still resolves — see the dual-name
- * banner in panoPlusNative.ts.
- */
-export const PANO_PLUS_PLUGIN_KEY_LEGACY = 'rnisPanoPlus';
 
 /**
  * The AR-session swap grace, mirrored from the capture shell's
@@ -337,9 +331,7 @@ export function readPanoPlusStatus(meta: unknown): PanoPlusStatus | null {
   if (m == null) return null;
   const plugins = rec(m.plugins);
   if (plugins == null) return null;
-  return coercePanoPlusStatus(
-    plugins[PANO_PLUS_PLUGIN_KEY] ?? plugins[PANO_PLUS_PLUGIN_KEY_LEGACY],
-  );
+  return coercePanoPlusStatus(plugins[PANO_PLUS_PLUGIN_KEY]);
 }
 
 /** The same coercion, for the `getStatus()` poll fallback. */

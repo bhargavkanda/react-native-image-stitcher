@@ -6,7 +6,7 @@
 //
 //   1. DEGRADATION, NOT CRASH. iOS, a jest env, and an Android build whose
 //      autolinking did not pick the package up all have no
-//      `RNISPanoPlusAndroid`. Every entry must resolve into something the
+//      `RNSSweepTools`. Every entry must resolve into something the
 //      panel can render. The panel is the ONLY instrument this device-less
 //      port has; one that can crash is one that is unavailable exactly when it
 //      is needed.
@@ -59,7 +59,7 @@ function fakeModule(over: Record<string, unknown> = {}): Record<string, unknown>
 }
 
 afterEach(() => {
-  delete NM.RNISPanoPlusAndroid;
+  delete NM.RNSSweepTools;
   jest.clearAllMocks();
 });
 
@@ -70,13 +70,13 @@ describe('availability', () => {
 
   it('resolves per CALL, not per import', () => {
     expect(panoPlusAndroidIsAvailable()).toBe(false);
-    NM.RNISPanoPlusAndroid = fakeModule();
+    NM.RNSSweepTools = fakeModule();
     expect(panoPlusAndroidIsAvailable()).toBe(true);
   });
 
   it('rejects a module object whose methods are missing', () => {
     // A registered-but-unlinked module is the failure a bare null check misses.
-    NM.RNISPanoPlusAndroid = { engineInfo: () => Promise.resolve({}) };
+    NM.RNSSweepTools = { engineInfo: () => Promise.resolve({}) };
     expect(panoPlusAndroidIsAvailable()).toBe(false);
   });
 
@@ -91,7 +91,7 @@ describe('availability', () => {
   });
 
   it('has no reason once the module is there', () => {
-    NM.RNISPanoPlusAndroid = fakeModule();
+    NM.RNSSweepTools = fakeModule();
     expect(panoPlusAndroidUnavailableReason()).toBeNull();
   });
 });
@@ -144,7 +144,7 @@ describe('engineInfo', () => {
       basisSelfTestPassed: true,
       somethingTheMapperDoesNotKnow: 'kept',
     });
-    NM.RNISPanoPlusAndroid = fakeModule({
+    NM.RNSSweepTools = fakeModule({
       engineInfo: jest.fn(() => Promise.resolve({ nativeAvailable: true, json })),
     });
 
@@ -162,7 +162,7 @@ describe('engineInfo', () => {
   it('reports a failed basis self-test rather than defaulting it true', async () => {
     // A device answering anything but 8 has a toolchain difference the host
     // tests cannot see. `undefined` from a partial build must not read as pass.
-    NM.RNISPanoPlusAndroid = fakeModule({
+    NM.RNSSweepTools = fakeModule({
       engineInfo: jest.fn(() => Promise.resolve({
         nativeAvailable: true,
         json: '{"basisSelfTestIndex":11,"basisSelfTestExpected":8,"basisSelfTestPassed":false}',
@@ -174,7 +174,7 @@ describe('engineInfo', () => {
   });
 
   it('reports unparseable JSON and still keeps the raw string', async () => {
-    NM.RNISPanoPlusAndroid = fakeModule({
+    NM.RNSSweepTools = fakeModule({
       engineInfo: jest.fn(() => Promise.resolve({
         nativeAvailable: true,
         json: '{"truncated":',
@@ -187,7 +187,7 @@ describe('engineInfo', () => {
   });
 
   it('turns a bridge rejection into an envelope instead of throwing', async () => {
-    NM.RNISPanoPlusAndroid = fakeModule({
+    NM.RNSSweepTools = fakeModule({
       engineInfo: jest.fn(() => Promise.reject(new Error('boom'))),
     });
     const r = await panoPlusAndroidEngineInfo();
@@ -200,7 +200,7 @@ describe('engineInfo', () => {
 describe('deriveBasis', () => {
   it('sends only the keys the caller chose', async () => {
     const mod = fakeModule();
-    NM.RNISPanoPlusAndroid = mod;
+    NM.RNSSweepTools = mod;
     await panoPlusAndroidDeriveBasis({
       sensorOrientationDeg: 90,
       lensFacing: 1,
@@ -215,7 +215,7 @@ describe('deriveBasis', () => {
 
   it('does not strip an explicit false', async () => {
     const mod = fakeModule();
-    NM.RNISPanoPlusAndroid = mod;
+    NM.RNSSweepTools = mod;
     await panoPlusAndroidDeriveBasis({ sensorOrientationDeg: 0, mirrored: false });
     expect((mod.deriveBasis as jest.Mock).mock.calls[0][0]).toEqual({
       sensorOrientationDeg: 0,
@@ -224,7 +224,7 @@ describe('deriveBasis', () => {
   });
 
   it('surfaces a refusal with its name, not as a silent failure', async () => {
-    NM.RNISPanoPlusAndroid = fakeModule({
+    NM.RNSSweepTools = fakeModule({
       deriveBasis: jest.fn(() => Promise.resolve({
         nativeAvailable: true,
         json: '{"ok":false,"basisIndex":-1,"refusal":"mirrored-buffer-is-a-reflection"}',
@@ -237,7 +237,7 @@ describe('deriveBasis', () => {
   });
 
   it('carries lensPoseSupplied so an absent block is not read as a refusal', async () => {
-    NM.RNISPanoPlusAndroid = fakeModule({
+    NM.RNSSweepTools = fakeModule({
       deriveBasis: jest.fn(() => Promise.resolve({
         nativeAvailable: true,
         lensPoseSupplied: false,
@@ -268,7 +268,7 @@ describe('replayPack', () => {
         nativeAvailable: true, json, wallMs: 41234,
       })),
     });
-    NM.RNISPanoPlusAndroid = mod;
+    NM.RNSSweepTools = mod;
 
     const r = await panoPlusAndroidReplayPack({
       packDir: '/sdcard/pack',
@@ -288,7 +288,7 @@ describe('replayPack', () => {
   it('keeps haveOracle false distinct from zero disagreement', async () => {
     // NOT MEASURED must never render as agreement. A pack with no ledger has
     // outcomeDisagree 0 for the trivial reason that nothing was compared.
-    NM.RNISPanoPlusAndroid = fakeModule({
+    NM.RNSSweepTools = fakeModule({
       replayPack: jest.fn(() => Promise.resolve({
         nativeAvailable: true,
         json: '{"ok":true,"haveOracle":false,"outcomeAgree":0,"outcomeDisagree":0}',
@@ -300,7 +300,7 @@ describe('replayPack', () => {
   });
 
   it('keeps every unmapped report field in parsed', async () => {
-    NM.RNISPanoPlusAndroid = fakeModule({
+    NM.RNSSweepTools = fakeModule({
       replayPack: jest.fn(() => Promise.resolve({
         nativeAvailable: true,
         json: '{"ok":true,"fidelityNote":"jpeg vs nv12","firstDivergenceSeq":91}',
@@ -315,21 +315,21 @@ describe('replayPack', () => {
 describe('recorder passthrough', () => {
   it('start forwards options and resolves the native map', async () => {
     const mod = fakeModule();
-    NM.RNISPanoPlusAndroid = mod;
+    NM.RNSSweepTools = mod;
     await expect(panoPlusAndroidStartRecording({ jpegQuality: 88, cameraId: undefined }))
       .resolves.toEqual({ sessionDir: '/d' });
     expect((mod.startRecording as jest.Mock).mock.calls[0][0]).toEqual({ jpegQuality: 88 });
   });
 
   it('start propagates a native rejection (permission is actionable)', async () => {
-    NM.RNISPanoPlusAndroid = fakeModule({
+    NM.RNSSweepTools = fakeModule({
       startRecording: jest.fn(() => Promise.reject(new Error('permission-denied'))),
     });
     await expect(panoPlusAndroidStartRecording()).rejects.toThrow('permission-denied');
   });
 
   it('stop resolves even when native rejects', async () => {
-    NM.RNISPanoPlusAndroid = fakeModule({
+    NM.RNSSweepTools = fakeModule({
       stopRecording: jest.fn(() => Promise.reject(new Error('camera gone'))),
     });
     const r = await panoPlusAndroidStopRecording();
@@ -338,7 +338,7 @@ describe('recorder passthrough', () => {
   });
 
   it('status resolves not-running when native rejects', async () => {
-    NM.RNISPanoPlusAndroid = fakeModule({
+    NM.RNSSweepTools = fakeModule({
       recordingStatus: jest.fn(() => Promise.reject(new Error('nope'))),
     });
     await expect(panoPlusAndroidRecordingStatus()).resolves.toEqual({ running: false });
@@ -346,7 +346,7 @@ describe('recorder passthrough', () => {
 
   it('probe resolves the tree as-is, without narrowing it', async () => {
     const tree = { device: { model: 'SM-A356B' }, cameras: [{ id: '0' }] };
-    NM.RNISPanoPlusAndroid = fakeModule({
+    NM.RNSSweepTools = fakeModule({
       probe: jest.fn(() => Promise.resolve(tree)),
     });
     await expect(panoPlusAndroidProbe()).resolves.toEqual(tree);
@@ -384,7 +384,7 @@ describe('arcoreBasisRun', () => {
   });
 
   it('narrows the measurement, the falsification and the coaching', async () => {
-    NM.RNISPanoPlusAndroid = fakeModule({
+    NM.RNSSweepTools = fakeModule({
       arcoreBasisRun: jest.fn(() => Promise.resolve({
         nativeAvailable: true, json: agreeing, derivedIndexSupplied: true,
       })),
@@ -429,7 +429,7 @@ describe('arcoreBasisRun', () => {
         },
       },
     });
-    NM.RNISPanoPlusAndroid = fakeModule({
+    NM.RNSSweepTools = fakeModule({
       arcoreBasisRun: jest.fn(() => Promise.resolve({ nativeAvailable: true, json: tie })),
     });
     const r = await panoPlusAndroidArCoreBasisRun({ packDir: '/p', derivedBasisIndex: 8 });
@@ -448,7 +448,7 @@ describe('arcoreBasisRun', () => {
       ok: false, reason: 'arcore-jsonl-missing', sensorsFound: true, arcoreFound: false,
       report: { series: { imu: { accepted: 1204 } } },
     });
-    NM.RNISPanoPlusAndroid = fakeModule({
+    NM.RNSSweepTools = fakeModule({
       arcoreBasisRun: jest.fn(() => Promise.resolve({ nativeAvailable: true, json: none })),
     });
     const r = await panoPlusAndroidArCoreBasisRun({ packDir: '/p' });
@@ -460,7 +460,7 @@ describe('arcoreBasisRun', () => {
 
   it('drops undefined options rather than sending them across the bridge', async () => {
     const spy = jest.fn(() => Promise.resolve({ nativeAvailable: true, json: '{}' }));
-    NM.RNISPanoPlusAndroid = fakeModule({ arcoreBasisRun: spy });
+    NM.RNSSweepTools = fakeModule({ arcoreBasisRun: spy });
     await panoPlusAndroidArCoreBasisRun({
       packDir: '/p', imuType: undefined, derivedBasisIndex: 8,
     });
@@ -471,7 +471,7 @@ describe('arcoreBasisRun', () => {
     // Every level of the S1 report can be absent on a refusal path, and a
     // diagnostic panel that throws on one is unavailable exactly when it is
     // needed.
-    NM.RNISPanoPlusAndroid = fakeModule({
+    NM.RNSSweepTools = fakeModule({
       arcoreBasisRun: jest.fn(() => Promise.resolve({
         nativeAvailable: true, json: '{"ok":false,"report":null}',
       })),
@@ -485,7 +485,7 @@ describe('arcoreBasisRun', () => {
   it('is unavailable-but-parseable when the method is not linked', async () => {
     // An older native half that has every OTHER entry: the per-method probe is
     // what stops that reading as a crash.
-    NM.RNISPanoPlusAndroid = fakeModule({ arcoreBasisRun: undefined });
+    NM.RNSSweepTools = fakeModule({ arcoreBasisRun: undefined });
     const r = await panoPlusAndroidArCoreBasisRun({ packDir: '/p' });
     expect(r.nativeAvailable).toBe(false);
     expect(() => JSON.parse(r.json)).not.toThrow();
@@ -513,7 +513,7 @@ describe('arcoreBasisRun — series counts', () => {
         excitation: { verdict: { sufficient: false, reason: 'too-few-samples' } },
       },
     });
-    NM.RNISPanoPlusAndroid = fakeModule({
+    NM.RNSSweepTools = fakeModule({
       arcoreBasisRun: jest.fn(() => Promise.resolve({ nativeAvailable: true, json: empty })),
     });
     const r = await panoPlusAndroidArCoreBasisRun({ packDir: '/p' });
@@ -548,7 +548,7 @@ describe('arcoreBasisRun — the clock the fit was made under', () => {
       clockAssumption: 'confirmed-realtime',
       report: { basisVerdict: { index: 8, unique: true } },
     });
-    NM.RNISPanoPlusAndroid = fakeModule({
+    NM.RNSSweepTools = fakeModule({
       arcoreBasisRun: jest.fn(() => Promise.resolve({ nativeAvailable: true, json: js })),
     });
     const r = await panoPlusAndroidArCoreBasisRun({ packDir: '/p' });
@@ -568,7 +568,7 @@ describe('arcoreBasisRun — the clock the fit was made under', () => {
       clockAssumption: 'not-realtime',
       report: { basisVerdict: { index: 8, unique: true } },
     });
-    NM.RNISPanoPlusAndroid = fakeModule({
+    NM.RNSSweepTools = fakeModule({
       arcoreBasisRun: jest.fn(() => Promise.resolve({ nativeAvailable: true, json: js })),
     });
     const r = await panoPlusAndroidArCoreBasisRun({ packDir: '/p' });
@@ -590,7 +590,7 @@ describe('arcoreBasisRun — the clock the fit was made under', () => {
       clockAssumption: 'unconfirmed',
       report: { basisVerdict: { index: 8, unique: true } },
     });
-    NM.RNISPanoPlusAndroid = fakeModule({
+    NM.RNSSweepTools = fakeModule({
       arcoreBasisRun: jest.fn(() => Promise.resolve({ nativeAvailable: true, json: js })),
     });
     const r = await panoPlusAndroidArCoreBasisRun({ packDir: '/p' });

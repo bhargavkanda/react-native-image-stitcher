@@ -102,7 +102,7 @@ let snapshotImpl: () => Promise<unknown> = CALIBRATED;
 
 function installNative(): void {
   startedWith = null;
-  NM.RNISPanoPlus = {
+  NM.RNSSweepSession = {
     start: (o: Record<string, unknown>) => {
       startedWith = o;
       return Promise.resolve({
@@ -119,7 +119,7 @@ function installNative(): void {
   // "this build carries no calibration module" — which resolves EVERY decoupled
   // request to the ARKit fallback, and every 0.5× case in this file would then
   // be testing the fallback rung by accident.
-  NM.RNISPanoCalib = {
+  NM.RNSSweepCalibration = {
     startBasisCalibration: () => Promise.resolve({}),
     basisCalibrationStatus: () => Promise.resolve({}),
     stopBasisCalibration: () => Promise.resolve({}),
@@ -205,8 +205,8 @@ beforeEach(() => {
 });
 afterEach(() => {
   jest.useRealTimers();
-  delete NM.RNISPanoPlus;
-  delete NM.RNISPanoCalib;
+  delete NM.RNSSweepSession;
+  delete NM.RNSSweepCalibration;
 });
 
 // ── 1-5, 7-10 and the basis-card carve-out — deleted in M10 ────────────────

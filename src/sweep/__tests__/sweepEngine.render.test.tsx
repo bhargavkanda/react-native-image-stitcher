@@ -28,7 +28,7 @@
 // does (through the mounted `<ARCameraView>`'s `onArFrame` prop), read what
 // the HUD actually renders, and release.
 //
-// Native is a fake `NativeModules.RNISPanoPlus` whose call log the test
+// Native is a fake `NativeModules.RNSSweepSession` whose call log the test
 // asserts on — because the leak that matters most (a sweep that keeps running
 // after the engine is gone) is invisible in the rendered tree and visible only
 // as a missing `stop`.
@@ -143,7 +143,7 @@ let startedWith: Record<string, unknown> | null = null;
 function installNative(): void {
   calls = [];
   startedWith = null;
-  NM.RNISPanoPlus = {
+  NM.RNSSweepSession = {
     start: (o: Record<string, unknown>) => {
       calls.push('start');
       startedWith = o;
@@ -323,7 +323,7 @@ beforeEach(() => {
 
 afterEach(() => {
   jest.useRealTimers();
-  delete NM.RNISPanoPlus;
+  delete NM.RNSSweepSession;
 });
 
 describe('mount + the AR-session swap grace', () => {
@@ -358,7 +358,7 @@ describe('mount + the AR-session swap grace', () => {
     try {
       for (const os of ['ios', 'android'] as const) {
         Platform.OS = os;
-        delete NM.RNISPanoPlus;
+        delete NM.RNSSweepSession;
         const failures: PanoPlusFailure[] = [];
         const r = mount({ onFailure: (f) => { failures.push(f); } });
         await settle();
@@ -1430,7 +1430,7 @@ describe('the live preview', () => {
   });
 
   // THE BELT AND BRACES. The status normally rides the throttled `onArFrame`
-  // meta under `plugins.rnisPanoPlus` — one native read, no round trip.
+  // meta under `plugins.sweep` — one native read, no round trip.
   // But that channel is gated on `setArFrameMetaEnabled`, on the plugin being
   // in the AR registry, and on both sides spelling the meta key the same way,
   // and if any of those is wrong on device the HUD and the preview are simply

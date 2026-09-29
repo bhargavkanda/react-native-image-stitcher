@@ -118,7 +118,7 @@ function installNative(): void {
   startCalls = 0;
   calibCalls = [];
   startAnswers = {};
-  NM.RNISPanoPlus = {
+  NM.RNSSweepSession = {
     start: (o: Record<string, unknown>) => {
       startedWith = o;
       startCalls += 1;
@@ -130,7 +130,7 @@ function installNative(): void {
     cancel: () => Promise.resolve({ cancelled: true }),
     getStatus: () => Promise.resolve({ running: false }),
   };
-  NM.RNISPanoCalib = {
+  NM.RNSSweepCalibration = {
     startBasisCalibration: () => Promise.resolve({}),
     basisCalibrationStatus: () => Promise.resolve({}),
     stopBasisCalibration: () => Promise.resolve({}),
@@ -259,8 +259,8 @@ beforeEach(() => {
 });
 afterEach(() => {
   jest.useRealTimers();
-  delete NM.RNISPanoPlus;
-  delete NM.RNISPanoCalib;
+  delete NM.RNSSweepSession;
+  delete NM.RNSSweepCalibration;
 });
 
 describe('the ARKit arm is the default and is UNTOUCHED', () => {
@@ -615,7 +615,7 @@ describe('the HARDWARE refusal is not the calibration refusal', () => {
 
 describe('a build with no calibration module blames the BUILD', () => {
   it('does not present as a phone problem, and still sweeps on ARKit', async () => {
-    delete NM.RNISPanoCalib;
+    delete NM.RNSSweepCalibration;
     const r = mount({ poseSource: 'imu' });
     await settle();
     expect(r.shows('THIS BUILD CANNOT ANSWER')).toBe(true);
@@ -787,7 +787,7 @@ describe('the τ = 0 experiment', () => {
     basisOnly();
     let resolveStart: ((v: Record<string, unknown>) => void) | null = null;
     let stopCalls = 0;
-    NM.RNISPanoPlus = {
+    NM.RNSSweepSession = {
       start: (o: Record<string, unknown>) => {
         startedWith = o;
         return new Promise<Record<string, unknown>>((res) => { resolveStart = res; });

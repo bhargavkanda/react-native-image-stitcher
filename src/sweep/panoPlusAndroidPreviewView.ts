@@ -42,8 +42,6 @@ import type { HostComponent } from 'react-native';
 import type { ViewProps } from 'react-native';
 
 const COMPONENT_NAME = 'RNSSweepPreviewView';
-/** The pre-migration spelling — see the dual-name banner in panoPlusNative.ts. */
-const LEGACY_COMPONENT_NAME = 'RNISPanoPlusPreview';
 
 let resolved: HostComponent<ViewProps> | null | undefined;
 
@@ -65,17 +63,15 @@ function isRegistered(name: string): boolean {
 }
 
 /**
- * The registered spelling, or null.
+ * The registered name, or null.
  *
- * ⚠ PROBE BOTH, REQUIRE ONE.  The memo above is per NAME: probing two names
- * is free, but calling `requireNativeComponent` on a name the UIManager does
- * not know warns and hands back a broken component that the memo then keeps
- * forever.  So the probe picks the winner and only that name is required.
+ * ⚠ PROBE, THEN REQUIRE.  Calling `requireNativeComponent` on a name the
+ * UIManager does not know warns and hands back a broken component that the
+ * memo above then keeps forever.  So the name is required only once the probe
+ * has found it.
  */
 function registeredName(): string | null {
-  if (isRegistered(COMPONENT_NAME)) return COMPONENT_NAME;
-  if (isRegistered(LEGACY_COMPONENT_NAME)) return LEGACY_COMPONENT_NAME;
-  return null;
+  return isRegistered(COMPONENT_NAME) ? COMPONENT_NAME : null;
 }
 
 export function getPanoPlusAndroidPreviewView(): HostComponent<ViewProps> | null {

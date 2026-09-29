@@ -40,7 +40,7 @@ function installCalib(withPlanner = true): void {
       return Promise.resolve(a);
     };
   }
-  NM.RNISPanoCalib = mod;
+  NM.RNSSweepCalibration = mod;
 }
 
 const UW_OK = {
@@ -67,7 +67,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   P.OS = 'ios';
-  delete NM.RNISPanoCalib;
+  delete NM.RNSSweepCalibration;
 });
 
 describe('parsePlannedFormat carries the request beside the answer', () => {
@@ -160,7 +160,7 @@ describe('panoPlusLensAvailability — the iOS has0_5x', () => {
   });
 
   it('returns null, not "no 0.5×", on an iOS build without the calibration module', async () => {
-    delete NM.RNISPanoCalib;
+    delete NM.RNSSweepCalibration;
     expect(await panoPlusLensAvailability()).toBeNull();
   });
 

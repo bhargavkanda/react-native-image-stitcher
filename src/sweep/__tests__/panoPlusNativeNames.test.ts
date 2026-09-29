@@ -8,47 +8,30 @@
 // that tsconfig's include set never had both in one program.)
 export {};
 /**
- * panoPlusDualName — every pano+ native identifier, resolved under BOTH
- * spellings.
+ * panoPlusNativeNames — every pano+ native identifier resolves under the name
+ * native registers, and reports itself absent when nothing is registered.
  *
- * ── WHY THIS SUITE EXISTS ────────────────────────────────────────────────
- * pano+ is moving out of the private native overlay and into the public
- * `react-native-image-stitcher` package, and its React Native identifiers are
- * renamed on the way: `the host app*` → `RNSSweep*`, and the AR frame-plugin
- * registry key `rnisPanoPlus` → `sweep`.
+ * Every one of these accessors is written to FAIL CLOSED — a missing module
+ * resolves to `null` and the feature reports itself absent — so a name that
+ * drifts from native produces a build that installs, launches, and simply
+ * says pano+ is not in this build.  There is no error to grep for.  So each
+ * accessor is pinned in both states: registered, and absent.  The absent case
+ * matters as much as the first — an accessor that returned something truthy
+ * for an absent module would turn a clean "not in this build" into a
+ * TypeError at the first call.
  *
- * There is no atomic commit across two npm packages and no atomic rollout
- * across two app binaries.  Between the native rename landing and every
- * device carrying it, a phone can be running EITHER spelling.  So each
- * accessor accepts both: the new name first, the legacy one as a fallback.
- *
- * ── WHAT WOULD GO WRONG WITHOUT IT ───────────────────────────────────────
- * Nothing loud.  Every one of these accessors is written to FAIL CLOSED — a
- * missing module resolves to `null` and the feature reports itself absent —
- * so a half-renamed pair produces a build that installs, launches, and simply
- * says pano+ is not in this build.  That is indistinguishable from a device
- * that genuinely has an older binary, which is exactly the state this
- * fallback exists to support.  There is no error to grep for.
- *
- * So each accessor is pinned in all three states: NEW name only, LEGACY name
- * only, and NEITHER.  The third case matters as much as the first two — an
- * accessor that returned something truthy for an absent module would turn a
- * clean "not in this build" into a TypeError at the first call.
- *
- * ⚠ THESE ARE FIXTURES, NOT EVIDENCE ABOUT THE BINARY.  This package's
- * `node_modules/react-native-image-stitcher` is a real directory pinned two
- * minors behind the working tree, so neither jest nor tsc here can see the
- * actual native surface.  Green here proves the JS resolution logic; only a
- * device capture proves the names agree with what is registered.
+ * ⚠ THESE ARE FIXTURES, NOT EVIDENCE ABOUT THE BINARY.  Green here proves the
+ * JS resolution logic; only a device capture proves the names agree with what
+ * is registered.
  */
 
 /* eslint-disable @typescript-eslint/no-explicit-any, global-require, @typescript-eslint/no-var-requires */
 
 const NAMES = {
-  session: { next: 'RNSSweepSession', legacy: 'RNISPanoPlus' },
-  tools: { next: 'RNSSweepTools', legacy: 'RNISPanoPlusAndroid' },
-  calib: { next: 'RNSSweepCalibration', legacy: 'RNISPanoCalib' },
-  sourceView: { next: 'RNSSweepSourceView', legacy: 'RNISPanoSourceView' },
+  session: 'RNSSweepSession',
+  tools: 'RNSSweepTools',
+  calib: 'RNSSweepCalibration',
+  sourceView: 'RNSSweepSourceView',
 } as const;
 
 /**
@@ -63,9 +46,8 @@ const NAMES = {
  * two sibling calibration suites and `panoPlusCalibration` reads the OTHER
  * object, sees an empty registry, and reports the module unavailable.
  *
- * Reusing the shared mock's own objects makes the question moot — both
- * spellings of the module live in the one `NativeModules` either instance
- * hands out.  Do not replace these with fresh `{}`.
+ * Reusing the shared mock's own objects makes the question moot — the
+ * module lives in the one `NativeModules` either instance hands out.  Do not replace these with fresh `{}`.
  */
 // ⚠ THE FACTORY BUILDS THE OBJECT; THE MODULE SCOPE ONLY READS IT BACK.
 // `jest.mock` is hoisted above every `const` in the file, so a factory that
@@ -127,21 +109,16 @@ afterAll(() => {
   rn.Platform.OS = 'ios';
 });
 
-describe('the sweep session module resolves under both names', () => {
+describe('the sweep session module', () => {
   const isAvailable = () =>
     fresh('../panoPlusNative', (m) => m.panoPlusIsAvailable)();
 
-  it('resolves the NEW name', () => {
-    rn.NativeModules[NAMES.session.next] = sessionModuleFixture();
+  it('resolves the registered name', () => {
+    rn.NativeModules[NAMES.session] = sessionModuleFixture();
     expect(isAvailable()).toBe(true);
   });
 
-  it('resolves the LEGACY name', () => {
-    rn.NativeModules[NAMES.session.legacy] = sessionModuleFixture();
-    expect(isAvailable()).toBe(true);
-  });
-
-  it('reports unavailable when NEITHER is registered', () => {
+  it('reports unavailable when it is not registered', () => {
     rn.NativeModules.SomethingElse = sessionModuleFixture();
     expect(isAvailable()).toBe(false);
   });
@@ -149,21 +126,20 @@ describe('the sweep session module resolves under both names', () => {
   it('still requires the METHODS, not just a module object of the right name', () => {
     // A registered module whose methods did not link is the silent-failure
     // shape this codebase keeps hitting; a name match alone is not evidence.
-    rn.NativeModules[NAMES.session.next] = { start: () => {} };
+    rn.NativeModules[NAMES.session] = { start: () => {} };
     expect(isAvailable()).toBe(false);
   });
 
-  it('rejects with panoplus-unavailable, naming both spellings', async () => {
+  it('rejects with panoplus-unavailable, naming the module', async () => {
     const start = fresh('../panoPlusNative', (m) => m.startPanoPlus);
     await expect(start({ sessionDir: '/tmp/x' })).rejects.toMatchObject({
       code: 'panoplus-unavailable',
     });
-    await expect(start({ sessionDir: '/tmp/x' })).rejects.toThrow(NAMES.session.next);
-    await expect(start({ sessionDir: '/tmp/x' })).rejects.toThrow(NAMES.session.legacy);
+    await expect(start({ sessionDir: '/tmp/x' })).rejects.toThrow(NAMES.session);
   });
 });
 
-describe('the sweep tools module resolves under both names', () => {
+describe('the sweep tools module', () => {
   const available = () =>
     fresh('../panoPlusAndroid', (m) => m.panoPlusAndroidIsAvailable)();
 
@@ -171,106 +147,72 @@ describe('the sweep tools module resolves under both names', () => {
     rn.Platform.OS = 'android';
   });
 
-  it('resolves the NEW name', () => {
-    rn.NativeModules[NAMES.tools.next] = toolsModuleFixture();
+  it('resolves the registered name', () => {
+    rn.NativeModules[NAMES.tools] = toolsModuleFixture();
     expect(available()).toBe(true);
   });
 
-  it('resolves the LEGACY name', () => {
-    rn.NativeModules[NAMES.tools.legacy] = toolsModuleFixture();
-    expect(available()).toBe(true);
-  });
-
-  it('reports unavailable when NEITHER is registered', () => {
+  it('reports unavailable when it is not registered', () => {
     expect(available()).toBe(false);
   });
 });
 
-describe('the calibration module resolves under both names', () => {
+describe('the calibration module', () => {
   const available = () =>
     fresh('../panoPlusCalibration', (m) => m.panoCalibAvailable)();
 
-  it('resolves the NEW name', () => {
-    rn.NativeModules[NAMES.calib.next] = calibModuleFixture();
+  it('resolves the registered name', () => {
+    rn.NativeModules[NAMES.calib] = calibModuleFixture();
     expect(available()).toBe(true);
   });
 
-  it('resolves the LEGACY name', () => {
-    rn.NativeModules[NAMES.calib.legacy] = calibModuleFixture();
-    expect(available()).toBe(true);
-  });
-
-  it('reports unavailable when NEITHER is registered', () => {
+  it('reports unavailable when it is not registered', () => {
     expect(available()).toBe(false);
   });
 });
 
-describe('the iOS source view resolves under both names', () => {
+describe('the iOS source view', () => {
   const view = () =>
     fresh('../panoPlusSourceView', (m) => m.getPanoPlusSourceView)();
 
-  it('resolves the NEW name', () => {
+  it('resolves the registered name', () => {
     rn.UIManager.getViewManagerConfig = (n: string) =>
-      (n === NAMES.sourceView.next ? { NativeProps: {} } : null);
-    expect(view()).toEqual({ __nativeComponent: NAMES.sourceView.next });
+      (n === NAMES.sourceView ? { NativeProps: {} } : null);
+    expect(view()).toEqual({ __nativeComponent: NAMES.sourceView });
   });
 
-  it('resolves the LEGACY name', () => {
-    rn.UIManager.getViewManagerConfig = (n: string) =>
-      (n === NAMES.sourceView.legacy ? { NativeProps: {} } : null);
-    expect(view()).toEqual({ __nativeComponent: NAMES.sourceView.legacy });
-  });
-
-  it('requires ONLY the name that probed true', () => {
-    // Probing two names is free; requiring two is not. RN warns and returns a
-    // broken component for a name the UIManager does not know, and the
-    // module-level memo would then keep that broken component forever.
+  it('never requires a name that probed false', () => {
+    // RN warns and returns a broken component for a name the UIManager does
+    // not know, and the module-level memo would then keep that broken
+    // component forever.
     const required: string[] = [];
     rn.requireNativeComponent = (name: string) => {
       required.push(name);
       return { __nativeComponent: name };
     };
-    rn.UIManager.getViewManagerConfig = (n: string) =>
-      (n === NAMES.sourceView.legacy ? { NativeProps: {} } : null);
-    expect(view()).toEqual({ __nativeComponent: NAMES.sourceView.legacy });
-    expect(required).toEqual([NAMES.sourceView.legacy]);
+    rn.UIManager.getViewManagerConfig = () => null;
+    expect(view()).toBeNull();
+    expect(required).toEqual([]);
     rn.requireNativeComponent = (name: string) => ({ __nativeComponent: name });
   });
 
-  it('returns null when NEITHER is registered', () => {
+  it('returns null when it is not registered', () => {
     rn.UIManager.getViewManagerConfig = () => null;
     expect(view()).toBeNull();
   });
 });
 
-describe('the AR frame-plugin registry key is read under both spellings', () => {
+describe('the AR frame-plugin registry key', () => {
   const read = (plugins: Record<string, unknown>) =>
     fresh('../panoPlusModel', (m) => m.readPanoPlusStatus)({ plugins });
 
-  it('reads the NEW key', () => {
+  it('reads the registered key', () => {
     const { PANO_PLUS_PLUGIN_KEY } = require('../panoPlusModel');
     expect(PANO_PLUS_PLUGIN_KEY).toBe('sweep');
     expect(read({ sweep: { running: true, seq: 7 } })).toMatchObject({ seq: 7 });
   });
 
-  it('reads the LEGACY key', () => {
-    const { PANO_PLUS_PLUGIN_KEY_LEGACY } = require('../panoPlusModel');
-    expect(PANO_PLUS_PLUGIN_KEY_LEGACY).toBe('rnisPanoPlus');
-    expect(read({ rnisPanoPlus: { running: true, seq: 9 } })).toMatchObject({
-      seq: 9,
-    });
-  });
-
-  it('prefers the NEW key when a binary somehow publishes both', () => {
-    expect(
-      read({
-        sweep: { running: true, seq: 1 },
-        rnisPanoPlus: { running: true, seq: 2 },
-      }),
-    ).toMatchObject({ seq: 1 });
-  });
-
-  it('returns null when NEITHER key is present', () => {
+  it('returns null when the key is not present', () => {
     expect(read({ someOtherPlugin: { running: true, seq: 3 } })).toBeNull();
   });
 });

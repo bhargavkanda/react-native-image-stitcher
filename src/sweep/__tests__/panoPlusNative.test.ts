@@ -5,7 +5,7 @@
 // What these pin, and the failure each one prevents:
 //
 //   1. DEGRADATION, NOT CRASH. Android, a jest env, or an app built before the
-//      private pod landed has no `RNISPanoPlus`. Every entry point must
+//      private pod landed has no `RNSSweepSession`. Every entry point must
 //      resolve/reject in a way the surface can render, and `cancel()` in
 //      particular must ALWAYS resolve — a cancel that can fail leaves the
 //      native session latched and every later `start()` rejects
@@ -38,7 +38,7 @@ import type { PanoPlusFailure } from '../panoPlusTypes';
 const NM = NativeModules as Record<string, unknown>;
 
 afterEach(() => {
-  delete NM.RNISPanoPlus;
+  delete NM.RNSSweepSession;
 });
 
 
@@ -64,12 +64,12 @@ describe('availability', () => {
   });
 
   it('is false for a PARTIAL module — presence is not linkage', () => {
-    NM.RNISPanoPlus = { start: () => undefined };
+    NM.RNSSweepSession = { start: () => undefined };
     expect(panoPlusIsAvailable()).toBe(false);
   });
 
   it('is true once start/stop/cancel are all callable, resolved at CALL time', () => {
-    NM.RNISPanoPlus = {
+    NM.RNSSweepSession = {
       start: () => Promise.resolve({}),
       stop: () => Promise.resolve({}),
       cancel: () => Promise.resolve({}),
@@ -105,7 +105,7 @@ describe('degraded build', () => {
 describe('start marshalling', () => {
   it('strips undefined values so native falls back to ITS defaults', async () => {
     let seen: Record<string, unknown> | null = null;
-    NM.RNISPanoPlus = {
+    NM.RNSSweepSession = {
       start: (o: Record<string, unknown>) => {
         seen = o;
         return Promise.resolve({ sessionDir: o.sessionDir, startedAtMs: 1, pluginAvailable: true });
@@ -128,7 +128,7 @@ describe('start marshalling', () => {
   });
 
   it('falls back to the requested sessionDir if native omits it', async () => {
-    NM.RNISPanoPlus = {
+    NM.RNSSweepSession = {
       start: () => Promise.resolve({}),
       stop: () => Promise.resolve({}),
       cancel: () => Promise.resolve({}),
@@ -141,7 +141,7 @@ describe('start marshalling', () => {
 
 describe('stop', () => {
   it('coerces the summary rather than trusting the dict shape', async () => {
-    NM.RNISPanoPlus = {
+    NM.RNSSweepSession = {
       start: () => Promise.resolve({}),
       stop: () =>
         Promise.resolve({
@@ -168,7 +168,7 @@ describe('stop', () => {
       code: 'panoplus-empty',
       userInfo: { sessionDir: '/d/pp_4', abort: 'chain-lost', counts: { seen: 12 } },
     });
-    NM.RNISPanoPlus = {
+    NM.RNSSweepSession = {
       start: () => Promise.resolve({}),
       stop: () => Promise.reject(nativeError),
       cancel: () => Promise.resolve({}),
@@ -197,7 +197,7 @@ describe('idle viewfinder — the lens that is live rides the answer', () => {
   };
 
   it('keeps lens and lensRequested when native sends them', async () => {
-    NM.RNISPanoPlus = {
+    NM.RNSSweepSession = {
       ...base,
       setIdlePreview: () => Promise.resolve({
         on: true,
@@ -213,7 +213,7 @@ describe('idle viewfinder — the lens that is live rides the answer', () => {
   });
 
   it('is null — never a guessed lens — on a build that predates the fields', async () => {
-    NM.RNISPanoPlus = {
+    NM.RNSSweepSession = {
       ...base,
       setIdlePreview: () => Promise.resolve({ on: true, reason: '' }),
     };
@@ -226,7 +226,7 @@ describe('idle viewfinder — the lens that is live rides the answer', () => {
   it('a refusal carries the planner code in its reason and no live lens', async () => {
     // What iOS answers for a wide request on a body with no wide, or a chip
     // label that skipped the host's mapping: the code leads the sentence.
-    NM.RNISPanoPlus = {
+    NM.RNSSweepSession = {
       ...base,
       setIdlePreview: () => Promise.resolve({
         on: false,
@@ -242,13 +242,13 @@ describe('idle viewfinder — the lens that is live rides the answer', () => {
   });
 
   it('a build without the method, and a bridge rejection, both answer with null lenses', async () => {
-    NM.RNISPanoPlus = { ...base };
+    NM.RNSSweepSession = { ...base };
     const none = await setPanoPlusIdlePreview(true, {});
     expect(none.on).toBe(false);
     expect(none.lens).toBeNull();
     expect(none.lensRequested).toBeNull();
 
-    NM.RNISPanoPlus = {
+    NM.RNSSweepSession = {
       ...base,
       setIdlePreview: () => Promise.reject(new Error('bridge fell over')),
     };
@@ -275,7 +275,7 @@ describe('idle viewfinder — WHAT HAPPENED TO THE FRAME RATE rides the answer',
   };
 
   it('keeps the pin report when native sends it', async () => {
-    NM.RNISPanoPlus = {
+    NM.RNSSweepSession = {
       ...base,
       setIdlePreview: () => Promise.resolve({
         on: true,
@@ -294,7 +294,7 @@ describe('idle viewfinder — WHAT HAPPENED TO THE FRAME RATE rides the answer',
   });
 
   it('carries a DECLINED pin as false — the case the panel has to speak', async () => {
-    NM.RNISPanoPlus = {
+    NM.RNSSweepSession = {
       ...base,
       setIdlePreview: () => Promise.resolve({
         on: true,
@@ -318,7 +318,7 @@ describe('idle viewfinder — WHAT HAPPENED TO THE FRAME RATE rides the answer',
     // 2026-09-07) says nothing about the rate at all, and coercing that
     // silence to `false` would print a fault on a viewfinder nobody has any
     // evidence against.
-    NM.RNISPanoPlus = {
+    NM.RNSSweepSession = {
       ...base,
       setIdlePreview: () => Promise.resolve({ on: true, reason: 'live' }),
     };
@@ -330,12 +330,12 @@ describe('idle viewfinder — WHAT HAPPENED TO THE FRAME RATE rides the answer',
   });
 
   it('says nothing about the rate on a missing method or a bridge rejection', async () => {
-    NM.RNISPanoPlus = { ...base };
+    NM.RNSSweepSession = { ...base };
     const none = await setPanoPlusIdlePreview(true, { pinPreviewFps: true });
     expect(none.previewFpsApplied).toBeNull();
     expect(none.previewFpsNote).toBe('');
 
-    NM.RNISPanoPlus = {
+    NM.RNSSweepSession = {
       ...base,
       setIdlePreview: () => Promise.reject(new Error('bridge fell over')),
     };
@@ -371,7 +371,7 @@ describe('iOS\'s OWN answer for the same fault survives the coercion', () => {
   // one fault the whole notice exists for.
 
   it('carries previewFormatApplied through as the same three-state', async () => {
-    NM.RNISPanoPlus = {
+    NM.RNSSweepSession = {
       ...base,
       setIdlePreview: () => Promise.resolve({
         on: true,
@@ -390,7 +390,7 @@ describe('iOS\'s OWN answer for the same fault survives the coercion', () => {
   });
 
   it('is TRUE when iOS applied the format, and NULL where nobody said', async () => {
-    NM.RNISPanoPlus = {
+    NM.RNSSweepSession = {
       ...base,
       setIdlePreview: () => Promise.resolve({
         on: true,
@@ -404,18 +404,18 @@ describe('iOS\'s OWN answer for the same fault survives the coercion', () => {
     // Every Android build, and every iOS build older than 2026-09-07. Silence
     // is not evidence of a mismatch — the same contract `previewFpsApplied`
     // documents.
-    NM.RNISPanoPlus = {
+    NM.RNSSweepSession = {
       ...base,
       setIdlePreview: () => Promise.resolve({ on: true, reason: 'live' }),
     };
     expect((await setPanoPlusIdlePreview(true, {})).previewFormatApplied).toBeNull();
 
-    NM.RNISPanoPlus = { ...base };
+    NM.RNSSweepSession = { ...base };
     expect(
       (await setPanoPlusIdlePreview(true, {})).previewFormatApplied,
     ).toBeNull();
 
-    NM.RNISPanoPlus = {
+    NM.RNSSweepSession = {
       ...base,
       setIdlePreview: () => Promise.reject(new Error('bridge fell over')),
     };

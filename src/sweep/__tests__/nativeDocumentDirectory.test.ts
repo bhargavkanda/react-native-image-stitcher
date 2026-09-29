@@ -28,7 +28,7 @@ const mods = NativeModules as Mods;
 
 describe('nativeDocumentDirectory — the sweep does not need Expo', () => {
   const saved: Mods = {};
-  const NAMES = ['RNSSweepSession', 'RNISPanoPlus'];
+  const NAMES = ['RNSSweepSession'];
 
   beforeEach(() => {
     for (const n of NAMES) saved[n] = mods[n];
@@ -44,20 +44,6 @@ describe('nativeDocumentDirectory — the sweep does not need Expo', () => {
   it('reads the directory off the registered session module', () => {
     mods.RNSSweepSession = { documentDirectory: 'file:///data/u/0/app/files/' };
     expect(nativeDocumentDirectory()).toBe('file:///data/u/0/app/files/');
-  });
-
-  it('accepts the pre-rename module name too', () => {
-    // Same dual-name contract as `panoPlusNative.ts`: this package and its
-    // hosts do not release atomically, so a device can run an older binary
-    // against newer JS.
-    mods.RNISPanoPlus = { documentDirectory: 'file:///var/Documents/' };
-    expect(nativeDocumentDirectory()).toBe('file:///var/Documents/');
-  });
-
-  it('prefers the new name when a binary somehow carries both', () => {
-    mods.RNSSweepSession = { documentDirectory: 'file:///new/' };
-    mods.RNISPanoPlus = { documentDirectory: 'file:///old/' };
-    expect(nativeDocumentDirectory()).toBe('file:///new/');
   });
 
   it('reads it through getConstants() when the property is not merged', () => {
@@ -83,13 +69,12 @@ describe('nativeDocumentDirectory — the sweep does not need Expo', () => {
   });
 
   it('survives a module whose getConstants throws', () => {
-    // Falling through to the next name beats taking the whole sweep surface
-    // down over a module that cannot describe itself.
+    // A module that cannot describe itself reports absence; it does not take
+    // the whole sweep surface down.
     mods.RNSSweepSession = {
       getConstants: () => { throw new Error('bridge is gone'); },
     };
-    mods.RNISPanoPlus = { documentDirectory: 'file:///fallback/' };
-    expect(nativeDocumentDirectory()).toBe('file:///fallback/');
+    expect(nativeDocumentDirectory()).toBeNull();
   });
 
   it('returns null when the module is registered but predates the constant', () => {

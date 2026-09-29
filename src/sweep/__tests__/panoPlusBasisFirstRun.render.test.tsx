@@ -91,7 +91,7 @@ function installNative(): void {
   calibCalls = [];
   startedWith = null;
   startAnswers = {};
-  NM.RNISPanoPlus = {
+  NM.RNSSweepSession = {
     start: (o: Record<string, unknown>) => {
       startedWith = o;
       return Promise.resolve({
@@ -103,7 +103,7 @@ function installNative(): void {
     cancel: () => Promise.resolve({ cancelled: true }),
     getStatus: () => Promise.resolve({ running: false }),
   };
-  NM.RNISPanoCalib = {
+  NM.RNSSweepCalibration = {
     plannedCaptureFormat: () => {
       calibCalls.push('plannedCaptureFormat');
       return Promise.resolve({
@@ -234,8 +234,8 @@ beforeEach(() => {
 afterEach(() => {
   jest.useRealTimers();
   (Platform as { OS: string }).OS = 'ios';
-  delete NM.RNISPanoPlus;
-  delete NM.RNISPanoCalib;
+  delete NM.RNSSweepSession;
+  delete NM.RNSSweepCalibration;
 });
 
 // ── Deleted in M10 — the basis card and its gesture flow ───────────────────

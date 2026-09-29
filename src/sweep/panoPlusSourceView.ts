@@ -35,8 +35,6 @@ import type { HostComponent } from 'react-native';
 import type { ViewProps } from 'react-native';
 
 const COMPONENT_NAME = 'RNSSweepSourceView';
-/** The pre-migration spelling — see the dual-name banner in panoPlusNative.ts. */
-const LEGACY_COMPONENT_NAME = 'RNISPanoSourceView';
 
 let resolved: HostComponent<ViewProps> | null | undefined;
 
@@ -82,12 +80,11 @@ export function getPanoPlusSourceView(): HostComponent<ViewProps> | null {
     return resolved;
   }
   try {
-    // ⚠ PROBE BOTH, REQUIRE ONE. The memo above is per NAME: probing is free,
-    // but `requireNativeComponent` on a name the UIManager does not know warns
-    // and returns a broken component the memo would then keep forever.
-    const name = [COMPONENT_NAME, LEGACY_COMPONENT_NAME].find(isRegistered);
-    resolved = name != null
-      ? (requireNativeComponent(name) as HostComponent<ViewProps>)
+    // ⚠ PROBE, THEN REQUIRE. `requireNativeComponent` on a name the UIManager
+    // does not know warns and returns a broken component the memo would then
+    // keep forever.
+    resolved = isRegistered(COMPONENT_NAME)
+      ? (requireNativeComponent(COMPONENT_NAME) as HostComponent<ViewProps>)
       : null;
   } catch {
     resolved = null;

@@ -31,17 +31,12 @@ export {};
  * re-require the module through `jest.isolateModules`, or the second test
  * reads the first one's answer.
  *
- * ⚠ TWO NAMES. pano+ is moving into the public stitcher package and the view
- * manager is renamed on the way, so the probe accepts `RNSSweepPreviewView`
- * and falls back to `RNISPanoPlusPreview`. The cases below pin all three
- * states — new only, legacy only, neither — AND that the new name is asked
- * first, because `requireNativeComponent` must be called on exactly the name
- * that probed true: calling it on the other one warns and memoises a broken
- * component for the life of the process.
+ * ⚠ PROBE, THEN REQUIRE. `requireNativeComponent` must be called only on a
+ * name that probed true: calling it on an unknown one warns and memoises a
+ * broken component for the life of the process.
  */
 
 const NEW_NAME = 'RNSSweepPreviewView';
-const LEGACY_NAME = 'RNISPanoPlusPreview';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -74,42 +69,29 @@ describe('getPanoPlusAndroidPreviewView', () => {
     const asked: string[] = [];
     rn.UIManager.hasViewManagerConfig = (n: string) => { asked.push(n); return true; };
     expect(loadProbe()()).toEqual({ __nativeComponent: NEW_NAME });
-    // The new name answered, so the legacy one is never asked and — crucially
-    // — never required.
     expect(asked).toEqual([NEW_NAME]);
   });
 
-  it('falls back to the legacy name when only the old binary is installed', () => {
-    const asked: string[] = [];
-    rn.UIManager.hasViewManagerConfig = (n: string) => {
-      asked.push(n);
-      return n === LEGACY_NAME;
-    };
-    expect(loadProbe()()).toEqual({ __nativeComponent: LEGACY_NAME });
-    expect(asked).toEqual([NEW_NAME, LEGACY_NAME]);
-  });
-
-  it('requires ONLY the name that probed true', () => {
-    // The regression this pins: probing two names is free, requiring two is
-    // not. If the resolver ever called requireNativeComponent on the name
-    // that answered false, RN would hand back a broken component and the
-    // module-level memo would keep it forever.
+  it('never requires a name that probed false', () => {
+    // The regression this pins: if the resolver ever called
+    // requireNativeComponent on a name that answered false, RN would hand back
+    // a broken component and the module-level memo would keep it forever.
     const required: string[] = [];
     rn.requireNativeComponent = (name: string) => {
       required.push(name);
       return { __nativeComponent: name };
     };
-    rn.UIManager.hasViewManagerConfig = (n: string) => n === LEGACY_NAME;
-    expect(loadProbe()()).toEqual({ __nativeComponent: LEGACY_NAME });
-    expect(required).toEqual([LEGACY_NAME]);
+    rn.UIManager.hasViewManagerConfig = () => false;
+    expect(loadProbe()()).toBeNull();
+    expect(required).toEqual([]);
     rn.requireNativeComponent = (name: string) => ({ __nativeComponent: name });
   });
 
-  it('returns null when NEITHER name is registered', () => {
+  it('returns null when the view manager is not registered', () => {
     const asked: string[] = [];
     rn.UIManager.hasViewManagerConfig = (n: string) => { asked.push(n); return false; };
     expect(loadProbe()()).toBeNull();
-    expect(asked).toEqual([NEW_NAME, LEGACY_NAME]);
+    expect(asked).toEqual([NEW_NAME]);
   });
 
   it('returns null off Android without probing the UIManager at all', () => {
@@ -149,7 +131,7 @@ describe('getPanoPlusAndroidPreviewView', () => {
     const asked: string[] = [];
     rn.UIManager.getViewManagerConfig = (n: string) => { asked.push(n); return undefined; };
     expect(loadProbe()()).toBeNull();
-    expect(asked).toEqual([NEW_NAME, LEGACY_NAME]);
+    expect(asked).toEqual([NEW_NAME]);
   });
 
   it('survives a UIManager that answers nothing rather than taking the panel down', () => {

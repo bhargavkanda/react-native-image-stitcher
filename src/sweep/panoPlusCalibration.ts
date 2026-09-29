@@ -91,8 +91,6 @@ export type CalibAxis = 'tilt' | 'pan' | 'roll';
 
 /** The RN module name declared by `RCT_EXTERN_MODULE(RNSSweepCalibration, …)`. */
 const CALIB_MODULE_NAME = 'RNSSweepCalibration';
-/** The pre-migration spelling — see the dual-name banner in panoPlusNative.ts. */
-const LEGACY_CALIB_MODULE_NAME = 'RNISPanoCalib';
 
 export const CALIB_AXES: readonly CalibAxis[] = ['tilt', 'pan', 'roll'];
 
@@ -610,15 +608,10 @@ interface NativeCalib {
  * would be would fail at the first tap with a TypeError instead of a sentence.
  */
 export function panoCalibNative(): NativeCalib | null {
-  // Dual-name acceptance — see the banner in panoPlusNative.ts.
-  const mods = NativeModules as Record<string, unknown>;
-  for (const name of [CALIB_MODULE_NAME, LEGACY_CALIB_MODULE_NAME]) {
-    const mod = mods[name];
-    if (mod == null || typeof mod !== 'object') continue;
-    const fn = (mod as Record<string, unknown>)['startBasisCalibration'];
-    if (typeof fn === 'function') return mod as unknown as NativeCalib;
-  }
-  return null;
+  const mod = (NativeModules as Record<string, unknown>)[CALIB_MODULE_NAME];
+  if (mod == null || typeof mod !== 'object') return null;
+  const fn = (mod as Record<string, unknown>)['startBasisCalibration'];
+  return typeof fn === 'function' ? (mod as unknown as NativeCalib) : null;
 }
 
 /** True when this build can run the calibration at all. */
@@ -627,8 +620,7 @@ export function panoCalibAvailable(): boolean {
 }
 
 export const CALIB_UNAVAILABLE =
-  `Neither NativeModules.${CALIB_MODULE_NAME} nor `
-  + `NativeModules.${LEGACY_CALIB_MODULE_NAME} is registered — an Android `
+  `NativeModules.${CALIB_MODULE_NAME} is not registered — an Android `
   + 'build, or an iOS build that has not been re-podded since the '
   + 'calibration was added.';
 

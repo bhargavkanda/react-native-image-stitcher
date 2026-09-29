@@ -118,7 +118,7 @@ function installNative(): void {
   controls = [];
   failures = [];
   results = [];
-  NM.RNISPanoPlus = {
+  NM.RNSSweepSession = {
     start: (o: Record<string, unknown>) => {
       startedWith = o;
       return Promise.resolve({
@@ -139,7 +139,7 @@ function installNative(): void {
     cancel: () => Promise.resolve({ cancelled: true }),
     getStatus: () => Promise.resolve({ running: false }),
   };
-  NM.RNISPanoCalib = {
+  NM.RNSSweepCalibration = {
     startBasisCalibration: () => Promise.resolve({}),
     basisCalibrationStatus: () => Promise.resolve({}),
     stopBasisCalibration: () => Promise.resolve({}),
@@ -212,8 +212,8 @@ beforeEach(() => {
 });
 afterEach(() => {
   jest.useRealTimers();
-  delete NM.RNISPanoPlus;
-  delete NM.RNISPanoCalib;
+  delete NM.RNSSweepSession;
+  delete NM.RNSSweepCalibration;
 });
 
 describe('the arm is latched for the duration of a sweep', () => {

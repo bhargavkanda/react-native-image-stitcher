@@ -60,40 +60,34 @@ export interface VideoFileSystem {
  * Returns null on a binary that predates the constant.
  */
 export function nativeDocumentDirectory(): string | null {
-  // Both spellings, for the same reason `panoPlusNative.ts` accepts both:
-  // this package and its hosts do not release atomically.
-  const mods = NativeModules as Record<string, unknown>;
-  for (const name of ['RNSSweepSession', 'RNISPanoPlus']) {
-    const m = mods[name] as
-      | { documentDirectory?: unknown; getConstants?: () => unknown }
-      | undefined;
-    if (m == null) continue;
-    // ⚠ TWO READS, AND THE SECOND ONE IS NOT BELT-AND-BRACES.
-    // On the old architecture a module's constants are merged onto the JS
-    // object, so `m.documentDirectory` is the natural read. Under bridgeless
-    // the module arrives through the legacy interop layer, which exposes
-    // them only behind `getConstants()` — the property read comes back
-    // `undefined` on a binary that definitely exports the constant.
-    // MEASURED on a Galaxy A35 running the New Architecture: the string is
-    // in classes2.dex, the module resolves, and the direct read is still
-    // undefined. Supporting one spelling would have meant supporting one
-    // architecture, silently, with a null that reads like "old binary".
-    const direct = m.documentDirectory;
-    if (typeof direct === 'string' && direct.length > 0) return direct;
-    if (typeof m.getConstants === 'function') {
-      let consts: unknown;
-      try {
-        consts = m.getConstants();
-      } catch {
-        // A module that throws from getConstants has nothing to tell us;
-        // keep looking rather than taking the whole surface down.
-        continue;
-      }
-      const viaConsts = (consts as { documentDirectory?: unknown } | null)
-        ?.documentDirectory;
-      if (typeof viaConsts === 'string' && viaConsts.length > 0) {
-        return viaConsts;
-      }
+  const m = (NativeModules as Record<string, unknown>).RNSSweepSession as
+    | { documentDirectory?: unknown; getConstants?: () => unknown }
+    | undefined;
+  if (m == null) return null;
+  // ⚠ TWO READS, AND THE SECOND ONE IS NOT BELT-AND-BRACES.
+  // On the old architecture a module's constants are merged onto the JS
+  // object, so `m.documentDirectory` is the natural read. Under bridgeless
+  // the module arrives through the legacy interop layer, which exposes
+  // them only behind `getConstants()` — the property read comes back
+  // `undefined` on a binary that definitely exports the constant.
+  // MEASURED on a Galaxy A35 running the New Architecture: the string is
+  // in classes2.dex, the module resolves, and the direct read is still
+  // undefined. Supporting one read would have meant supporting one
+  // architecture, silently, with a null that reads like "old binary".
+  const direct = m.documentDirectory;
+  if (typeof direct === 'string' && direct.length > 0) return direct;
+  if (typeof m.getConstants === 'function') {
+    let consts: unknown;
+    try {
+      consts = m.getConstants();
+    } catch {
+      // A module that throws from getConstants has nothing to tell us.
+      return null;
+    }
+    const viaConsts = (consts as { documentDirectory?: unknown } | null)
+      ?.documentDirectory;
+    if (typeof viaConsts === 'string' && viaConsts.length > 0) {
+      return viaConsts;
     }
   }
   return null;

@@ -336,6 +336,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   review surface as a keyframe panorama (M9), and a host that reopens a
   capture uses that review too.
 
+- **The sweep's pre-rename native-name fallbacks.** The JS no longer looks for
+  the sweep's modules, views and AR frame-plugin key under their pre-rename
+  names; native registers only the `RNSSweep*` names and the `sweep` key. The
+  sweep engine has not been released, so no published version is affected.
+
 ### Fixed
 - **A false "NO LIVE CAMERA FEED" on every Android sweep.** The Android live
   status always carries the state of pano+'s own preview view, which

@@ -44,22 +44,8 @@
 
 import { NativeModules, Platform } from 'react-native';
 
-/**
- * ── DUAL-NAME ACCEPTANCE ────────────────────────────────────────────────
- * pano+ is moving out of the private native overlay and into the public
- * stitcher package, and its React Native identifiers are being renamed on
- * the way (`the host app*` -> `RNSSweep*`).  There is no atomic commit across
- * two npm packages, so this SDK accepts BOTH spellings: the new name first,
- * the old one as a fallback.  That makes every later native rename invisible
- * here, and it means a device can run an old binary against new JS or the
- * reverse without a coordinated release.
- *
- * Delete the legacy branch once no supported binary predates the rename.
- */
 /** The RN module name declared by `PanoPlusAndroidModule.getName()`. */
 const MODULE_NAME = 'RNSSweepTools';
-/** The pre-migration spelling. */
-const LEGACY_MODULE_NAME = 'RNISPanoPlusAndroid';
 
 interface PanoPlusAndroidModuleShape {
   engineInfo(): Promise<unknown>;
@@ -157,14 +143,10 @@ function looksLikeTheModule(native: unknown): native is PanoPlusAndroidModuleSha
 }
 
 function getModule(): PanoPlusAndroidModuleShape | null {
-  const mods = NativeModules as Record<string, unknown>;
-  for (const name of [MODULE_NAME, LEGACY_MODULE_NAME]) {
-    // One read, and return the value the type guard narrowed. Reading the
-    // proxy twice and casting throws away the guard for no reason.
-    const native = mods[name];
-    if (looksLikeTheModule(native)) return native;
-  }
-  return null;
+  // One read, and return the value the type guard narrowed. Reading the
+  // proxy twice and casting throws away the guard for no reason.
+  const native = (NativeModules as Record<string, unknown>)[MODULE_NAME];
+  return looksLikeTheModule(native) ? native : null;
 }
 
 /** True when this binary carries the pano+ Android module. False on iOS. */

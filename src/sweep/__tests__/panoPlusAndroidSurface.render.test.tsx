@@ -139,7 +139,7 @@ function installNative(withLiveModule = true): void {
     // `panoPlusNative.ts`: the availability probe is
     // `typeof start/stop/cancel === 'function'` and all three must exist or a
     // hold is refused `panoplus-unavailable`.
-    NM.RNISPanoPlus = {
+    NM.RNSSweepSession = {
       start: (o: Record<string, unknown>) => {
         startedWith = o;
         return Promise.resolve({
@@ -166,7 +166,7 @@ function installNative(withLiveModule = true): void {
       },
     };
   }
-  NM.RNISPanoCalib = {
+  NM.RNSSweepCalibration = {
     plannedCaptureFormat: () => {
       calibCalls.push('plannedCaptureFormat');
       return Promise.resolve({ ok: true, lens: 'x', width: 1, height: 1, fps: 60 });
@@ -320,8 +320,8 @@ beforeEach(() => {
 afterEach(() => {
   jest.useRealTimers();
   (Platform as { OS: string }).OS = 'ios';
-  delete NM.RNISPanoPlus;
-  delete NM.RNISPanoCalib;
+  delete NM.RNSSweepSession;
+  delete NM.RNSSweepCalibration;
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -351,7 +351,7 @@ describe('a hold on a build without the live module is refused by name', () => {
     // refusal. A hold that stopped being refused would trade one wrong screen
     // for another — an Android build with no live arm looking like a working
     // one, whose shutter does nothing and says nothing.
-    delete NM.RNISPanoPlus;
+    delete NM.RNSSweepSession;
     const r = mount();
     await settle();
     // The engine reports it cannot take a hold (`<Camera>`'s shutter does not
@@ -366,7 +366,7 @@ describe('a hold on a build without the live module is refused by name', () => {
   });
 
   it('never says iOS-only on an Android build', async () => {
-    delete NM.RNISPanoPlus;
+    delete NM.RNSSweepSession;
     const r = mount();
     await settle();
     r.hold();

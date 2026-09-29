@@ -56,7 +56,7 @@ function installNative(): void {
   startedWith = null;
   controls = [];
   failures = [];
-  NM.RNISPanoPlus = {
+  NM.RNSSweepSession = {
     start: (o: Record<string, unknown>) => {
       startedWith = o;
       return Promise.resolve({
@@ -86,7 +86,7 @@ afterEach(() => {
   jest.runOnlyPendingTimers();
   jest.useRealTimers();
   (Platform as { OS: string }).OS = 'ios';
-  delete NM.RNISPanoPlus;
+  delete NM.RNSSweepSession;
 });
 
 /** The engine's imperative handle — `holdStart` is what a shutter press

@@ -229,7 +229,7 @@ describe('the AR pill on Android — the stitcher\'s ARCore session (M2)', () =>
 
   it('refuses BOTH arms when the build carries no session module', () => {
     // The build rung is above the arm fork on purpose: an APK with no
-    // RNISPanoPlus cannot open an ARCore sweep either, and describing one
+    // RNSSweepSession cannot open an ARCore sweep either, and describing one
     // would be the same class of promise the old copy made.
     const noModule = panoPlusAndroidArmNotice({
       poseSource: 'ar',
