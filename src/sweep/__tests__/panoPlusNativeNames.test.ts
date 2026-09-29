@@ -236,19 +236,13 @@ describe('the re-declared verdict shape still matches the host SDK', () => {
   const fs = require('fs') as typeof import('fs');
   const path = require('path') as typeof import('path');
   const hostPath = path.resolve(__dirname, '../../device/arCaptureSummary.ts');
+  // The host SDK's file is not in this package, so here the case is a SKIP —
+  // reported as skipped by jest (a console.warn is hidden by `--silent`), so a
+  // green run cannot be mistaken for a checked one. It runs wherever the host
+  // declaration sits beside the sweep.
+  const itWithHost = fs.existsSync(hostPath) ? it : it.skip;
 
-  it('has the same fields, in the same shape', () => {
-    if (!fs.existsSync(hostPath)) {
-      // Not a silent skip: state it, so a green run cannot be mistaken for a
-      // checked one after the sweep leaves this package.
-      // eslint-disable-next-line no-console
-      console.warn(
-        `[verdict parity] SKIPPED — ${hostPath} is gone. The sweep has left `
-        + 'this SDK; re-point this check at the host that still declares '
-        + 'ArProbeVerdict, or delete it.',
-      );
-      return;
-    }
+  itWithHost('has the same fields, in the same shape', () => {
     const host = fs.readFileSync(hostPath, 'utf8');
     // tone union
     expect(host).toMatch(/type ArProbeTone = 'yes' \| 'no' \| 'unknown'/);

@@ -288,18 +288,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The library's C++ namespace is `rnis`.** A host that calls the
   library's C++ directly (a native plugin compiled against `cpp/`) must
   rename its `using` declarations and qualifiers.
-- **os_log subsystems** are `io.imagestitcher.rn` and
-  `io.imagestitcher.rn.panoplus`. Update any Console.app or `log stream`
-  predicate that filtered on the old subsystem.
+- **os_log subsystems** that used the old reverse-DNS prefix are now
+  `io.imagestitcher.rn` and `io.imagestitcher.rn.panoplus`. Update any
+  Console.app or `log stream` predicate that filtered on the old subsystem.
 - **Swift `Notification.Name` statics** are `.rnisIncrementalStateUpdate`,
   `.rnisARFrameMeta` and `.rnisARPluginResult`. Their raw string values are
   unchanged, so JS listeners are unaffected; a Swift host that names the old
   statics must rename them.
 - **Debug file names.** The Android capture cache directories are
   `rnis-capture-*`, the iOS debug log is `<Documents>/rnis-debug.log` and the
-  debug-pack schema is `rnis-debug-pack/v1`. A stale debug log or one capture
-  directory from an earlier version may remain on the device; delete it, or
-  let the OS evict the cache.
+  debug-pack schema is `rnis-debug-pack/v1`. `cleanupKeyframes` matches only
+  the new prefix, so capture directories an earlier version left in the app's
+  cache directory are no longer removed by it: Android evicts them under
+  storage pressure, or the app can clear its cache. A stale iOS debug log from
+  an earlier version may likewise remain in Documents.
 - **The iOS sweep calibration** lives in
   `Application Support/RNImageStitcher/`. A calibration an earlier build
   wrote under another Application Support folder is copied in automatically
@@ -338,7 +340,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The sweep's pre-rename native-name fallbacks.** The JS no longer looks for
   the sweep's modules, views and AR frame-plugin key under their pre-rename
-  names; native registers only the `RNSSweep*` names and the `sweep` key. The
+  names; native registers only the `RNSSweep*` names, and the iOS AR frame
+  plugin publishes under `sweep`. The
   sweep engine has not been released, so no published version is affected.
 
 ### Fixed

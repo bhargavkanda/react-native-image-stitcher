@@ -120,8 +120,19 @@ public final class RNISPanoCalibStore: NSObject {
             guard let data = try? Data(contentsOf: cand),
                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   (obj["schema"] as? NSNumber)?.intValue == Self.schema else { continue }
-            try? fm.copyItem(at: cand, to: target)
-            NSLog("[RNIS pano+] adopted an earlier calibration file")
+            // Copy beside the target, then MOVE into place: a rename within one
+            // folder is atomic, so a process killed mid-copy leaves a stray
+            // temp file, never a truncated target that would both block any
+            // later adoption and read as "no calibration".
+            let tmp = target.deletingLastPathComponent()
+                .appendingPathComponent(".adopt-\(UUID().uuidString).json")
+            do {
+                try fm.copyItem(at: cand, to: tmp)
+                try fm.moveItem(at: tmp, to: target)
+                NSLog("[RNIS pano+] adopted an earlier calibration file")
+            } catch {
+                try? fm.removeItem(at: tmp)
+            }
             return
         }
     }
