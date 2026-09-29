@@ -92,7 +92,38 @@ public final class RNISPanoCalibStore: NSObject {
             try? FileManager.default.createDirectory(
                 at: sub, withIntermediateDirectories: true)
         }
-        return sub.appendingPathComponent("panoplus_calibration.json")
+        let url = sub.appendingPathComponent("panoplus_calibration.json")
+        adoptEarlierFileOnce(into: url, supportDir: dir)
+        return url
+    }
+
+    /// One-time adoption of a calibration an EARLIER build of this library wrote
+    /// under a different Application Support sub-folder.  The folder is
+    /// DISCOVERED (an immediate sub-folder holding a same-named file of this
+    /// schema), never named; the file is COPIED so a downgrade still finds its
+    /// own.  Runs once per process and only while no current file exists, so a
+    /// calibration taken on this build always wins.  Every caller of `fileURL`
+    /// runs on `queue`, which is what makes the plain flag safe.
+    private var adoptionChecked = false
+    private func adoptEarlierFileOnce(into target: URL, supportDir: URL) {
+        if adoptionChecked { return }
+        adoptionChecked = true
+        let fm = FileManager.default
+        guard !fm.fileExists(atPath: target.path),
+              let subs = try? fm.contentsOfDirectory(
+                at: supportDir, includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles]) else { return }
+        let own = target.deletingLastPathComponent().standardizedFileURL
+        for d in subs.sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
+            where d.standardizedFileURL != own {
+            let cand = d.appendingPathComponent(target.lastPathComponent)
+            guard let data = try? Data(contentsOf: cand),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  (obj["schema"] as? NSNumber)?.intValue == Self.schema else { continue }
+            try? fm.copyItem(at: cand, to: target)
+            NSLog("[RNIS pano+] adopted an earlier calibration file")
+            return
+        }
     }
 
     private func loadAllLocked() -> [String: Any] {

@@ -284,6 +284,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `config.seedLeadTrim`. `sweep={{ engineOptions: { seedLeadTrim: false } }}`
   selects the control arm on both platforms.
 
+### Changed (native identifiers)
+- **The library's C++ namespace is `rnis`.** A host that calls the
+  library's C++ directly (a native plugin compiled against `cpp/`) must
+  rename its `using` declarations and qualifiers.
+- **os_log subsystems** are `io.imagestitcher.rn` and
+  `io.imagestitcher.rn.panoplus`. Update any Console.app or `log stream`
+  predicate that filtered on the old subsystem.
+- **Swift `Notification.Name` statics** are `.rnisIncrementalStateUpdate`,
+  `.rnisARFrameMeta` and `.rnisARPluginResult`. Their raw string values are
+  unchanged, so JS listeners are unaffected; a Swift host that names the old
+  statics must rename them.
+- **Debug file names.** The Android capture cache directories are
+  `rnis-capture-*`, the iOS debug log is `<Documents>/rnis-debug.log` and the
+  debug-pack schema is `rnis-debug-pack/v1`. A stale debug log or one capture
+  directory from an earlier version may remain on the device; delete it, or
+  let the OS evict the cache.
+- **The iOS sweep calibration** lives in
+  `Application Support/RNImageStitcher/`. A calibration an earlier build
+  wrote under another Application Support folder is copied in automatically
+  on first read, and the original is left in place.
+- **Licence attribution.** LICENSE, NOTICE and the podspec `authors` name the
+  maintainer as the copyright holder.
+- The sweep engine is unreleased, so its internal `RNIS*` / `rnis_*` names
+  need no migration.
+
 ### Removed (BREAKING)
 - **The sweep's own capture screen (M10).** There is one camera screen:
   `<Camera>`. Deleted, with their exports:
@@ -4242,15 +4267,13 @@ follow-up commit.
   stitcher`, not a downstream subtree of anything.  Source-file path
   comments and iOS GCD queue labels now use the canonical
   `io.imagestitcher.*` namespace and `react-native-image-stitcher/`
-  repo path instead of the leftover `com.rnis.*` /
-  `capture-sdk/` references that survived the 0.1.0 rename.
+  repo path instead of the leftover pre-0.1.0 private package names
+  and paths that survived the 0.1.0 rename.
   GCD label change affects: `RNSARSession.poseLogQueue`,
   `IncrementalStitcher.workQueue`, `IncrementalStitcher.refineQueue` —
   labels are diagnostic-only (Instruments / crash-report symbolication),
   no public-API or behaviour impact.  The CHANGELOG.md migration table
-  for [0.1.0] retains the historical `the pre-0.1.0 Java package` name
-  intentionally — it documents the rename that shipped, not the
-  current state.
+  for [0.1.0] documents the rename that shipped, not the current state.
 - **CHANGELOG.** Added compare-links for [0.1.1] and [0.1.2] and fixed
   the [Unreleased] compare base.  Annotated the [0.1.0] "Deliberately
   NOT exported" section with a header note explaining that most of
@@ -4441,20 +4464,20 @@ issue describing it.
 
 ### Migration from pre-publication ad-hoc usage
 
-If you imported from `the pre-0.1.0 package` or directly from a
+If you imported from the pre-0.1.0 private package or directly from a
 subtree-checkout of the monorepo, the migration to the published
 `react-native-image-stitcher` package is:
 
-| Old import (`the pre-0.1.0 package`) | New import (`react-native-image-stitcher`) |
+| Old import (pre-0.1.0 private package) | New import (`react-native-image-stitcher`) |
 |---|---|
 | `Camera`, `CameraError`, … | unchanged |
 | `useARSession`, `useIMUTranslationGate` | unchanged |
-| Any other deep export (e.g. `stitchFrames`, `measureRegion`) | retired or moved — see "Deliberately NOT exported" above; retail-specific features are now in `host-camera-sdk` (private) |
+| Any other deep export (e.g. `stitchFrames`, `measureRegion`) | retired or moved — see "Deliberately NOT exported" above; retail-specific features now live in the host's own private SDK |
 
-Native module names also changed:
-- `NativeModules.HostQualityChecker` → `NativeModules.RNImageStitcherQualityChecker`
-- Java package: `the pre-0.1.0 Java package` → `io.imagestitcher.rn`
-- iOS pod: `HostCaptureSDK` → `RNImageStitcher`
+Native names also changed, from the pre-0.1.0 private names to:
+- native module `NativeModules.RNImageStitcherQualityChecker`
+- Java package `io.imagestitcher.rn`
+- iOS pod `RNImageStitcher`
 - iOS xcframework: shipped as `opencv2.xcframework` (linked from `RNImageStitcher.podspec`)
 
 [Unreleased]: https://github.com/bhargavkanda/react-native-image-stitcher/compare/v0.7.1...HEAD

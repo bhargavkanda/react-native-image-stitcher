@@ -34,6 +34,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Full history: the commit-message name check below walks the
+          # PR's range, which a shallow clone does not have.
+          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -91,6 +95,13 @@ jobs:
         # `--silent` (also passed to jest) suppresses test-side
         # console.log noise.
         run: npm test -- --ci --silent
+
+      - name: No private names in the PR's commit messages
+        # publicationNames.test.ts (inside `npm test` above) scans every
+        # tracked and published file.  Commit messages are only reachable
+        # through git, so the same script scans the PR's range here.
+        if: github.event_name == 'pull_request'
+        run: node scripts/publication-names.js --messages "origin/${{ github.base_ref }}..HEAD"
 
       - name: Build dist/
         # Confirm the published-package contents would compile

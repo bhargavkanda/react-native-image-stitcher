@@ -41,8 +41,8 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// Error domain for the pano+ session.  A distinct symbol from
-/// HostStitchPluginsErrorDomain (two extern NSStrings sharing a name would be
+/// Error domain for the pano+ session.  A distinct symbol from any host
+/// plugin's error domain (two extern NSStrings sharing a name would be
 /// a duplicate symbol at app link).  Nothing JS-side reads the domain — the
 /// reject KEYS carry the contract.
 extern NSString *const RNISPanoPlusErrorDomain;

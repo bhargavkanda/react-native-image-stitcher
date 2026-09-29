@@ -12,8 +12,8 @@
  * `NativeModules.RNSSweepSession` after import behaves like a real registry
  * (the `stitchPluginsModule.ts` precedent).
  *
- * ⚠️ WHY THIS IS ITS OWN MODULE AND NOT MORE METHODS ON
- * `HostStitchPlugins`: pano+ is a capture SESSION with a lifecycle
+ * ⚠️ WHY THIS IS ITS OWN MODULE AND NOT MORE METHODS ON A HOST'S
+ * RENDER-PLUGIN MODULE: pano+ is a capture SESSION with a lifecycle
  * (start → many frames → stop), while that module's contract is "one call, one
  * render". A separate name also makes the availability probe a plain
  * `typeof NativeModules.RNSSweepSession?.start === 'function'` — no platform

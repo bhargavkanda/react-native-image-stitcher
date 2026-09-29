@@ -7,7 +7,7 @@
 // class whose promise methods are declared to RN by the sibling
 // PanoPlusBridge.m (RN's module map is populated by RCT_EXTERN_* macros, not
 // by @objc decorators alone).  A SEPARATE module from
-// `HostStitchPlugins` because pano+ is a capture SESSION with lifecycle,
+// a host's render-plugin module because pano+ is a capture SESSION with lifecycle,
 // not a stateless render call — mixing them would put a long-lived session
 // behind a module whose contract is "one call, one result".
 //

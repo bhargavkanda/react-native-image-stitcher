@@ -346,8 +346,8 @@ class IncrementalStitcher(
     ///     side of the boundary, so CONTROL_AE_MODE_OFF +
     ///     SENSOR_EXPOSURE_TIME is simply not reachable.  The HOST must
     ///     apply it through vision-camera's Camera2 interop
-    ///     (Camera2CameraControl — the same interop host-camera-sdk
-    ///     already uses for manual exposure), or the softer
+    ///     (Camera2CameraControl — the interop a host camera SDK
+    ///     would use for manual exposure), or the softer
     ///     CONTROL_AE_TARGET_FPS_RANGE floor.
     ///   • AR — ARCore owns the camera and exposes NO exposure API at
     ///     all.  Its only related lever is the frame rate, which

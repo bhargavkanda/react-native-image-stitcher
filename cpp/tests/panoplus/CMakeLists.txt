@@ -20,10 +20,8 @@
 #   elsewhere makes CMake refuse outright. Every sibling project here is built
 #   the same way, into its own directory.
 #
-# warp_guard.hpp comes from the stitcher package IN PLACE (the same linkage
-# the pod/AAR builds use); the default path assumes a sibling
-# app checkout's node_modules — override with
-# -DHOST_STITCHER_CPP_DIR=… when building elsewhere.
+# warp_guard.hpp comes from this package's own cpp/ IN PLACE (the same
+# linkage the pod/AAR builds use) — see RNIS_SHARED_CPP_DIR below.
 
 cmake_minimum_required(VERSION 3.20)
 project(rnis_panoplus_cpp_tests CXX)

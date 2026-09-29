@@ -1,0 +1,239 @@
+{
+  "_comment": "Hashed needles for publicationNames.test.ts. Add with scripts/denylist-entry.js (plaintext on stdin). Never add plaintext here.",
+  "entries": [
+    {
+      "id": "canary",
+      "len": 12,
+      "mode": "ci",
+      "fnv": 3879924427,
+      "sha256": "7f241163592ab66900e6a2aae2da2f26d9cca2b35287b7ac92cdd0a250f68c66"
+    },
+    {
+      "id": "n01",
+      "len": 9,
+      "mode": "ci",
+      "fnv": 1866179430,
+      "sha256": "0fd089c90a061526eebef1f2693e9503a270d7c8f32875492cdc1158a28e1fdb"
+    },
+    {
+      "id": "n02",
+      "len": 10,
+      "mode": "ci",
+      "fnv": 2297025555,
+      "sha256": "49f39aa510329c68bd9d331e8b8d107cbe2197c291fc1bfb5e456ecab146516e"
+    },
+    {
+      "id": "n03",
+      "len": 5,
+      "mode": "ci",
+      "fnv": 4067471544,
+      "sha256": "f15c16b99f82d8201767d3a841ff40849c8a1b812ffbfd2e393d2b6aa6682a6e"
+    },
+    {
+      "id": "n04",
+      "len": 5,
+      "mode": "ci",
+      "fnv": 2238229014,
+      "sha256": "5330e8f20aac22d5c299072da2a36dd4945ff1eaa409442215c1c15492ffb2bc"
+    },
+    {
+      "id": "n05",
+      "len": 5,
+      "mode": "ci",
+      "fnv": 1588780417,
+      "sha256": "8ffebecf5a9920b8767ead8e02d79763cdbb7b82f1d2e964ceaebfc68b26e0b0"
+    },
+    {
+      "id": "n06",
+      "len": 12,
+      "mode": "ci",
+      "fnv": 4001302388,
+      "sha256": "d1249da86b6a49afe1c40c38a7759a1e88dc1c19bfe78d0109661bd57f04c376"
+    },
+    {
+      "id": "n07",
+      "len": 12,
+      "mode": "ci",
+      "fnv": 2121997351,
+      "sha256": "3a87cb66ec8d4dc5165da54f9827cd440decc7f05ff7115fd2ef7f3f05095d95"
+    },
+    {
+      "id": "n08",
+      "len": 11,
+      "mode": "ci",
+      "fnv": 1095882145,
+      "sha256": "4df447352e7acc9dfc366e5b43a80d46b77948a9fdb0c70b3b66ba35a8e1d64b"
+    },
+    {
+      "id": "n09",
+      "len": 12,
+      "mode": "ci",
+      "fnv": 3610868102,
+      "sha256": "65de29309749fc74c7804f55b63ea737835f880ed441c30e86d5e586941a1314"
+    },
+    {
+      "id": "n10",
+      "len": 13,
+      "mode": "ci",
+      "fnv": 1331926186,
+      "sha256": "df9b588bf2c5c77d39e9a565714bcb8e7a92b117c17dc85c6d1b6735cfb4e0b7"
+    },
+    {
+      "id": "n11",
+      "len": 20,
+      "mode": "ci",
+      "fnv": 634318400,
+      "sha256": "6c98008fc26062da5fe88f28ca796bf5f23ea8445f5fc52721402d70e37f11fd"
+    },
+    {
+      "id": "n12",
+      "len": 25,
+      "mode": "ci",
+      "fnv": 4247952553,
+      "sha256": "4d512c55122551b207b324203f7ee733d0878134fbcd7ac703090d43a6e045fc"
+    },
+    {
+      "id": "n13",
+      "len": 10,
+      "mode": "ci",
+      "fnv": 1217236761,
+      "sha256": "b2e569412d8d074bd26fccf70b6418b72b46deac0a4c17aed5358bf37c828c6e"
+    },
+    {
+      "id": "n14",
+      "len": 4,
+      "mode": "acr",
+      "fnv": 3089894456,
+      "sha256": "900a56c3882affea75fd415e4b845d51fa35f53131e5470d6d12c85270283a76"
+    },
+    {
+      "id": "n15",
+      "len": 4,
+      "mode": "acr",
+      "fnv": 3194252859,
+      "sha256": "760581be172ba609e0fe4a0b033b55f2ed4232061b1a7b31a065d1788d023c7e"
+    },
+    {
+      "id": "n16",
+      "len": 4,
+      "mode": "acr",
+      "fnv": 3193120026,
+      "sha256": "f86c659aa4f6803560ebb8d72b9e787aae03e741c7d55e90cb62804f3a230064"
+    },
+    {
+      "id": "n17",
+      "len": 4,
+      "mode": "ci",
+      "fnv": 73382223,
+      "sha256": "2efa5cb612bc32641f9f8b5189fd71ff0081201785cee26966f83aef120cf2f5",
+      "notBefore": "[A-Za-z0-9]",
+      "notAfter": "[A-Za-z0-9]"
+    },
+    {
+      "id": "n18",
+      "len": 4,
+      "mode": "ci",
+      "fnv": 1948751962,
+      "sha256": "6c9cbbdcea366ee856bd074a65e43961a6d31db1e2f27f3fa19d13094fd445a2",
+      "notBefore": "[A-Za-z0-9]",
+      "notAfter": "[A-Za-z0-9]"
+    },
+    {
+      "id": "n19",
+      "len": 4,
+      "mode": "ci",
+      "fnv": 513293006,
+      "sha256": "f48096d67eb0384e85d3f9c550d23ec610eafc821836a5514cce6e1c2272c283",
+      "notBefore": "[A-Za-z0-9]",
+      "notAfter": "[A-Za-z0-9]"
+    },
+    {
+      "id": "n20",
+      "len": 4,
+      "mode": "cs",
+      "fnv": 3007580479,
+      "sha256": "0f1c2ff51881fca64a198d6c36f9845622dfade533a788b72e6803dd00a46a3f",
+      "notBefore": "[A-Za-z]",
+      "after": "[A-Z_-]"
+    },
+    {
+      "id": "n21",
+      "len": 4,
+      "mode": "cs",
+      "fnv": 3007580479,
+      "sha256": "14d55b8e7b96833c5b3649cd2cf68104a258034f71a3c888b8e5be395204b4f1",
+      "notBefore": "[A-Za-z]",
+      "after": "[-._]"
+    },
+    {
+      "id": "n22",
+      "len": 3,
+      "mode": "cs",
+      "fnv": 1241455715,
+      "sha256": "76e11af94d353c6edf577441a23d0f5ebe7b3beb5fc36afd05987c3c14b46830",
+      "notBefore": "[A-Za-z0-9_]",
+      "notAfter": "[A-Za-z0-9_]"
+    },
+    {
+      "id": "n23",
+      "len": 8,
+      "mode": "ci",
+      "fnv": 2146280318,
+      "sha256": "d096b19b32a0ccd67771971b6c056d0ea67abc4cb41e8bea7282e5064c82816b",
+      "notBefore": "[A-Za-z]",
+      "notAfter": "[A-Za-z]"
+    },
+    {
+      "id": "n24",
+      "len": 9,
+      "mode": "ci",
+      "fnv": 1741838469,
+      "sha256": "e8c1bf1ce7fbdf33152ea5d178f7dc4aab72be814267cc064bf8df6b16e7125f",
+      "notBefore": "[A-Za-z]",
+      "notAfter": "[A-Za-z]"
+    },
+    {
+      "id": "n25",
+      "len": 8,
+      "mode": "cs",
+      "fnv": 1290126018,
+      "sha256": "32c74e463d95d9a2eee5ea0fca40d40cf3521840bd764fa089e34c00ddbc944f"
+    },
+    {
+      "id": "n26",
+      "len": 5,
+      "mode": "ci",
+      "fnv": 1436378450,
+      "sha256": "c40dc72b0228e5850d8b173ff861a48acfb4a15b37b2849cbb6584bbadbc7907",
+      "notBefore": "[A-Za-z]",
+      "notAfter": "[A-Za-z]"
+    }
+  ],
+  "allow": [
+    {
+      "path": "LICENSE",
+      "lineSha256": "9700d9cdf640a303acf6878cf407899f82819d7eba941ac6ae5ec33625ce9b36",
+      "why": "copyright holder: the owner's own name"
+    },
+    {
+      "path": "NOTICE",
+      "lineSha256": "9700d9cdf640a303acf6878cf407899f82819d7eba941ac6ae5ec33625ce9b36",
+      "why": "copyright holder: the owner's own name"
+    },
+    {
+      "path": "RNImageStitcher.podspec",
+      "lineSha256": "9429d8c6dc35afb5bce2e6006d64c1291e8347848a5e1214412ac40f7c4c0ef9",
+      "why": "copyright holder: the owner's own name"
+    },
+    {
+      "path": "android/build.gradle",
+      "lineSha256": "9aaa41d36cb04b99fe70f4b8fb9a85f9ed5742f6ed58421ad56b5b8cc6b7081d",
+      "why": "copyright holder: the owner's own name"
+    },
+    {
+      "path": "website/docusaurus.config.js",
+      "lineSha256": "4d46372a337cb2dab42ea927ffaff24e80c549d34b1f31e1710344927467e6a8",
+      "why": "owner's own name in the docs-site copyright footer"
+    }
+  ]
+}

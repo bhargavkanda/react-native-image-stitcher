@@ -9,8 +9,8 @@
 // module map is populated by RCT_EXTERN_* macros, not by Swift @objc
 // decorators alone.
 //
-// DELIBERATELY a second module rather than more methods on
-// `HostStitchPlugins`: pano+ is a capture SESSION with a lifecycle
+// DELIBERATELY a second module rather than more methods on a host's
+// render-plugin module: pano+ is a capture SESSION with a lifecycle
 // (start → many frames → stop), while that module's contract is "one call,
 // one render".  Separate names also mean a host can probe for pano+ support
 // with a plain `typeof NativeModules.RNSSweepSession?.start === 'function'`.

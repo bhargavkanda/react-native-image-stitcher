@@ -4,7 +4,7 @@
 // step (module name `RNSSweepCalibration`).
 //
 // A SEPARATE MODULE from `RNSSweepSession`, for the same reason pano+ is
-// separate from `HostStitchPlugins`: this is a different lifecycle.  A
+// separate from a render-plugin module: this is a different lifecycle.  A
 // sweep is start → many frames → stop → a pack.  A calibration is a gesture, a
 // reduction, a verdict, and a decision about whether to KEEP the number — and
 // the keeping is the part that matters, because a persisted wrong number is

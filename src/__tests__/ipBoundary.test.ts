@@ -9,6 +9,11 @@
  * lint, no export review, no publish-time diff.  A leak that gets past this
  * file gets past everything and is then in a public git history permanently.
  *
+ * Private product, customer and person NAMES are not spelled here: they live,
+ * hashed, in scripts/publication-names.js and its denylist, which scans every
+ * tracked and published file (see publicationNames.test.ts).  This file keeps
+ * the private SYMBOLS, the licence rules and the self-import trap.
+ *
  * ── WHY IT LIVES HERE, AND NOT IN scripts/ ───────────────────────────────
  * `jest.config.js` matches `<rootDir>/src/** /__tests__/** /*.test.(ts|tsx)`.
  * A guard placed anywhere else is never executed by `npm test`, and `npm test`
@@ -201,18 +206,16 @@ describe('IP boundary: nothing from the private overlay is in this package', () 
   });
 
   /**
-   * Tier 1 — bare tokens.
+   * Tier 1 — private symbols.
    *
    * Each of these was measured non-zero on the private half and zero across
    * the entire pano+ set that moves here, so a bare substring match carries no
-   * false positives.  Do NOT add a token that also occurs in pano+ source; use
-   * a narrowed declaration site (tier 2) for those.
+   * false positives.  Do NOT add a token that also occurs in pano+ source.  A
+   * NAME (product, customer, person) goes in the hashed denylist instead.
    */
   describe.each([
-    ['host::plane', 'the private plane-solve namespace'],
     ['paintPlaneMosaic', 'the private mosaic painter entry point'],
     ['seamCompositor', 'the private seam compositor'],
-    ['.depthsidecar', 'the private depth-sidecar file format'],
     ['solvePlane', 'the private plane solver'],
   ])('private token %s', (token, what) => {
     it(`does not appear (${what})`, () => {
@@ -224,49 +227,7 @@ describe('IP boundary: nothing from the private overlay is in this package', () 
   });
 
   /**
-   * Tier 2 — narrowed declaration sites.
-   *
-   * The bare class names `HostStitchPlugins` and `HostPlaneSolve`
-   * are referenced from pano+ comments and would be red here for the wrong
-   * reason.  What must never appear is the DECLARATION — the place a private
-   * React Native module is registered.
-   */
-  describe.each([
-    ['getName(): String = "HostStitchPlugins"', 'Android registration of the private module'],
-    ['@objc(HostStitchPlugins)', 'iOS registration of the private module'],
-    ['getName(): String = "HostPlaneSolve"', 'Android registration of the private plane solver'],
-    ['@objc(HostPlaneSolve)', 'iOS registration of the private plane solver'],
-  ])('private module declaration %s', (decl, what) => {
-    it(`is not declared here (${what})`, () => {
-      const found = hits(decl);
-      expect(report(`private module declared in the public package:`, found)).toBe(
-        `private module declared in the public package:\n  `,
-      );
-    });
-  });
-
-  /**
-   * Tier 3 — sibling first-party plugins in the host's private camera SDK.
-   *
-   * These are not this package's concern at all; a mention here means a
-   * comment came across un-redacted and names software the public reader has
-   * no way to see.
-   */
-  describe.each([
-    ['HostArDoc', 'a private document-scanning AR plugin'],
-    ['HostScenePlugin', 'a private scene-model AR plugin'],
-    ['hostSceneLiveness', 'a private AR plugin registry key'],
-  ])('private sibling %s', (token, what) => {
-    it(`is not named (${what})`, () => {
-      const found = hits(token);
-      expect(report(`"${token}" leaked into the public package:`, found)).toBe(
-        `"${token}" leaked into the public package:\n  `,
-      );
-    });
-  });
-
-  /**
-   * Tier 4 — the licence triple.
+   * Tier 2 — the licence triple.
    *
    * This is the ONLY licence check in the repository.  There is no CI header
    * lint.  A file that arrives from the private overlay still headed
@@ -315,7 +276,7 @@ describe('IP boundary: nothing from the private overlay is in this package', () 
   });
 
   /**
-   * Tier 5 — the self-import trap.
+   * Tier 3 — the self-import trap.
    *
    * pano+ was written as a SEPARATE pod that imported this one, so its Swift
    * is full of `#if canImport(RNImageStitcher)` and `import RNImageStitcher`.
