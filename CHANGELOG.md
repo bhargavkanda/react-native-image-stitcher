@@ -345,6 +345,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sweep engine has not been released, so no published version is affected.
 
 ### Fixed
+- **Android 4:3 camera streams ran at 640x480.** vision-camera builds an
+  Android device's formats from CameraX's hard-coded quality ladder, whose
+  only 4:3 video size is 640x480, so the tap photo's preview, the keyframe
+  panorama and the sweep were all fed VGA whatever the hardware offered.
+  `CameraView` now completes the list from the camera's own YUV sizes (read
+  from `CameraCharacteristics` by the stitcher's probe, which opens no
+  camera), capped at a 1440 long edge; a Galaxy A35 now streams 1440x1080.
+  The first mount of each camera in a process waits for that read and shows
+  "Initialising camera…", so the session never reconfigures mid-capture.
+- **The Android non-AR preview sat at the top of the screen the first time
+  each camera was shown** — a regression from the hardware-list wait above,
+  in this unreleased cycle; no published version is affected. The wait meant
+  the first mount of each camera was created directly at its centred
+  letterbox frame, and vision-camera lays its own native view out at (0,0)
+  when it adds its preview, discarding that offset; nothing moved it back
+  until a lens switch remounted it. Measured on a Galaxy A35, where 0.5× and
+  1× are separate cameras: [0,0][1080,1440] instead of [0,450][1080,1890].
+  The letterbox box is now a React Native wrapper view (a stacking context)
+  around vision-camera's camera, which only fills it; with the fix every
+  non-AR mount on the A35 measured [0,450][1080,1890]. The wrapper is on both
+  platforms, and `cameraProps.style` / `cameraProps.onLayout` now apply to
+  vision-camera's view inside it, which carries neither the size nor the
+  centring offset.
 - **A false "NO LIVE CAMERA FEED" on every Android sweep.** The Android live
   status always carries the state of pano+'s own preview view, which
   `<Camera>` never mounts (its vision-camera preview is the viewfinder), so

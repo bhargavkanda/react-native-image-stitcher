@@ -172,7 +172,12 @@ export interface CameraViewProps {
   guidance?: string;
   /** Extra style layer applied on top of the default full-screen layout. */
   style?: ViewStyle;
-  /** Pass-through to vision-camera for anything custom. */
+  /**
+   * Pass-through to vision-camera for anything custom.  Applied to
+   * vision-camera's own view, which fills the letterbox wrapper: the
+   * wrapper carries the size and the centring offset, so `style` and
+   * `onLayout` here are relative to the box, not to this component.
+   */
   cameraProps?: Partial<CameraProps>;
   /**
    * EVERY vision-camera error, including the transient lifecycle codes
@@ -432,8 +437,9 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
     [format, fpsCeiling],
   );
 
-  // Measured size of our container, so we can size the <Camera> view to
-  // the largest box of the capture's aspect ratio that fits inside it
+  // Measured size of our container, so we can size the preview box (an RN
+  // wrapper around vision-camera's <Camera>, see the render) to the
+  // largest box of the capture's aspect ratio that fits inside it
   // (the rest becomes the black letterbox).  We deliberately size the
   // VIEW rather than relying on vision-camera's `resizeMode` alone:
   // resizeMode maps to PreviewView.ScaleType on Android, which several
@@ -487,7 +493,9 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
   // Largest box of `contentAspect` that fits the container, centred by
   // styles.root.  The remaining area is the black letterbox.  Before the
   // first onLayout we fill the container so the camera session mounts
-  // immediately; the exact box snaps in ~1 frame later.
+  // immediately; the exact box snaps in ~1 frame later.  The box is
+  // applied to the RN wrapper around vision-camera's <Camera>, never to
+  // the <Camera> itself — see the wrapper in the render below.
   let cameraStyle: ViewStyle;
   if (size == null || size.w === 0 || size.h === 0) {
     cameraStyle = StyleSheet.absoluteFillObject;
@@ -523,66 +531,91 @@ export const CameraView = forwardRef<Camera | null, CameraViewProps>(function Ca
 
   return (
     <View style={[styles.root, style]} onLayout={onRootLayout}>
-      <Camera
-        ref={innerRef}
-        // Sized to the letterboxed box (capture aspect ratio) so the
-        // preview never crops; styles.root centres it and paints the
-        // surrounding bars black.  See the cameraStyle computation above.
-        style={cameraStyle}
-        device={device}
-        isActive={isActive}
-        photo
-        video={video}
-        // Pin preview + photo to the same 4:3 format (WYSIWYG capture).
-        format={held.format}
-        // Run the session at the format's fps (≤60) for a smooth pan preview.
-        {...(held.fps != null ? { fps: held.fps } : {})}
-        // v0.13.2 — multi-cam lens switch via zoom (undefined = default).
-        {...(held.zoom != null ? { zoom: held.zoom } : {})}
-        // Orient the captured pixels.  Default `"device"` follows the
-        // accelerometer — but when the phone is held FLAT over a document
-        // (scanning), the device orientation is ambiguous, so the first shot
-        // after launch can come out sideways.  For high-res document capture
-        // we use `"preview"`, which matches the on-screen PREVIEW/UI
-        // orientation (stable, what the user actually sees) instead of the
-        // accelerometer — "what you see is what was taken", deterministically.
-        outputOrientation={held.outputOrientation}
-        // Show the full camera FOV — no cropping.  'contain' maps to
-        // AVLayerVideoGravity.resizeAspect on iOS and the equivalent
-        // on Android, letterboxing the preview to the sensor's exact
-        // aspect ratio.  Without this the default 'cover' crops
-        // ~19% off each horizontal edge in portrait mode (4:3 sensor
-        // in a 9:21 viewport), so the stitcher receives frames the
-        // user never saw.  Black bars fill the remainder; backgroundColor
-        // on styles.root ensures they are always black.
-        resizeMode="contain"
-        // Android: force TextureView rendering so that FIT_CENTER
-        // (the Android equivalent of resizeMode="contain") actually
-        // produces visible letterboxing.  The default SurfaceView mode
-        // composes at the hardware layer below the View hierarchy and
-        // on many devices ignores FIT_CENTER, filling the full surface
-        // instead.  TextureView is part of the regular View hierarchy
-        // so the matrix transform for FIT_CENTER works correctly —
-        // the bars outside the letterboxed area are transparent,
-        // revealing the parent's black backgroundColor.
-        androidPreviewViewType="texture-view"
-        // High-res document capture: prioritise image QUALITY (multi-frame
-        // fusion / less noise) over shutter speed.  Only when highResCapture
-        // is set — quality mode adds latency that would hurt rapid panorama
-        // keyframe grabs.
-        {...(highResCapture ? { photoQualityBalance: 'quality' as const } : {})}
-        // iOS depth sidecar (captureDepthData): AVFoundation embeds the
-        // AVDepthData in the written JPEG; `useCapture` extracts it to a
-        // `<photo>.depth.bin` BEFORE the normaliseOrientation re-encode
-        // strips it.  vision-camera itself re-asserts this on every session
-        // reconfigure, so it survives prop-driven output rebuilds.
-        {...(captureDepthData && Platform.OS === 'ios'
-          ? { enableDepthData: true }
-          : {})}
-        torch={held.torch}
-        onError={handleVcError}
-        {...cameraProps}
-      />
+      {/*
+        The letterboxed box (capture aspect ratio) so the preview never
+        crops; styles.root centres it and paints the surrounding bars
+        black.  See the cameraStyle computation above.
+
+        ⚠ THE BOX IS AN RN-OWNED WRAPPER, NOT vision-camera's OWN FRAME.
+        vision-camera 4.x on Android installs a hierarchy fitter on its
+        native CameraView (ViewGroup+installHierarchyFitter.kt): when the
+        PreviewView is added — posted to the main looper after the view is
+        created — it calls `layout(0, 0, w, h)` on the camera view ITSELF,
+        throwing away the offset React Native gave it.  Fabric re-sends a
+        frame only when the layout changes, so a camera CREATED at its
+        final centred frame stayed pinned to the top.  That is every first
+        mount per camera id in a process: the hardware-probe hold above
+        makes `size` known before the camera exists.  Measured on the A35:
+        [0,0][1080,1440] instead of [0,450][1080,1890], until a lens switch
+        remounted it.  Inside this wrapper the fitter's (0,0) IS the
+        wrapper's origin — correct in every mount order, no timing.
+        `collapsable={false}` is load-bearing: it makes the wrapper a
+        STACKING CONTEXT.  Without one (the testID alone still gives a
+        native view), Fabric flattens the wrapper's children up into the
+        root and folds the wrapper's offset into the camera's own frame
+        (sliceChildShadowNodeViewPairs), where the fitter zeroes it again.
+      */}
+      <View collapsable={false} style={cameraStyle} testID="camera-preview-box">
+        <Camera
+          ref={innerRef}
+          // Fills the wrapper above; the wrapper carries the size and the
+          // centring offset.
+          style={StyleSheet.absoluteFill}
+          device={device}
+          isActive={isActive}
+          photo
+          video={video}
+          // Pin preview + photo to the same 4:3 format (WYSIWYG capture).
+          format={held.format}
+          // Run the session at the format's fps (≤60) for a smooth pan preview.
+          {...(held.fps != null ? { fps: held.fps } : {})}
+          // v0.13.2 — multi-cam lens switch via zoom (undefined = default).
+          {...(held.zoom != null ? { zoom: held.zoom } : {})}
+          // Orient the captured pixels.  Default `"device"` follows the
+          // accelerometer — but when the phone is held FLAT over a document
+          // (scanning), the device orientation is ambiguous, so the first shot
+          // after launch can come out sideways.  For high-res document capture
+          // we use `"preview"`, which matches the on-screen PREVIEW/UI
+          // orientation (stable, what the user actually sees) instead of the
+          // accelerometer — "what you see is what was taken", deterministically.
+          outputOrientation={held.outputOrientation}
+          // Show the full camera FOV — no cropping.  'contain' maps to
+          // AVLayerVideoGravity.resizeAspect on iOS and the equivalent
+          // on Android, letterboxing the preview to the sensor's exact
+          // aspect ratio.  Without this the default 'cover' crops
+          // ~19% off each horizontal edge in portrait mode (4:3 sensor
+          // in a 9:21 viewport), so the stitcher receives frames the
+          // user never saw.  Black bars fill the remainder; backgroundColor
+          // on styles.root ensures they are always black.
+          resizeMode="contain"
+          // Android: force TextureView rendering so that FIT_CENTER
+          // (the Android equivalent of resizeMode="contain") actually
+          // produces visible letterboxing.  The default SurfaceView mode
+          // composes at the hardware layer below the View hierarchy and
+          // on many devices ignores FIT_CENTER, filling the full surface
+          // instead.  TextureView is part of the regular View hierarchy
+          // so the matrix transform for FIT_CENTER works correctly —
+          // the bars outside the letterboxed area are transparent,
+          // revealing the parent's black backgroundColor.
+          androidPreviewViewType="texture-view"
+          // High-res document capture: prioritise image QUALITY (multi-frame
+          // fusion / less noise) over shutter speed.  Only when highResCapture
+          // is set — quality mode adds latency that would hurt rapid panorama
+          // keyframe grabs.
+          {...(highResCapture ? { photoQualityBalance: 'quality' as const } : {})}
+          // iOS depth sidecar (captureDepthData): AVFoundation embeds the
+          // AVDepthData in the written JPEG; `useCapture` extracts it to a
+          // `<photo>.depth.bin` BEFORE the normaliseOrientation re-encode
+          // strips it.  vision-camera itself re-asserts this on every session
+          // reconfigure, so it survives prop-driven output rebuilds.
+          {...(captureDepthData && Platform.OS === 'ios'
+            ? { enableDepthData: true }
+            : {})}
+          torch={held.torch}
+          onError={handleVcError}
+          {...cameraProps}
+        />
+      </View>
       {guidance ? (
         <View style={styles.guidance} pointerEvents="none" accessible accessibilityRole="text">
           <Text style={styles.guidanceText} numberOfLines={2}>
@@ -599,9 +632,9 @@ const styles = StyleSheet.create({
   root: {
     flex: 1,
     overflow: 'hidden',
-    // Centre the letterboxed <Camera> box so the black bars are
-    // symmetric on both sides (top/bottom in portrait, left/right in
-    // landscape).
+    // Centre the letterbox box (the wrapper around <Camera>) so the black
+    // bars are symmetric on both sides (top/bottom in portrait, left/right
+    // in landscape).
     alignItems: 'center',
     justifyContent: 'center',
     // Black bars when the camera's aspect ratio doesn't fill the

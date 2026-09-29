@@ -10,7 +10,7 @@
  * 1440x1080 session with every sweep-tree case green.
  */
 import React from 'react';
-import { NativeModules, Platform } from 'react-native';
+import { NativeModules, Platform, StyleSheet } from 'react-native';
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { Camera as VisionCamera } from 'react-native-vision-camera';
 
@@ -36,6 +36,11 @@ const HW_REPORT = { cameras: { cameras: [{ id: '0', streamConfig: { yuv420Sizes:
 ] } }] } };
 
 const inner = (t: ReactTestRenderer) => t.root.findAllByType(VisionCamera);
+const previewBox = (t: ReactTestRenderer) => {
+  const el = t.root.findAll((n) => n.props.testID === 'camera-preview-box' && typeof n.type !== 'function');
+  if (el.length !== 1) throw new Error(`expected one camera-preview-box host View, found ${el.length}`);
+  return el[0];
+};
 const innerFormat = (t: ReactTestRenderer) => {
   const el = inner(t);
   if (el.length !== 1) throw new Error(`expected one vision-camera <Camera>, found ${el.length}`);
@@ -96,10 +101,55 @@ describe('<CameraView> mounted before its device arrives (the keyframe tree, the
     expect(typeof root.props.onLayout).toBe('function'); // the root is the measured one, even now
     act(() => { root.props.onLayout!({ nativeEvent: { layout: { width: 1080, height: 2254 } } }); });
     await act(async () => { resolveProbe(HW_REPORT); await Promise.resolve(); await Promise.resolve(); });
-    // portrait container, 4:3 sensor → the largest 3:4 box: 1080 x 1440, not the full 2254
-    const style = inner(tree)[0].props.style as { width?: number; height?: number };
+    // portrait container, 4:3 sensor → the largest 3:4 box: 1080 x 1440, not the full 2254.
+    // The box is on the RN wrapper, not on vision-camera's own frame — see the next case.
+    const style = previewBox(tree).props.style as { width?: number; height?: number };
     expect(style.width).toBe(1080);
     expect(style.height).toBe(1440);
+    act(() => { tree.unmount(); });
+  });
+
+  it('FAILS BEFORE: the letterbox box is an unflattenable RN wrapper; vision-camera only fills it', async () => {
+    // On Android vision-camera lays its OWN native view out at (0,0) when its
+    // PreviewView is added (installHierarchyFitter), discarding the offset
+    // Fabric gave it; Fabric does not re-send an unchanged frame.  With the
+    // box on the <Camera> itself, every first mount per camera id (the one
+    // held for the probe, so created at its final centred frame) stayed
+    // pinned to the top of the screen — A35: [0,0][1080,1440] instead of
+    // [0,450][1080,1890].  react-test-renderer cannot see native positions,
+    // so this pins the CONTRACT that makes the position immune to the
+    // fitter; the device gate proves the pixels.  Both mount paths:
+    const check = (t: ReactTestRenderer, box: { width?: number; height?: number } | 'fill') => {
+      const wrapper = previewBox(t);
+      expect(wrapper.props.collapsable).toBe(false); // a flattened wrapper folds its offset back into the camera
+      if (box === 'fill') expect(wrapper.props.style).toEqual(StyleSheet.absoluteFillObject);
+      else expect(wrapper.props.style).toEqual(box);
+      // vision-camera's element: fills the wrapper, carries no size and no offset of its own
+      expect(StyleSheet.flatten(inner(t)[0].props.style)).toEqual(StyleSheet.flatten(StyleSheet.absoluteFill));
+      expect(inner(t)[0].parent).toBe(wrapper);
+    };
+
+    // (1) HELD for the probe: `size` is known before the camera exists.
+    let resolveProbe!: (r: unknown) => void;
+    (NativeModules as Record<string, unknown>).RNSSweepProbe = {
+      probeCapabilities: () => new Promise((res) => { resolveProbe = res; }),
+    };
+    let tree!: ReactTestRenderer;
+    act(() => { tree = create(<CameraView device={DEVICE as never} keyframeQualityCapture />); });
+    expect(inner(tree)).toHaveLength(0); // held: no camera exists until the probe answers
+    const root = tree.root.children[0] as { props: { onLayout?: (e: unknown) => void } };
+    act(() => { root.props.onLayout!({ nativeEvent: { layout: { width: 1080, height: 2340 } } }); });
+    await act(async () => { resolveProbe(HW_REPORT); await Promise.resolve(); await Promise.resolve(); });
+    check(tree, { width: 1080, height: 1440 });
+    act(() => { tree.unmount(); });
+
+    // (2) CACHE HIT (the probe answered for this id already): the camera is
+    // created while `size` is still null, then the box arrives on onLayout.
+    act(() => { tree = create(<CameraView device={DEVICE as never} keyframeQualityCapture />); });
+    check(tree, 'fill');
+    const root2 = tree.root.children[0] as { props: { onLayout?: (e: unknown) => void } };
+    act(() => { root2.props.onLayout!({ nativeEvent: { layout: { width: 1080, height: 2340 } } }); });
+    check(tree, { width: 1080, height: 1440 });
     act(() => { tree.unmount(); });
   });
 
