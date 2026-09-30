@@ -556,6 +556,36 @@ describe('an UNCALIBRATED IMU selection is self-explaining, never opaque', () =>
     expect(startedWith?.poseSource).toBe('ar');
     r.unmount();
   });
+
+  it('the pack\'s two sidecars name the fallen-back arm with ONE vocabulary', async () => {
+    // `host_notice.json` and `host_sweep_timeline.json` sit in the same pack
+    // and are read side by side, so a key they share must mean one thing:
+    // `poseSourceRequested` the arm SELECTED, `poseSourceEffective` the arm
+    // sent. This is the one case the two differ.
+    (NM.RNSSweepSession as Record<string, unknown>).stop = () =>
+      Promise.resolve({ sessionDir: '/d/pp_1' });
+    const r = mount({ poseSource: 'imu' });
+    await settle();
+    r.hold();
+    await settle();
+    r.release();
+    for (let i = 0; i < 3; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await settle();
+    }
+    const read = (name: string): Record<string, unknown> => {
+      const file = written.find((w) => w.uri.endsWith(`/${name}`));
+      expect(file).toBeDefined();
+      return JSON.parse(file!.body) as Record<string, unknown>;
+    };
+    const notice = read('host_notice.json');
+    const context = read('host_sweep_timeline.json').context as Record<string, unknown>;
+    expect(notice.poseSourceRequested).toBe('imu');
+    expect(notice.poseSourceEffective).toBe('ar');
+    expect(context.poseSourceRequested).toBe(notice.poseSourceRequested);
+    expect(context.poseSourceEffective).toBe(notice.poseSourceEffective);
+    r.unmount();
+  });
 });
 
 describe('a CALIBRATED IMU selection actually reaches the decoupled arm', () => {

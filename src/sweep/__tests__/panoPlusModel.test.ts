@@ -2739,6 +2739,21 @@ describe('the preview publish, as JS sees it', () => {
     expect(read(true)).toBe(true);
   });
 
+  it('cameraReleasedAtMs is a time ONLY when native stamped one — 0 and absent are null', () => {
+    // Native answers 0 before any release and an older binary answers nothing;
+    // both are "not reported". Reading either as a time would put the release
+    // at the epoch in the sweep's timeline.
+    const read = (v: unknown) => readPanoPlusStatus({
+      plugins: { [PANO_PLUS_PLUGIN_KEY]: v === undefined ? { running: false } : { running: false, cameraReleasedAtMs: v } },
+    })!.cameraReleasedAtMs;
+    expect(read(undefined)).toBeNull();
+    expect(read(0)).toBeNull();
+    expect(read(-1)).toBeNull();
+    expect(read('1790791719961')).toBeNull();
+    expect(read(Number.NaN)).toBeNull();
+    expect(read(1790791719961)).toBe(1790791719961);
+  });
+
   it('makes the finished sweep say the preview never published', () => {
     const s = coercePanoPlusSummary({
       sessionDir: '/d/pp_1',

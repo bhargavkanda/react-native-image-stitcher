@@ -23,6 +23,7 @@
 import { NativeModules } from 'react-native';
 
 import { coercePanoPlusStatus, coercePanoPlusSummary } from './panoPlusModel';
+import { memoryReaderOf } from './sweepMemoryReader';
 import type {
   PanoPlusStartOptions,
   PanoPlusStarted,
@@ -411,6 +412,53 @@ export function getPanoPlusStatus(): Promise<PanoPlusStatus | null> {
   if (mod == null) return Promise.resolve(null);
   return mod.getStatus().then(
     (raw) => coercePanoPlusStatus(raw),
+    () => null,
+  );
+}
+
+// ── PROCESS MEMORY, FOR THE SWEEP'S TIMELINE ────────────────────────────────
+
+/**
+ * What {@link readSweepMemoryMB} measures on a platform — `phys_footprint`
+ * (iOS, `task_info(TASK_VM_INFO)`: the number jetsam judges) or `rss-statm`
+ * (Android, resident pages from `/proc/self/statm`). Recorded beside every
+ * sample, because the two are different quantities.
+ */
+export type SweepMemoryMetric = 'phys_footprint' | 'rss-statm';
+
+/** Which quantity {@link readSweepMemoryMB} returns on `platformOS`; null on a
+ *  platform with no reader. */
+export function sweepMemoryMetric(platformOS: string): SweepMemoryMetric | null {
+  if (platformOS === 'ios') return 'phys_footprint';
+  if (platformOS === 'android') return 'rss-statm';
+  return null;
+}
+
+/**
+ * The process's memory, in MB, from this package's own public native read —
+ * the same one the capture memory pill polls (`IncrementalStitcherBridge.swift`
+ * on iOS, `IncrementalStitcher.kt` on Android; see {@link sweepMemoryMetric}).
+ *
+ * NEVER REJECTS, AND NEVER INVENTS A NUMBER. A build without the method, a
+ * bridge rejection, native's `-1` failure answer, or anything that is not a
+ * finite non-negative number resolves null — a failed read, which a recorder
+ * counts as such and never as a sample of 0.
+ *
+ * The method is probed on its own (`sweepMemoryReader.ts`), not through the
+ * keyframe engine's resolver, which answers null unless every one of its
+ * methods is linked.
+ */
+export function readSweepMemoryMB(): Promise<number | null> {
+  const m = memoryReaderOf();
+  if (m == null) return Promise.resolve(null);
+  let pending: Promise<unknown>;
+  try {
+    pending = Promise.resolve(m.getMemoryFootprintMB());
+  } catch {
+    return Promise.resolve(null);
+  }
+  return pending.then(
+    (v) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null),
     () => null,
   );
 }

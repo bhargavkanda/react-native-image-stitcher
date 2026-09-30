@@ -1280,6 +1280,16 @@ export interface PanoPlusStatus {
    * False from every start, and on a binary that predates it.
    */
   cameraReleased: boolean;
+  /**
+   * WHEN native passed that release point — wall-clock epoch ms, the same
+   * clock as JS `Date.now()`. A poll only sees `cameraReleased` if it lands
+   * between the release and the settle, and a short finish often leaves no
+   * such window; the stamp survives it, and is read after the settle.
+   *
+   * `null` (or absent) is "not reported": no release yet, or a binary that
+   * does not stamp it. Native's `0` is coerced to null — never a time.
+   */
+  cameraReleasedAtMs?: number | null;
   droppedQueue: number;
   droppedPack: number;
   engineMs: number;

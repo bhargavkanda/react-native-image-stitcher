@@ -28,11 +28,15 @@ import {
   cancelPanoPlus,
   getPanoPlusStatus,
   panoPlusIsAvailable,
+  readSweepMemoryMB,
   setPanoPlusIdlePreview,
   startPanoPlus,
   stopPanoPlus,
+  sweepMemoryMetric,
 } from '../panoPlusNative';
+import * as panoPlusNative from '../panoPlusNative';
 import { panoPlusErrorInfo } from '../panoPlusModel';
+import { sweepMemoryReader } from '../sweepMemoryReader';
 import type { PanoPlusFailure } from '../panoPlusTypes';
 
 const NM = NativeModules as Record<string, unknown>;
@@ -99,6 +103,67 @@ describe('degraded build', () => {
 
   it('getStatus resolves null rather than rejecting', async () => {
     await expect(getPanoPlusStatus()).resolves.toBeNull();
+  });
+});
+
+// ── THE SWEEP TIMELINE'S MEMORY READ ────────────────────────────────────────
+//
+// A failed read must never become a NUMBER: a sweep whose reads all failed has
+// no peak, not a peak of 0, and a `-1` from native is its failure answer, not
+// a footprint. And the probe is ONE method — a module missing some unrelated
+// keyframe method still has a memory reader.
+describe('readSweepMemoryMB — never rejects, never invents a number', () => {
+  afterEach(() => {
+    delete NM.IncrementalStitcher;
+  });
+
+  it('is null with no IncrementalStitcher module, and names no reader', async () => {
+    await expect(readSweepMemoryMB()).resolves.toBeNull();
+    expect(sweepMemoryReader()).toBeNull();
+  });
+
+  it('is null when the module carries no memory method', async () => {
+    NM.IncrementalStitcher = { start: () => Promise.resolve({}) };
+    await expect(readSweepMemoryMB()).resolves.toBeNull();
+    expect(sweepMemoryReader()).toBeNull();
+  });
+
+  it('is null on a rejection, on native\'s -1, and on anything not a finite number', async () => {
+    for (const answer of [
+      () => Promise.reject(new Error('bridge fell over')),
+      () => Promise.resolve(-1),
+      () => Promise.resolve(Number.NaN),
+      () => Promise.resolve(Number.POSITIVE_INFINITY),
+      () => Promise.resolve('812.4'),
+      () => { throw new Error('threw synchronously'); },
+    ]) {
+      NM.IncrementalStitcher = { getMemoryFootprintMB: answer };
+      // eslint-disable-next-line no-await-in-loop
+      await expect(readSweepMemoryMB()).resolves.toBeNull();
+    }
+  });
+
+  it('passes a real footprint through, and names the one method it probed', async () => {
+    // ONLY the memory method: the keyframe engine's own resolver would call
+    // this module absent, which is why the probe is its own.
+    NM.IncrementalStitcher = { getMemoryFootprintMB: () => Promise.resolve(812.4) };
+    await expect(readSweepMemoryMB()).resolves.toBe(812.4);
+    expect(sweepMemoryReader()).toBe('IncrementalStitcher.getMemoryFootprintMB');
+  });
+
+  it('labels what it measures, per platform — the two are different quantities', () => {
+    expect(sweepMemoryMetric('ios')).toBe('phys_footprint');
+    expect(sweepMemoryMetric('android')).toBe('rss-statm');
+    expect(sweepMemoryMetric('web')).toBeNull();
+  });
+
+  it('keeps the PROBE off the public surface — only the read and its label are API', () => {
+    // `panoPlusNative` is re-exported whole from the package root, so a name
+    // added here is public for good. Which method answered is the recorder's
+    // business, and lives in a module the root does not re-export.
+    expect(typeof panoPlusNative.readSweepMemoryMB).toBe('function');
+    expect(typeof panoPlusNative.sweepMemoryMetric).toBe('function');
+    expect('sweepMemoryReader' in panoPlusNative).toBe(false);
   });
 });
 

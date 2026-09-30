@@ -95,6 +95,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now draws over a nearer box's fill. Same size, same inset corner, same depth
   rules. Android draws its badge the same whatever the key says: it sizes the
   badge from the projected screen box and draws it after the fill already.
+- **`host_sweep_timeline.json`** — a sweep's session directory now carries a
+  timing and memory record of the capture, written at the settle of the stop
+  beside `host_sweep_hud.json` (schema `panoplus-host-sweep-timeline/1`). It
+  holds three things:
+  - the finish: when the stop began, when a release poll first saw
+    `cameraReleased`, when the engine reported `stitching`, when the stop
+    settled, what a status read after the settle said, native's release stamp
+    when one arrived, and the order checked link by link (`orderOk`, with each
+    broken link named);
+  - the status rate: every live status that reached JS, per channel (the AR
+    frame push, the `getStatus` poll), with ticks and new-`seq` content per
+    second, gaps, the worst full second and the poll's round trip (the max
+    over every poll; the p95 over the kept ones, with `rttsTruncated` when
+    the cap was hit), over the sweeping window (rates are `null` under one
+    second);
+  - process memory, sampled every 250 ms and at the hold, sweeping, finishing
+    and end edges with the package's own `getMemoryFootprintMB`, labelled with
+    what it measures (`phys_footprint` on iOS, `rss-statm` on Android).
+    `peakMemoryMB` is mirrored at the top level. It is a sampled peak, not a
+    high-water mark, and is `null` (never 0) when no reader or no sample.
+
+  It is written on a finish that resolves, and on a rejected stop that names
+  its pack (`outcome: 'rejected:<code>'`), except `panoplus-not-running`,
+  whose cancel deletes the directory. A discard, an unmount, an engine switch
+  or a device refusal writes none, as they write no HUD sidecar. A host
+  without `expo-file-system` gets no file, and its sweeps arm no recorder:
+  no memory reads, no read after the settle. `context.poseSourceRequested`
+  and `context.poseSourceEffective` mean what they mean in
+  `host_notice.json` (the selected arm, and the arm sent to native). The
+  recorder is pure (`sweepTimeline.ts`); the result types are unchanged.
+- **`readSweepMemoryMB()`, `sweepMemoryMetric(os)`** — the sweep timeline's
+  memory read, public beside the other sweep bridge calls, and the label of
+  what it measures. `readSweepMemoryMB` never rejects and resolves `null` for
+  a missing method, a rejection, native's `-1` or anything not a finite
+  non-negative number. It probes the one method, not the keyframe engine's
+  full module.
+- **`PanoPlusStatus.cameraReleasedAtMs`** (optional) — native's wall-clock
+  stamp of the camera-release point, read from the live status when the native
+  side reports it. `0`, absent or not a finite positive number coerces to
+  `null`.
+- **`cameraReleasedAtMs` on the native live status** (iOS and Android) — the
+  wall-clock epoch-ms instant the stop let the camera go (`markReleased` on
+  iOS, before the finalize; after the camera and ARCore close on Android),
+  next to `cameraReleased` in both `getStatus` branches. `0` until the current
+  sweep releases; a new sweep clears it, and a superseded session's late
+  release never stamps the current one. A post-settle read carries it, so the
+  finish timeline can place a release no 100 ms poll landed on.
+- **Android pano+ capture-loop timings in the pack.**
+  - `meta.json` and the finalize summary gain `convertMs`, `packMs`
+    (the hand-off to the pack writer), `rowsMs` and `packWriteMs` beside
+    `engineMs` / `previewMs` / `ingestMs`, plus `ingestCpuMs` (the ingest
+    thread's CPU time over the same span: CPU well below wall is a thread
+    that was waiting for a core) and `ingestCores` (ingests per core index,
+    Linux/Android only).
+  - `device.json` gains `perf` on every arm (thermal status and 10 s headroom
+    at start and stop, ART GC count/time and process CPU over the sweep;
+    `null`, never 0, when the device cannot say) and, on an AR-plugin sweep,
+    `arm.glLoop`: the AR view's GL tick (`tickMs`, `tickCpuMs`,
+    `tickIntervalMs`, `swapWaitMs`), each per-tick consumer (`update`, `draw`,
+    `planes`, `overlay`, `forward`, `depth`, `pointCloud`, `imageMetadata`,
+    `worklets`, `arFrameMeta`, …), each AR plugin's `process()` by name, the
+    ticks that returned early, and which core the GL thread ran on. Frozen at
+    the plugin's disarm.
+  - The AR view times its GL loop only while a pano+ AR sweep is armed; a
+    host that mounts the AR camera without arming one reads no clock and
+    touches no counter per tick. At most 16 plugin names are timed per sweep
+    (`pluginNamesOverflow` counts the rest).
+  - A teardown with no owner (the Activity destroyed or the module
+    invalidated mid-sweep) takes no `perf` stop sample: it runs on the UI
+    thread or RN's module queue, so its stop fields are `null`.
 
 ### Changed (BREAKING)
 - **One output contract (M9, D6).** A finished sweep is `type: 'panorama'`
@@ -400,6 +470,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The settings modal's "Inscribed-rect crop" switch says it is inactive
   while the crop editor is on,** instead of showing a setting that cannot take
   effect.
+- **The Android AR-plugin arm's capture path held frames back** (a sweep
+  measured at ~10 fps ingested on a 27 Hz GL loop). Two costs sat in front of
+  every frame:
+  - the arm was one ingest in flight with drop-and-count, so after each
+    ingest the worker idled until the GL loop offered the next frame. It now
+    hands frames over through a pool of three buffers and a latest-wins
+    pending slot (the vision-camera arm's design): the worker takes the newest
+    frame the moment it finishes. A duplicate GL re-render is refused before
+    any buffer is taken, and the watermark still advances only for a frame
+    that got one. A buffer that cannot be allocated (out of memory) is
+    counted `allocFailed` and its pool slot given back, so it cannot shrink
+    the pool for the rest of the sweep. `arm.arPlugin` gains `offered` (buffer
+    requests: distinct frames unless `droppedBusy` or `allocFailed` is
+    non-zero), `taken`, `superseded`, `refusedAtAcquire`, `allocFailed`,
+    `refusedPostAcquire`, `droppedAtDisarm`, `ingestSlot`, the ingest wall
+    time and worker busy fraction, the throws split four ways
+    (`registerThrew`, `poseRowThrew`, `submitThrew`, `engineThrew`;
+    `ingestThrew` is their total), and `identity*Holds` checks of the exact
+    partition it states. The old note's "distinct ≈ seen
+    − skippedDuplicate" was false under the busy gate and is gone.
+  - the pack frame's full-resolution JPEG was encoded inline in the live
+    session's ingest. It is now handed, as a shallow refcounted `cv::Mat`, to
+    a bounded writer thread (`packQueueMax`, default 3 frames counting the one
+    being encoded; drop and count when full; drained for up to 1.5 s at
+    finalize, dropped and counted at cancel). `framesWritten` still means on
+    disk; it lags the live status and is final in `meta.json`, whose `pack`
+    block gains `enqueued`, `droppedQueueFull`, `droppedAtStop`,
+    `droppedCap`, `cadenceSkipped`, `notWanted`, `queueHighWater`, `writeMs`
+    and the identity they satisfy. The summary's `droppedPack` now counts
+    every pack write dropped (cap, full queue, stop) and splits them out.
+- **An Android AR plugin whose `name()` throws no longer ends the AR view's
+  GL thread.** The name is read once per tick, guarded; a plugin whose name
+  cannot be read has that tick's result dropped (logged).
+- **The Android AR-plugin sweep's `droppedQueue` said 0 while frames were
+  lost.** It copied the Camera2 writer's counter, which is structurally 0 on
+  that arm. The summary and the live status now take the plugin's own
+  `superseded + droppedBusy`, and the live status no longer overwrites the
+  native `framesWritten` with the Camera2 writer's 0 on that arm.
 
 ## [0.26.0] - 2026-08-26 (lateral-drift guard: a pose-derived signal, and a budget that scales)
 

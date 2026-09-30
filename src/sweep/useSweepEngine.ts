@@ -42,7 +42,11 @@ import type { ARFrameMeta } from '../stitching/ARFrameMeta';
 // the hook would not guarantee once a provider mounted late.)
 import { SafeAreaInsetsContext } from 'react-native-safe-area-context';
 import type { SweepSurfaceHandle as SurfaceControlHandle } from './panoPlusTypes';
-import { loadVideoFileSystem, nativeDocumentDirectory } from './fileSystem';
+import {
+  loadVideoFileSystem,
+  nativeDocumentDirectory,
+  type VideoFileSystem,
+} from './fileSystem';
 import { getPanoPlusSourceView } from './panoPlusSourceView';
 import { getPanoPlusAndroidPreviewView } from './panoPlusAndroidPreviewView';
 import {
@@ -97,11 +101,29 @@ import {
 import {
   cancelPanoPlus,
   getPanoPlusStatus,
+  readSweepMemoryMB,
   setPanoPlusIdlePreview,
   panoPlusIsAvailable,
   startPanoPlus,
   stopPanoPlus,
+  sweepMemoryMetric,
 } from './panoPlusNative';
+import { sweepMemoryReader } from './sweepMemoryReader';
+import {
+  PANO_PLUS_SWEEP_TIMELINE_FILE,
+  SWEEP_MEMORY_SAMPLE_MS,
+  SWEEP_TIMELINE_FINAL_READ_MS,
+  markSweepTimeline,
+  newSweepTimeline,
+  noteFinalRead,
+  noteMemorySample,
+  noteReleasePoll,
+  panoPlusSweepTimelineSidecar,
+  tickSweepStatus,
+  type SweepMemoryTag,
+  type SweepTimeline,
+  type SweepTimelineFinal,
+} from './sweepTimeline';
 import type {
   PanoPlusCameraLock,
   PanoPlusCaptureResult,
@@ -145,6 +167,84 @@ const PANO_PLUS_RELEASE_POLL_MS = 100;
  * readiness gate.
  */
 const PANORAMA_DISABLED_REFUSAL_CODE = 'panoplus-panorama-disabled';
+
+/** `p`'s answer, or `undefined` once `ms` has passed — whichever comes first.
+ *  Never rejects: a rejection reads as no answer. */
+function answerWithin<T>(p: Promise<T>, ms: number): Promise<T | undefined> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(undefined), ms);
+    p.then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      () => { clearTimeout(timer); resolve(undefined); },
+    );
+  });
+}
+
+/**
+ * One memory read, FIRE-AND-FORGET, pinned to the timeline that asked: the
+ * issue time is stamped before the bridge call and the answer lands in `t`
+ * whatever the hook's ref holds by then (see `sweepTimeline.ts`). Nothing is
+ * issued on a binary with no reader, so its file says `no-reader` rather than
+ * counting a failure per tick.
+ */
+function sampleSweepMemory(t: SweepTimeline, tag: SweepMemoryTag): void {
+  if (t.memory.reader == null) return;
+  const issuedAt = Date.now();
+  void readSweepMemoryMB().then((mb) => {
+    noteMemorySample(t, mb, issuedAt, Date.now(), tag);
+  });
+}
+
+/**
+ * THE TIMELINE, INTO THE PACK — `host_sweep_timeline.json`, beside the HUD
+ * sidecar and addressed the same way.
+ *
+ * ONE BOUNDED READ FIRST: the status (for `cameraReleased` and native's own
+ * release stamp, which a short finish often gives no poll the chance to see)
+ * and the end-of-sweep memory sample, each raced against
+ * `SWEEP_TIMELINE_FINAL_READ_MS`. The status read cannot answer about the
+ * NEXT sweep: the native module serves its calls in order on one queue, and
+ * this one is issued before any later `start()` can be.
+ *
+ * FIRE-AND-FORGET AND SWALLOWED, like every `host_*` sidecar: a sweep must
+ * never fail because a diagnostic could not be written.
+ *
+ * `onSerialized` runs the moment the bytes exist: from then on nothing noted
+ * into `t` can reach the file, so the hook lets go of it (see
+ * `finishTimelineRef`).
+ */
+function writeSweepTimeline(
+  fs: VideoFileSystem,
+  sessionDir: string,
+  t: SweepTimeline,
+  final: Omit<SweepTimelineFinal, 'sessionDir' | 'writtenAtMs'>,
+  onSerialized: () => void,
+): void {
+  const issuedAt = Date.now();
+  const wantMemory = t.memory.reader != null;
+  void Promise.all([
+    answerWithin(getPanoPlusStatus(), SWEEP_TIMELINE_FINAL_READ_MS),
+    wantMemory
+      ? answerWithin(readSweepMemoryMB(), SWEEP_TIMELINE_FINAL_READ_MS)
+      : Promise.resolve(undefined),
+  ])
+    .then(([s, mb]) => {
+      const at = Date.now();
+      noteFinalRead(t, s, at);
+      // A read that did not answer inside its bound is a FAILED read.
+      if (wantMemory) noteMemorySample(t, mb ?? null, issuedAt, at, 'e');
+      const body = panoPlusSweepTimelineSidecar(t, { ...final, sessionDir, writtenAtMs: at });
+      onSerialized();
+      return fs.writeAsStringAsync(
+        `${fileUri(sessionDir).replace(/\/$/, '')}/${PANO_PLUS_SWEEP_TIMELINE_FILE}`,
+        body,
+      );
+    })
+    .catch((e: unknown) => {
+      // eslint-disable-next-line no-console
+      console.warn('[pano+] sweep timeline sidecar not written —', e);
+    });
+}
 
 export function useSweepEngine(
   props: SweepEngineProps,
@@ -466,6 +566,45 @@ export function useSweepEngine(
    * the same one the caller passed.
    */
   const abandonOnStartRef = useRef<string | null>(null);
+  /**
+   * THE RECORDER FOR THE SWEEP IN FLIGHT — `host_sweep_timeline.json`'s
+   * source (see `sweepTimeline.ts`), `null` at idle.
+   *
+   * Claimed in `start()` next to the panel's session claim, and released
+   * beside `liveSessionRef` on every path back to idle. Only a sweep that
+   * reaches `finish()`'s settle is WRITTEN; a discard, an unmount, an engine
+   * switch or a device refusal drops it, as those paths write no HUD sidecar
+   * either. Declared up here because the status channels, `start`, `finish`
+   * and the render all read it.
+   *
+   * ⚠ NOT CLAIMED AT ALL ON A HOST WITHOUT `expo-file-system`. There the file
+   * can never be written, and every read the recorder issues (the memory
+   * samples, the read after the settle) would be a bridge call for nothing —
+   * on Android, on the same module thread the sweep's status polls queue on.
+   *
+   * Written synchronously and never through state: the recorder is fed on
+   * the 10 Hz push, and a re-render per tick would lower the rate it
+   * measures.
+   */
+  const timelineRef = useRef<SweepTimeline | null>(null);
+  /**
+   * THE TIMELINE `finish()` IS WRITING, from the finish until its bytes are
+   * serialized — a pin that outlives `timelineRef`, which the settle
+   * releases.
+   *
+   * It exists for the `stitching` edge. The release poll's answer and the
+   * stop's resolve reach JS as separate native callbacks, so the settle can
+   * land after the commit that raised `stitching` and before that commit's
+   * passive effect runs. The host is still told `stitching` then, and the
+   * file must say so too; stamped against `timelineRef` it found null and
+   * recorded a finish that never unmounted the camera. Stamped here it lands,
+   * and the fold names the order it happened in (`settled-before-stitching`).
+   *
+   * Cleared at serialization (or at once when the finish writes nothing),
+   * and at the next claim in `start()`: a stamp must never reach a previous
+   * sweep's file.
+   */
+  const finishTimelineRef = useRef<SweepTimeline | null>(null);
   /** Arms latched at START, so the result reports what the sweep ACTUALLY ran
    *  even if the host flips a pill mid-sweep.
    *
@@ -1094,6 +1233,8 @@ export function useSweepEngine(
     () => () => {
       if (!sweepLiveRef.current) return;
       sweepLiveRef.current = false;
+      // Not written: this stop is not a finish (see `timelineRef`).
+      timelineRef.current = null;
       void stopPanoPlus().then(
         (s) => {
           // eslint-disable-next-line no-console
@@ -1133,6 +1274,7 @@ export function useSweepEngine(
     } else if (sweepLiveRef.current) {
       sweepLiveRef.current = false;
       liveSessionRef.current = null;
+      timelineRef.current = null;   // not a finish — not written
       void stopPanoPlus().then(
         (st) => {
           // eslint-disable-next-line no-console
@@ -1200,7 +1342,12 @@ export function useSweepEngine(
 
   const handleArFrame = useCallback(
     (meta: ARFrameMeta) => {
-      applyStatus(readPanoPlusStatus(meta));
+      const s = readPanoPlusStatus(meta);
+      // COUNTED WHERE IT ENTERS JS, before `applyStatus` filters it — a null
+      // push and a foreign session are part of the rate being measured.
+      const t = timelineRef.current;
+      if (t != null) tickSweepStatus(t, 'push', s, Date.now(), liveSessionRef.current);
+      applyStatus(s);
     },
     [applyStatus],
   );
@@ -1221,6 +1368,29 @@ export function useSweepEngine(
       return undefined;
     }
     const startedAt = Date.now();
+    // v12 — on the IMU arm this poll is not a fallback, it is the ONLY
+    // channel (the ARCameraView that carries the 10 Hz push is deliberately
+    // never mounted there), so it runs at the preview's own cadence instead
+    // of 2 Hz. The AR arm keeps the slow poll: its push channel carries the
+    // load and a second fast reader would be redundant.
+    //
+    // ⚠ ANDROID POLLS FAST ON BOTH ARMS (2026-09-02). The push channel is the
+    // stitcher's `ARFramePlugin` SPI folding a sync map into the same
+    // `plugins['sweep']` field, which is a verbatim twin of the
+    // iOS one — but it is a NEWLY PORTED twin, and the failure mode of a
+    // status channel that is silently not wired is a HUD that stays empty for
+    // the whole sweep with nothing saying why. The poll is a bridge call
+    // every 125 ms against a cached dict; paying it on the arm where it is
+    // usually redundant is cheaper than a field trip spent looking at a blank
+    // governor. Drop this term once the plugin's push has been seen on
+    // hardware.
+    const pollMs = poseSource === 'imu' || armContract === 'android-sensor'
+      ? PANO_PLUS_STATUS_POLL_FAST_MS
+      : PANO_PLUS_STATUS_POLL_MS;
+    // The interval ACTUALLY chosen, into the timeline: a rate is only
+    // readable beside the cadence that produced it.
+    const claimed = timelineRef.current;
+    if (claimed != null) claimed.context.statusPollMs = pollMs;
     const id = setInterval(() => {
       // The ELAPSED tick is deliberately driven from the same interval as the
       // poll, and it is why the "no status on either channel" rung can fire at
@@ -1228,29 +1398,20 @@ export function useSweepEngine(
       // so a placeholder that depended on a status update to appear could
       // never appear in the one case it exists for.
       if (mountedRef.current) setSweepingForMs(Date.now() - startedAt);
+      // Pinned and stamped at ISSUE, so the answer is recorded against the
+      // sweep that asked and its round trip is measured. NO in-flight guard:
+      // one would change the channel being measured, and overlapping reads
+      // show up in the file as a round trip longer than the interval.
+      const t = timelineRef.current;
+      const issuedAt = Date.now();
       void getPanoPlusStatus().then((s) => {
+        if (t != null) {
+          tickSweepStatus(t, 'poll', s, Date.now(), liveSessionRef.current, issuedAt);
+        }
         if (!mountedRef.current || s == null || !s.running) return;
         applyStatus(s);
       });
-      // v12 — on the IMU arm this poll is not a fallback, it is the ONLY
-      // channel (the ARCameraView that carries the 10 Hz push is deliberately
-      // never mounted there), so it runs at the preview's own cadence instead
-      // of 2 Hz. The AR arm keeps the slow poll: its push channel carries the
-      // load and a second fast reader would be redundant.
-      //
-      // ⚠ ANDROID POLLS FAST ON BOTH ARMS (2026-09-02). The push channel is the
-      // stitcher's `ARFramePlugin` SPI folding a sync map into the same
-      // `plugins['sweep']` field, which is a verbatim twin of the
-      // iOS one — but it is a NEWLY PORTED twin, and the failure mode of a
-      // status channel that is silently not wired is a HUD that stays empty for
-      // the whole sweep with nothing saying why. The poll is a bridge call
-      // every 125 ms against a cached dict; paying it on the arm where it is
-      // usually redundant is cheaper than a field trip spent looking at a blank
-      // governor. Drop this term once the plugin's push has been seen on
-      // hardware.
-    }, poseSource === 'imu' || armContract === 'android-sensor'
-      ? PANO_PLUS_STATUS_POLL_FAST_MS
-      : PANO_PLUS_STATUS_POLL_MS);
+    }, pollMs);
     return () => clearInterval(id);
   }, [applyStatus, armContract, phase, poseSource]);
 
@@ -1714,6 +1875,32 @@ export function useSweepEngine(
     // is exactly the window the straggler arrives in.
     setStatus(null);
     liveSessionRef.current = panoPlusSessionIdOf(dirPath);
+    // ── THE RECORDER, CLAIMED WITH THE PANEL ──────────────────────────────
+    // After both synchronous refusals above, so a refused hold leaves no
+    // recorder behind. This object IS the sweep's generation: every branch
+    // below compares against it rather than trusting whatever the ref holds
+    // when the start lands. The baseline memory sample is the hold's start —
+    // the camera is still opening. Only where it can be written (see
+    // `timelineRef`); a previous finish's pin is let go here either way.
+    //
+    // `poseSourceRequested` is the SELECTED arm and `poseSourceEffective`
+    // the one sent: `host_notice.json`'s two keys, with its meanings.
+    const timeline = fs != null
+      ? newSweepTimeline(Date.now(), {
+        platform: Platform.OS,
+        armContract,
+        frameSource,
+        poseSourceRequested: poseSource,
+        poseSourceEffective: wantPoseSource,
+        releasePollMs: PANO_PLUS_RELEASE_POLL_MS,
+        memorySampleMs: SWEEP_MEMORY_SAMPLE_MS,
+        memoryReader: sweepMemoryReader(),
+        memoryMetric: sweepMemoryMetric(Platform.OS),
+      })
+      : null;
+    timelineRef.current = timeline;
+    finishTimelineRef.current = null;
+    if (timeline != null) sampleSweepMemory(timeline, 'b');
     // ── THE BAG, BUILT BEFORE IT IS SENT ──────────────────────────────────
     // Named rather than inlined so `tauUncorrected` can be settled AFTER every
     // spread — see the block below the literal. A conditional spread cannot
@@ -1941,6 +2128,8 @@ export function useSweepEngine(
           void cancelPanoPlus().catch(() => undefined);
           stopOnStartRef.current = false;
           abandonOnStartRef.current = null;
+          // Cancelled, so there is no pack to write into — mounted or not.
+          timelineRef.current = null;
           if (!mountedRef.current) return;
           setRunningArm(null);
           setPhase('idle');
@@ -2036,6 +2225,7 @@ export function useSweepEngine(
           // now live and nothing else will ever stop it — the unmount cleanup
           // has already run and `sweepLiveRef` was never raised, precisely so
           // this handler owns the case and the two cannot both fire.
+          timelineRef.current = null;   // an unmount's stop — not written
           void stopPanoPlus().then(
             (s) => {
               // eslint-disable-next-line no-console
@@ -2070,6 +2260,7 @@ export function useSweepEngine(
           setPhase('idle');
           setCameraLock(null);
           liveSessionRef.current = null;
+          timelineRef.current = null;   // a deselect's stop — not written
           return;
         }
         // ⚠ A GUARD RAIL FIRED WHILE THE CAMERA WAS OPENING — DISCARD, and
@@ -2090,6 +2281,7 @@ export function useSweepEngine(
           setPhase('idle');
           setCameraLock(null);   // see finish() — it dies with its sweep
           liveSessionRef.current = null;
+          timelineRef.current = null;   // discarded — nothing to write into
           onFailure?.({
             code: 'panoplus-abandoned',
             message: `sweep abandoned: ${reason}`,
@@ -2100,6 +2292,14 @@ export function useSweepEngine(
         // and each clears this flag before it acts.
         sweepLiveRef.current = true;
         setPhase('sweeping');
+        // THE SWEEP IS LIVE — stamped BEFORE the latched release below can
+        // finish it, with the arm and the camera native says it started.
+        if (timeline != null && timelineRef.current === timeline) {
+          markSweepTimeline(timeline, 'sweeping', Date.now());
+          timeline.context.poseSourceStarted = started.poseSource ?? null;
+          timeline.context.frameSourceStarted = started.frameSource ?? null;
+          sampleSweepMemory(timeline, 's');
+        }
         // The operator let go while native was still opening the camera. The
         // session is live for exactly as long as it takes to say so; finish
         // it now, the way Pano's release would have. See `stopOnStartRef`.
@@ -2110,6 +2310,8 @@ export function useSweepEngine(
       },
       (e: unknown) => {
         busyRef.current = false;
+        // Nothing started, so nothing was recorded that a pack could hold.
+        timelineRef.current = null;
         // A release that landed during the failed start has nothing to end.
         stopOnStartRef.current = false;
         // …and a deselect in the same window hears nothing (M9 review).
@@ -2238,10 +2440,32 @@ export function useSweepEngine(
     // a second stop against a session this one has already finalized.
     sweepLiveRef.current = false;
     setPhase('finishing');
+    // THE FINISH, STAMPED — and the timeline PINNED here, so the settle
+    // writes the sweep this call is finishing. `busyRef` keeps any later
+    // `start()` out until the settle, so the ref cannot move meanwhile; the
+    // pin just makes that a property of this closure rather than of the
+    // ordering. The ref itself stays set until the settle, and the release
+    // poll records into it; the `stitching` report and the finishing headline
+    // go to `finishTimelineRef`, which holds on until the bytes exist.
+    const tl = timelineRef.current;
+    finishTimelineRef.current = tl;
+    if (tl != null) {
+      markSweepTimeline(tl, 'finishing', Date.now());
+      sampleSweepMemory(tl, 'f');
+    }
+    /** Lets go of the finish's pin — see `finishTimelineRef`. */
+    const releaseFinishPin = (): void => {
+      if (finishTimelineRef.current === tl) finishTimelineRef.current = null;
+    };
     const arms = armsRef.current;
     void stopPanoPlus().then(
       (summary) => {
+        const settledAt = Date.now();
         busyRef.current = false;
+        if (tl != null) {
+          markSweepTimeline(tl, 'settled', settledAt);
+          if (timelineRef.current === tl) timelineRef.current = null;
+        }
         // eslint-disable-next-line no-console
         console.log(
           '[pano+] sweep done —',
@@ -2276,6 +2500,18 @@ export function useSweepEngine(
               console.warn('[pano+] sweep HUD sidecar not written —', e);
             });
         }
+        // ── THE TIMELINE, INTO THE PACK ──────────────────────────────────
+        // Same placement as the HUD write and for the same reason: BEFORE the
+        // `mountedRef` return, so a host that unmounts on `onComplete` does
+        // not lose the record of the sweep it just took.
+        if (fs != null && summary.sessionDir !== '' && tl != null) {
+          writeSweepTimeline(fs, summary.sessionDir, tl, {
+            outcome: 'resolved',
+            nativeFinalizeMs: summary.finalizeMs,
+          }, releaseFinishPin);
+        } else {
+          releaseFinishPin();
+        }
         if (!mountedRef.current) return;
         // Released with the phase. `arms` was read BEFORE the await, so the
         // pack still carries the arm this sweep ran on whatever the prop has
@@ -2298,6 +2534,7 @@ export function useSweepEngine(
         onComplete(panoPlusResultOf(summary, arms));
       },
       (e: unknown) => {
+        const settledAt = Date.now();
         busyRef.current = false;
         const info = panoPlusErrorInfo(e);
         // eslint-disable-next-line no-console
@@ -2305,6 +2542,29 @@ export function useSweepEngine(
         // See the module doc: this is the only path that leaves the native
         // session latched without finalizing.
         if (info.code === 'panoplus-not-running') void cancelPanoPlus();
+        // A REJECTED STOP CAN STILL HAVE WRITTEN A PACK (`panoplus-empty`
+        // names it in `userInfo.sessionDir`), and a sweep too short to paint
+        // is exactly the one whose timing an RCA wants. Written there, before
+        // the `mountedRef` return. NOT on `panoplus-not-running`: that path
+        // cancels just above, and a cancel deletes the session directory.
+        if (tl != null) {
+          markSweepTimeline(tl, 'settled', settledAt);
+          if (timelineRef.current === tl) timelineRef.current = null;
+        }
+        if (
+          tl != null
+          && fs != null
+          && info.code !== 'panoplus-not-running'
+          && info.sessionDir != null
+          && info.sessionDir !== ''
+        ) {
+          writeSweepTimeline(fs, info.sessionDir, tl, {
+            outcome: `rejected:${info.code}`,
+            nativeFinalizeMs: null,
+          }, releaseFinishPin);
+        } else {
+          releaseFinishPin();
+        }
         if (!mountedRef.current) return;
         setRunningArm(null);
         setPhase('idle');
@@ -2502,6 +2762,7 @@ export function useSweepEngine(
         // claim with no session behind it must not outlive it.
         sweepLiveRef.current = false;
         liveSessionRef.current = null;
+        timelineRef.current = null;   // discarded — nothing to write into
         setRunningArm(null);
         setCameraLock(null);   // see finish() — it dies with its sweep
         // The live status goes with the session, so `onPaintedChange` reports
@@ -2543,6 +2804,8 @@ export function useSweepEngine(
     // the phase is 'finishing' until stop settles.
     sweepLiveRef.current = false;
     liveSessionRef.current = null;
+    // Not a `finish()` — no HUD sidecar either (see `timelineRef`).
+    timelineRef.current = null;
     setPhase('finishing');
     const info = {
       code: named.code,
@@ -2606,10 +2869,27 @@ export function useSweepEngine(
     // pile reads up on the native module queue.
     let inFlight = false;
     const id = setInterval(() => {
-      if (inFlight) return;
+      // Pinned at the tick: the answer is recorded against the sweep that
+      // asked, whatever the ref holds when it lands.
+      const t = timelineRef.current;
+      if (inFlight) {
+        // Counted, not hidden: a read that takes longer than this interval is
+        // the native status queue stuck behind the finalize.
+        if (t != null) t.releasePoll.skippedInFlight += 1;
+        return;
+      }
       inFlight = true;
+      const issuedAt = Date.now();
+      if (t != null) t.releasePoll.issued += 1;
       void getPanoPlusStatus().then((s) => {
         inFlight = false;
+        // Recorded BEFORE the guards below: an answer that lands after this
+        // effect was torn down is still an answer native gave.
+        if (t != null) {
+          noteReleasePoll(
+            t, s?.cameraReleased === true, issuedAt, Date.now(), s?.cameraReleasedAtMs,
+          );
+        }
         if (live && mountedRef.current && s?.cameraReleased === true) setCameraReleased(true);
       }, () => { inFlight = false; });
     }, PANO_PLUS_RELEASE_POLL_MS);
@@ -2620,8 +2900,45 @@ export function useSweepEngine(
   onStitchingChangeRef.current = onStitchingChange;
   useEffect(() => {
     if (!enabled) return;
+    // The rising edge the host unmounts its camera on, stamped as it is
+    // reported (the first stamp wins, so a re-run on `enabled` cannot move it).
+    // Against the FINISH's pin, not `timelineRef`: this effect can run after
+    // the settle released that ref, and the host is told either way (see
+    // `finishTimelineRef`).
+    const t = finishTimelineRef.current;
+    if (stitching && t != null) markSweepTimeline(t, 'stitchingReported', Date.now());
     onStitchingChangeRef.current?.(stitching);
   }, [stitching, enabled]);
+
+  // ── PROCESS MEMORY THROUGH THE HOLD AND THE FINISH ──────────────────────
+  // Sampled every `SWEEP_MEMORY_SAMPLE_MS` while the sweep is not idle, on top
+  // of the edge samples `start`/`finish` take, with the package's own public
+  // memory read — never a host's, whose read may share the status channels'
+  // native thread and stall the very polls this timeline measures.
+  //
+  // ONE READ IN FLIGHT AT A TIME, the release poll's rule, and a skipped tick
+  // is counted. Keyed on the BOOLEAN, so `starting` → `sweeping` →
+  // `finishing` does not restart the interval.
+  const memorySampling = enabled && phase !== 'idle';
+  useEffect(() => {
+    if (!memorySampling) return undefined;
+    let inFlight = false;
+    const id = setInterval(() => {
+      const t = timelineRef.current;
+      if (t == null || t.memory.reader == null) return;
+      if (inFlight) {
+        t.memory.inFlightSkipped += 1;
+        return;
+      }
+      inFlight = true;
+      const issuedAt = Date.now();
+      void readSweepMemoryMB().then((mb) => {
+        inFlight = false;
+        noteMemorySample(t, mb, issuedAt, Date.now(), 'p');
+      });
+    }, SWEEP_MEMORY_SAMPLE_MS);
+    return () => clearInterval(id);
+  }, [memorySampling]);
 
   // THE COACHING CONTEXT — one object, read by BOTH the governor line and the
   // HUD so the two can never coach different gestures. `screenIsLandscape` is
@@ -2696,6 +3013,15 @@ export function useSweepEngine(
       previewWindow: panoPlusPreviewWindowCaption(status),
       viewfinder: viewfinderNotice,
     };
+  } else if (
+    finishTimelineRef.current != null
+    && finishTimelineRef.current.finishingHeadline == null
+  ) {
+    // …and the headline the HUD sidecar deliberately does NOT keep goes to the
+    // timeline instead: what the operator was shown while the pack was being
+    // written. The same render-time ref write, first render of the finish,
+    // into the finish's own pin (a device refusal's 'finishing' has none).
+    finishTimelineRef.current.finishingHeadline = guidance.headline;
   }
   const preview = panoPlusPreviewSource(status);
   // THE PREVIEW CAPSULE. A FIXED strip whose only input is this window and the

@@ -103,6 +103,12 @@ const KOTLIN_CHAINS: Record<'status' | 'summary', Record<string, Array<[string, 
       ['PanoPlusLiveModule.kt', 'getStatus', 'out.putBoolean("cameraReleased", PanoPlusCameraRelease.released)'],
       ['PanoPlusLiveModule.kt', 'getStatus', '\n                putBoolean("cameraReleased", PanoPlusCameraRelease.released)'],
     ],
+    // The release STAMP rides beside the boolean, on the same two branches
+    // and by the same two branch-unique forms.
+    cameraReleasedAtMs: [
+      ['PanoPlusLiveModule.kt', 'getStatus', 'out.putDouble("cameraReleasedAtMs", PanoPlusCameraRelease.releasedAtMs)'],
+      ['PanoPlusLiveModule.kt', 'getStatus', '\n                putDouble("cameraReleasedAtMs", PanoPlusCameraRelease.releasedAtMs)'],
+    ],
     vcDeviceRefusal: [
       ['PanoPlusAndroidRecorder.kt', 'statusMap', 'putString(\n            "vcDeviceRefusal"'],
       ['PanoPlusLiveModule.kt', 'getStatus', 'copyString(rec, out, "vcDeviceRefusal")'],
@@ -320,6 +326,7 @@ function iosProducedPaths(src: string): { status: Set<string>; summary: Set<stri
 const IOS_BRIDGE_STATUS: Record<string, [string, string, string, string]> = {
   vcDeviceRefusal: ['ios/PanoPlus/PanoPlusBridge.swift', 'getStatus', 'st["vcDeviceRefusal"] = r', 'st'],
   cameraReleased: ['ios/PanoPlus/PanoPlusBridge.swift', 'getStatus', 'st["cameraReleased"] = Self.cameraReleased()', 'st'],
+  cameraReleasedAtMs: ['ios/PanoPlus/PanoPlusBridge.swift', 'getStatus', 'st["cameraReleasedAtMs"] = Self.cameraReleasedAtMs()', 'st'],
 };
 
 /** Swift source with `//` and `/* *\/` comments removed (strings are not parsed). */

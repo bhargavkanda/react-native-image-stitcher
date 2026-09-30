@@ -83,6 +83,7 @@ jest.mock(
 (globalThis as unknown as { __ppWritten: unknown[] }).__ppWritten = written;
 
 import { SweepEngineHarness } from './sweepEngineHarness';
+import { useSweepEngine } from '../useSweepEngine';
 import type { SweepEngineProps } from '../sweepEngineProps';
 import { panoBottomChromePt } from '../sweepLayout';
 import { panoPlusUnavailableDetail } from '../panoPlusAndroidArm';
@@ -223,6 +224,9 @@ interface Rig {
   controls: () => SurfaceControlState | undefined;
   has: (testID: string) => boolean;
   frame: (status: Record<string, unknown> | null) => void;
+  /** `<Camera>` selecting another engine (`false`) or this one again — the
+   *  hook stays mounted either way. */
+  setEnabled: (enabled: boolean) => void;
   unmount: () => void;
 }
 
@@ -230,22 +234,24 @@ function mount(props: Partial<SweepEngineProps> = {}): Rig {
   let renderer!: ReactTestRenderer;
   const ref = React.createRef<SurfaceControlHandle>();
   const states: SurfaceControlState[] = [];
+  const element = (enabled: boolean): React.JSX.Element => (
+    <SweepEngineHarness
+      ref={ref}
+      enabled={enabled}
+      onComplete={props.onComplete ?? (() => undefined)}
+      onCancel={props.onCancel ?? (() => undefined)}
+      onFailure={props.onFailure}
+      onControlsState={(st) => { states.push(st); }}
+      rectify={props.rectify}
+      gainMatch={props.gainMatch}
+      packFrames={props.packFrames}
+      engineOptions={props.engineOptions}
+      packOptions={props.packOptions}
+      poseSource={props.poseSource}
+    />
+  );
   act(() => {
-    renderer = TestRenderer.create(
-      <SweepEngineHarness
-        ref={ref}
-        onComplete={props.onComplete ?? (() => undefined)}
-        onCancel={props.onCancel ?? (() => undefined)}
-        onFailure={props.onFailure}
-        onControlsState={(st) => { states.push(st); }}
-        rectify={props.rectify}
-        gainMatch={props.gainMatch}
-        packFrames={props.packFrames}
-        engineOptions={props.engineOptions}
-        packOptions={props.packOptions}
-        poseSource={props.poseSource}
-      />,
-    );
+    renderer = TestRenderer.create(element(true));
   });
   // Let the AR-session swap grace elapse so <ARCameraView> mounts.
   act(() => {
@@ -287,6 +293,11 @@ function mount(props: Partial<SweepEngineProps> = {}): Rig {
             ? { plugins: {} }
             : { plugins: { [PANO_PLUS_PLUGIN_KEY]: status } },
         );
+      });
+    },
+    setEnabled: (enabled) => {
+      act(() => {
+        renderer.update(element(enabled));
       });
     },
     unmount: () => {
@@ -849,6 +860,582 @@ describe('start → sweep → done, the whole wire', () => {
     // ...and the engine readout with it, whole.
     expect(body.hud).toContain('40/42 painted');
     expect(body.guidanceHeadline).toContain('Panning');
+    r.unmount();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// THE SWEEP'S TIMELINE, INTO THE PACK — `host_sweep_timeline.json`
+//
+// The finish (when native released the camera, when `stitching` was
+// reported, when the stop settled), the rate at which a live status reached
+// JS on each channel, and sampled process memory. None of it is on screen, so
+// the file is the only observable, and a test asserting less than its
+// CONTENTS would pass just as well against a file that recorded nothing.
+// ═══════════════════════════════════════════════════════════════════════════
+describe('the sweep timeline reaches the pack', () => {
+  const TIMELINE = 'host_sweep_timeline.json';
+  /** A stop that reports the pack it wrote, as native does. */
+  const stopWithPack = (dir = '/d/pp_1') => () => Promise.resolve({
+    sessionDir: dir,
+    canvasPath: `${dir}/canvas.jpg`,
+    width: 5000, height: 600,
+    counts: { seen: 300, painted: 290 },
+    unpaintedRuns: [],
+    finalizeMs: 78,
+  });
+  /** The timeline writes after ONE bounded read of its own, so it lands a few
+   *  microtasks after the stop settles — flushed here, with no timer moved. */
+  async function flush(): Promise<void> {
+    for (let i = 0; i < 4; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await settle();
+    }
+  }
+  const timelines = () => written.filter((w) => w.uri.endsWith(TIMELINE));
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const lastTimeline = (): Record<string, any> => {
+    const all = timelines();
+    expect(all.length).toBeGreaterThan(0);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return JSON.parse(all[all.length - 1]!.body) as Record<string, any>;
+  };
+  /** Advance the fake clock, then let every answer it triggered land. */
+  async function advance(ms: number): Promise<void> {
+    await act(async () => {
+      jest.advanceTimersByTime(ms);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await settle();
+  }
+
+  beforeEach(() => {
+    written.length = 0;
+    stopImpl = stopWithPack();
+  });
+  afterEach(() => {
+    delete NM.IncrementalStitcher;
+  });
+
+  it('writes it at the settle, into the directory native answered, with the schema', async () => {
+    const r = mount();
+    r.hold();
+    await settle();
+    r.release();
+    await flush();
+    expect(timelines().map((w) => w.uri)).toEqual([`file:///d/pp_1/${TIMELINE}`]);
+    const f = lastTimeline();
+    expect(f.schema).toBe('panoplus-host-sweep-timeline/1');
+    expect(f.sessionDir).toBe('/d/pp_1');
+    expect(f.outcome).toBe('resolved');
+    expect(f.platform).toBe('ios');
+    expect(f.finish.nativeFinalizeMs).toBe(78);
+    expect(f.finish.sweepingAtMs).toBeGreaterThanOrEqual(f.finish.holdStartAtMs);
+    expect(f.finish.finishingAtMs).toBeGreaterThanOrEqual(f.finish.sweepingAtMs);
+    expect(f.finish.stopSettledAtMs).toBeGreaterThanOrEqual(f.finish.finishingAtMs);
+    // What the operator was shown while the pack was written — the headline
+    // the HUD sidecar deliberately does not keep.
+    expect(f.finish.finishingHeadline).toBe('Finishing the panorama…');
+    // The read after the settle ANSWERED (the fake bridge's idle status).
+    expect(f.finish.finalRead).toBe('answered');
+    expect(f.finish.releasedBySettle).toBe(false);
+    expect(f.context).toMatchObject({
+      armContract: 'ios-coremotion',
+      frameSource: 'own',
+      poseSourceRequested: 'ar',
+      poseSourceEffective: 'ar',
+      poseSourceStarted: null,
+    });
+    r.unmount();
+  });
+
+  it('⚑ a fast finish is RECORDED as one — no release read landed, and the file says so', async () => {
+    // Native's finalize measured 44-228 ms on the pulled packs and the first
+    // release read fires 100 ms into the finish, so many finishes settle
+    // before any read sees the release. That is not hidden: no poll issued,
+    // nothing seen, no stitching, and the order still holds.
+    const r = mount();
+    r.hold();
+    await settle();
+    r.release();
+    await flush();
+    const f = lastTimeline();
+    expect(f.finish.releasePoll.issued).toBe(0);
+    expect(f.finish.cameraReleasedSeenAtMs).toBeNull();
+    expect(f.finish.stitchingReportedAtMs).toBeNull();
+    expect(f.finish.derived.cameraUnmountedDuringFinish).toBe(false);
+    expect(f.finish.derived.orderOk).toBe(true);
+    r.unmount();
+  });
+
+  it('⚑ is written even when the host unmounts the engine WHILE the pack is being written', async () => {
+    // The placement this proves: BEFORE `finish()`'s `mountedRef` return. A
+    // host that navigates away mid-finish still gets its record — the pack is
+    // native's and outlives this hook.
+    let resolveStop!: (v: unknown) => void;
+    stopImpl = () => new Promise((res) => { resolveStop = res; });
+    const r = mount();
+    r.hold();
+    await settle();
+    r.release();
+    await settle();
+    r.unmount();
+    await act(async () => {
+      resolveStop(await stopWithPack()());
+    });
+    await flush();
+    // …and the unmount did not issue a second stop against the finished sweep.
+    expect(calls).toEqual(['start', 'stop']);
+    expect(timelines()).toHaveLength(1);
+    expect(lastTimeline().outcome).toBe('resolved');
+  });
+
+  it('a stop that REJECTS with its pack still records it, where the pack is', async () => {
+    stopImpl = () =>
+      Promise.reject(
+        Object.assign(new Error('The sweep produced no panorama (chain-lost).'), {
+          code: 'panoplus-empty',
+          userInfo: { sessionDir: '/d/pp_9', abort: 'chain-lost', counts: { seen: 90 } },
+        }),
+      );
+    const r = mount({ onFailure: () => undefined });
+    r.hold();
+    await settle();
+    r.release();
+    await flush();
+    expect(timelines().map((w) => w.uri)).toEqual([`file:///d/pp_9/${TIMELINE}`]);
+    const f = lastTimeline();
+    expect(f.outcome).toBe('rejected:panoplus-empty');
+    expect(f.sessionDir).toBe('/d/pp_9');
+    expect(f.finish.nativeFinalizeMs).toBeNull();
+    r.unmount();
+  });
+
+  it('writes NOTHING on panoplus-not-running — that path cancels, and a cancel deletes the dir', async () => {
+    stopImpl = () =>
+      Promise.reject(
+        Object.assign(new Error('No pano+ sweep is running.'), {
+          code: 'panoplus-not-running',
+          userInfo: { sessionDir: '/d/pp_1' },
+        }),
+      );
+    const r = mount();
+    r.hold();
+    await settle();
+    r.release();
+    await flush();
+    expect(calls).toEqual(['start', 'stop', 'cancel']);
+    expect(timelines()).toEqual([]);
+    r.unmount();
+  });
+
+  it('⚑ an ABANDON writes nothing, and the NEXT sweep\'s file carries none of its ticks', async () => {
+    const r = mount({ onFailure: () => undefined });
+    r.hold();
+    await settle();
+    for (let i = 0; i < 5; i += 1) r.frame(statusDict({ seq: 900 + i, previewSeq: 900 + i }));
+    act(() => { r.ref.current!.abandon!('orientation-drift'); });
+    await flush();
+    expect(calls).toEqual(['start', 'cancel']);
+    expect(timelines()).toEqual([]);
+
+    r.hold();
+    await settle();
+    r.frame(statusDict({ seq: 1, previewSeq: 1 }));
+    r.frame(statusDict({ seq: 2, previewSeq: 2 }));
+    r.release();
+    await flush();
+    expect(timelines()).toHaveLength(1);
+    const rows = lastTimeline().statusRate.rows as Array<[number, number, number, number]>;
+    expect(rows.map((row) => row[2])).toEqual([1, 2]);
+    r.unmount();
+  });
+
+  it('counts the status RATE per channel, and new content apart from ticks', async () => {
+    // The AR arm on iOS: the push at the 10 Hz meta throttle, and the 2 Hz
+    // poll reading the SAME native snapshot the push last delivered.
+    let seq = 42;
+    let previewSeq = 7;
+    getStatusImpl = () => Promise.resolve(statusDict({ seq, previewSeq }));
+    const r = mount();
+    r.hold();
+    await settle();
+    const FRAMES = 30;
+    for (let i = 0; i < FRAMES; i += 1) {
+      seq = 42 + i;
+      previewSeq = 7 + i;
+      r.frame(statusDict({ seq, previewSeq }));
+      // eslint-disable-next-line no-await-in-loop
+      await advance(100);
+    }
+    // One meta tick that carried nothing from the sweep.
+    r.frame(null);
+    await advance(50);
+    r.release();
+    await flush();
+    const f = lastTimeline();
+    const rate = f.statusRate;
+    expect(f.context.statusPollMs).toBe(PANO_PLUS_STATUS_POLL_MS);
+    expect(rate.windowMs).toBe(FRAMES * 100 + 50);
+    expect(rate.push.ticks).toBe(FRAMES);
+    expect(rate.push.empty).toBe(1);
+    expect(rate.poll.ticks).toBe(Math.floor(rate.windowMs / PANO_PLUS_STATUS_POLL_MS));
+    // Every push carried a new `seq`; every poll repeated one.
+    expect(rate.push.newSeq).toBe(FRAMES);
+    expect(rate.poll.newSeq).toBe(0);
+    expect(rate.all.ticks).toBe(rate.push.ticks + rate.poll.ticks);
+    expect(rate.all.perS).toBeGreaterThanOrEqual(10);
+    expect(rate.all.worst1sTicks).toBeGreaterThanOrEqual(10);
+    expect(rate.foreignSession).toBe(0);
+    expect(rate.seq).toMatchObject({ first: 42, last: 42 + FRAMES - 1 });
+    r.unmount();
+  });
+
+  it('samples memory with the package\'s own reader through the hold and the finish', async () => {
+    let mb = 600;
+    const read = jest.fn(() => Promise.resolve((mb += 10)));
+    NM.IncrementalStitcher = { getMemoryFootprintMB: read };
+    const r = mount();
+    r.hold();
+    await settle();
+    for (let i = 0; i < 4; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await advance(250);
+    }
+    r.release();
+    await flush();
+    const m = lastTimeline().memory;
+    expect(m.reader).toBe('IncrementalStitcher.getMemoryFootprintMB');
+    expect(m.metric).toBe('phys_footprint');
+    expect(m.unavailable).toBeNull();
+    expect(m.samples).toBeGreaterThanOrEqual(4);
+    expect(m.failed).toBe(0);
+    // Every read the engine made was a sample, and the peak is the largest.
+    expect(m.samples).toBe(read.mock.calls.length);
+    const values = (m.series as Array<[number, number, string]>).map((row) => row[1]);
+    expect(m.peakMemoryMB).toBe(Math.max(...values));
+    expect(lastTimeline().peakMemoryMB).toBe(m.peakMemoryMB);
+    // The baseline at the hold, the edges, the periodic samples, the end.
+    const tags = (m.series as Array<[number, number, string]>).map((row) => row[2]);
+    expect(tags[0]).toBe('b');
+    expect(m.baselineMB).toBe(610);
+    expect(tags).toEqual(expect.arrayContaining(['b', 's', 'p', 'f', 'e']));
+    r.unmount();
+  });
+
+  it('⚑ with no memory reader the file is still written, and says NO READER — never 0', async () => {
+    const r = mount();
+    r.hold();
+    await settle();
+    await advance(1000);
+    r.release();
+    await flush();
+    const f = lastTimeline();
+    expect(f.memory.reader).toBeNull();
+    expect(f.memory.unavailable).toBe('no-reader');
+    expect(f.memory.samples).toBe(0);
+    expect(f.memory.failed).toBe(0);
+    expect(f.peakMemoryMB).toBeNull();
+    r.unmount();
+  });
+
+  it('⚑ with no expo-file-system the recorder is never armed: no memory read, no file', async () => {
+    // A host without the dep still sweeps (the base directory comes from
+    // native), but the file can never be written — so every read the recorder
+    // would issue is a bridge call for nothing, on Android on the same module
+    // thread as the status polls.
+    const efs = require('expo-file-system/legacy') as Record<string, unknown>;
+    const writeAsStringAsync = efs.writeAsStringAsync;
+    delete efs.writeAsStringAsync;
+    (NM.RNSSweepSession as Record<string, unknown>).documentDirectory =
+      'file:///var/mobile/Documents/';
+    const read = jest.fn(() => Promise.resolve(700));
+    NM.IncrementalStitcher = { getMemoryFootprintMB: read };
+    try {
+      const r = mount();
+      r.hold();
+      await settle();
+      expect(calls).toEqual(['start']);
+      for (let i = 0; i < 4; i += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        await advance(250);
+      }
+      r.release();
+      await flush();
+      expect(calls).toEqual(['start', 'stop']);
+      expect(read).not.toHaveBeenCalled();
+      expect(written).toEqual([]);
+      r.unmount();
+    } finally {
+      efs.writeAsStringAsync = writeAsStringAsync;
+    }
+  });
+
+  it('counts a poll answer where it ENTERS JS — null and not-running answers are counted, not filtered first', async () => {
+    // The poll's own guard drops these before `applyStatus`; the rate being
+    // measured includes them, so they are counted ahead of it.
+    let n = 0;
+    let finishing = false;
+    getStatusImpl = () => {
+      if (finishing) return Promise.resolve({ running: false });
+      n += 1;
+      // In turn: the bridge's no-session answer, a dict the coercion refuses
+      // (no `running`), and a live status.
+      const answers = [statusDict({ seq: 100 + n }), { running: false }, {}];
+      return Promise.resolve(answers[n % 3]);
+    };
+    const r = mount();
+    r.hold();
+    await settle();
+    // Answered in 100 ms steps, so each lands inside the window it was asked in.
+    for (let i = 0; i < 29; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await advance(100);
+    }
+    finishing = true;
+    r.release();
+    await flush();
+    // Polls at 500 … 2500 ms: not-running, null, live, not-running, null.
+    expect(Math.floor(2900 / PANO_PLUS_STATUS_POLL_MS)).toBe(5);
+    const poll = lastTimeline().statusRate.poll;
+    expect(poll.notRunning).toBe(2);
+    expect(poll.nulls).toBe(2);
+    expect(poll.ticks).toBe(1);
+    r.unmount();
+  });
+
+  it('keeps ONE memory read in flight: a slow read skips ticks, counted, and never piles calls up', async () => {
+    const pending: Array<(mb: number) => void> = [];
+    let hang = true;
+    const read = jest.fn(() => (hang
+      ? new Promise<number>((res) => { pending.push(res); })
+      : Promise.resolve(700)));
+    NM.IncrementalStitcher = { getMemoryFootprintMB: read };
+    const r = mount();
+    r.hold();
+    await settle();
+    // The two edge reads: the hold's baseline and the sweeping edge.
+    expect(read).toHaveBeenCalledTimes(2);
+    for (let i = 0; i < 4; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await advance(250);
+    }
+    // ONE periodic read, at 250 ms; the ticks at 500, 750 and 1000 found it
+    // unanswered and issued nothing.
+    expect(read).toHaveBeenCalledTimes(3);
+    hang = false;
+    await act(async () => {
+      for (const res of pending.splice(0)) res(650);
+    });
+    r.release();
+    await flush();
+    const m = lastTimeline().memory;
+    expect(m.inFlightSkipped).toBe(3);
+    expect(m.failed).toBe(0);
+    r.unmount();
+  });
+
+  it('records a release answer that lands AFTER the stop settled: answered, not seen during the finish', async () => {
+    // The answer lands after the effect that asked was torn down, and is still
+    // an answer native gave — so it is recorded ahead of that effect's guards.
+    let resolveStop!: (v: unknown) => void;
+    stopImpl = () => new Promise((res) => { resolveStop = res; });
+    const answers: Array<(v: unknown) => void> = [];
+    let finishing = false;
+    getStatusImpl = () => (finishing
+      ? new Promise((res) => { answers.push(res); })
+      : Promise.resolve({ running: false }));
+    const r = mount();
+    r.hold();
+    await settle();
+    finishing = true;
+    r.release();
+    await settle();
+    await advance(100);                          // the first release read
+    expect(answers).toHaveLength(1);
+    await act(async () => {                      // …and the stop settles first
+      resolveStop(await stopWithPack()());
+    });
+    await advance(20);
+    expect(answers).toHaveLength(2);             // the read after the settle
+    await act(async () => { answers[0]!({ running: false, cameraReleased: true }); });
+    await act(async () => { answers[1]!({ running: false, cameraReleased: true }); });
+    await flush();
+    const f = lastTimeline().finish;
+    expect(f.releasePoll.issued).toBe(1);
+    expect(f.releasePoll.answered).toBe(1);
+    expect(f.cameraReleasedSeenAtMs).toBeNull();
+    expect(f.releasedBySettle).toBe(true);
+    r.unmount();
+  });
+
+  it('⚑ a stitching edge whose effect runs AFTER the settle is in the file, because the host was told', async () => {
+    // THE INTERLEAVING. The release answer and the stop's resolve reach JS as
+    // two native callbacks, so the settle can land after the commit that
+    // raised `stitching` and before that commit's passive effect — which then
+    // still reports `stitching` to the host. React runs a component's
+    // children's passive effects before its own, so a CHILD of the engine's
+    // component stands in that gap: `Gap` settles the stop from its effect.
+    // A promise could not (its callbacks wait for the flush to end), so the
+    // fake `stop()` answers a thenable that runs its callbacks when told to.
+    class SyncThenable {
+      private cbs: Array<(v: unknown) => void> = [];
+      private done = false;
+      private value: unknown;
+      resolve(v: unknown): void {
+        this.done = true;
+        this.value = v;
+        for (const cb of this.cbs.splice(0)) cb(v);
+      }
+      then(onOk?: (v: unknown) => unknown): SyncThenable {
+        const next = new SyncThenable();
+        const run = (v: unknown): void => next.resolve(onOk != null ? onOk(v) : v);
+        if (this.done) run(this.value); else this.cbs.push(run);
+        return next;
+      }
+    }
+    const stop = new SyncThenable();
+    (NM.RNSSweepSession as Record<string, unknown>).stop = () => {
+      calls.push('stop');
+      return stop;
+    };
+    let releaseAnswered = false;
+    let finishing = false;
+    getStatusImpl = () => {
+      if (!finishing) return Promise.resolve({ running: false });
+      releaseAnswered = true;
+      return Promise.resolve({ running: false, cameraReleased: true });
+    };
+    const edges: boolean[] = [];
+    let gapFired = false;
+    function Gap(): null {
+      React.useEffect(() => {
+        if (!releaseAnswered || gapFired) return;
+        gapFired = true;
+        stop.resolve({
+          sessionDir: '/d/pp_1',
+          canvasPath: '/d/pp_1/canvas.jpg',
+          width: 5000, height: 600,
+          counts: { seen: 300, painted: 290 },
+          unpaintedRuns: [],
+          finalizeMs: 78,
+        });
+        // The effect's task runs after the settle's: a later instant.
+        jest.setSystemTime(Date.now() + 5);
+      });
+      return null;
+    }
+    const handle = React.createRef<SurfaceControlHandle>();
+    function Probe(): React.JSX.Element {
+      useSweepEngine({
+        onComplete: () => undefined,
+        onCancel: () => undefined,
+        onStitchingChange: (v) => { edges.push(v); },
+        hostPreviewLive: false,
+      }, handle, { enabled: true });
+      return <Gap />;
+    }
+    let t!: ReactTestRenderer;
+    act(() => { t = TestRenderer.create(<Probe />); });
+    await advance(PANO_PLUS_SWAP_GRACE_MS + 1);
+    act(() => { handle.current!.holdStart!(); });
+    await settle();
+    finishing = true;
+    act(() => { handle.current!.holdEnd!(); });
+    await settle();
+    expect(calls).toEqual(['start', 'stop']);
+    await advance(100);                          // the release read: `stitching`
+    await flush();
+    expect(gapFired).toBe(true);
+    expect(edges).toContain(true);
+    const f = lastTimeline().finish;
+    expect(f.stitchingReportedAtMs).toBe(f.stopSettledAtMs + 5);
+    expect(f.derived.cameraUnmountedDuringFinish).toBe(true);
+    expect(f.derived.orderViolations).toEqual(['settled-before-stitching']);
+    act(() => { t.unmount(); });
+  });
+
+  it('a release WHILE STARTING is written: stamped live, then finished, in that order, and not rated', async () => {
+    let deferredStart!: (v: unknown) => void;
+    startImpl = () => new Promise((resolve) => { deferredStart = resolve; });
+    const r = mount();
+    r.hold();
+    r.release();                                 // latched: native is still starting
+    // A clock that moves on every read, so the ORDER of two stamps taken in
+    // one synchronous call chain is observable. The frozen fake clock stamps
+    // both at one instant, and either order would pass.
+    const base = Date.now();
+    let reads = 0;
+    const now = jest.spyOn(Date, 'now').mockImplementation(() => base + (reads += 1));
+    try {
+      await act(async () => {
+        deferredStart({ sessionDir: '/d/pp_1', startedAtMs: 1, pluginAvailable: true });
+      });
+      await flush();
+    } finally {
+      now.mockRestore();
+    }
+    expect(calls).toEqual(['start', 'stop']);
+    const f = lastTimeline();
+    expect(f.finish.sweepingAtMs).toBeLessThan(f.finish.finishingAtMs);
+    expect(f.finish.finishingAtMs).toBeLessThan(f.finish.stopSettledAtMs);
+    expect(f.statusRate.windowMs).toBeLessThan(1000);
+    expect(f.statusRate.all.perS).toBeNull();
+    r.unmount();
+  });
+
+  // ── THE PATHS THAT WRITE NONE ────────────────────────────────────────────
+  // Only `finish()`'s settle writes; each of these ends the sweep some other
+  // way, as they write no HUD sidecar either.
+
+  it('an UNMOUNT mid-sweep writes nothing: its stop is not a finish', async () => {
+    const r = mount();
+    r.hold();
+    await settle();
+    r.frame(statusDict());
+    r.unmount();
+    await flush();
+    expect(calls).toEqual(['start', 'stop']);
+    expect(timelines()).toEqual([]);
+  });
+
+  it('an ENGINE SWITCH mid-sweep writes nothing: stopped and kept, but not a finish', async () => {
+    const r = mount();
+    r.hold();
+    await settle();
+    r.frame(statusDict());
+    r.setEnabled(false);
+    await flush();
+    expect(calls).toEqual(['start', 'stop']);
+    expect(timelines()).toEqual([]);
+    r.unmount();
+  });
+
+  it('a DEVICE REFUSAL writes nothing, and its finish reads nothing native for the dropped record', async () => {
+    let resolveStop!: (v: unknown) => void;
+    stopImpl = () => new Promise((res) => { resolveStop = res; });
+    const read = jest.fn(() => Promise.resolve(700));
+    NM.IncrementalStitcher = { getMemoryFootprintMB: read };
+    const r = mount({ onFailure: () => undefined });
+    r.hold();
+    await settle();
+    r.frame(statusDict({ vcDeviceRefusal: 'rotated-buffer' }));
+    await settle();
+    expect(calls).toEqual(['start', 'stop']);
+    // The refusal's own 'finishing' while native finalizes: the record was
+    // dropped with the refusal, so the sampler has nothing to read for.
+    const before = read.mock.calls.length;
+    for (let i = 0; i < 4; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await advance(250);
+    }
+    expect(read.mock.calls.length).toBe(before);
+    await act(async () => {
+      resolveStop(await stopWithPack()());
+    });
+    await flush();
+    expect(timelines()).toEqual([]);
     r.unmount();
   });
 });

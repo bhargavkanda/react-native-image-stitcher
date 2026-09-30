@@ -28,16 +28,26 @@ import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import { NativeModules, Platform } from 'react-native';
 import { VisionCameraProxy } from 'react-native-vision-camera';
 
+// `writeAsStringAsync` is a SINK so the sweep's timeline sidecar — the one
+// place the finish's ORDER is recorded rather than only rendered — can be read
+// back. A module-level global, because a `jest.mock` factory cannot close
+// over this file's own bindings.
 jest.mock('expo-file-system/legacy', () => ({
   documentDirectory: 'file:///data/files/',
   makeDirectoryAsync: () => Promise.resolve(),
   readAsStringAsync: () => Promise.resolve(''),
-  writeAsStringAsync: () => Promise.resolve(),
+  writeAsStringAsync: (uri: string, body: string) => {
+    (globalThis as unknown as { __finishOrderWritten: Array<unknown> }).__finishOrderWritten
+      .push({ uri, body });
+    return Promise.resolve();
+  },
   deleteAsync: () => Promise.resolve(),
   getInfoAsync: () => Promise.resolve({ exists: false }),
   readDirectoryAsync: () => Promise.resolve([]),
   copyAsync: () => Promise.resolve(),
 }), { virtual: true });
+const written: Array<{ uri: string; body: string }> = [];
+(globalThis as unknown as { __finishOrderWritten: unknown[] }).__finishOrderWritten = written;
 
 import { Camera } from '../../camera/Camera';
 import { CameraView } from '../../camera/CameraView';
@@ -60,8 +70,19 @@ const DEVICE = {
 };
 
 let released: boolean | undefined = false;
+/** Native's release STAMP — taken the first time a status reports the
+ *  release, and answered from then on, as the bridge's static is. */
+let releasedAtMs: number | null = null;
 let resolveStop: ((v: unknown) => void) | null = null;
 let sessionDir = '';
+
+/** What a finishing status answers about the release. An OLDER binary
+ *  (`released === undefined`) names neither key. */
+function releaseKeys(): Record<string, unknown> {
+  if (released === undefined) return {};
+  if (released && releasedAtMs == null) releasedAtMs = Date.now();
+  return { cameraReleased: released, cameraReleasedAtMs: released ? releasedAtMs : 0 };
+}
 
 beforeEach(() => {
   jest.useFakeTimers();
@@ -70,6 +91,8 @@ beforeEach(() => {
   vc.useCameraDevices = () => [DEVICE];
   proxy.initFrameProcessorPlugin = () => ({ call: () => undefined });
   released = false;
+  releasedAtMs = null;
+  written.length = 0;
   resolveStop = null;
   NM.RNSSweepSession = {
     start: (o: Record<string, unknown>) => {
@@ -86,7 +109,7 @@ beforeEach(() => {
     getStatus: () => Promise.resolve(
       resolveStop == null
         ? { running: true, sessionDir, seq: 1, painted: 5 }
-        : { running: false, cameraReleased: released },
+        : { running: false, ...releaseKeys() },
     ),
     setIdlePreview: () => Promise.resolve({ on: false }),
     getConstants: () => ({ documentDirectory: 'file:///data/files/', vcArmSupported: true }),
@@ -136,6 +159,16 @@ async function resolveFinish(): Promise<void> {
 }
 const overlayPhase = (t: ReactTestRenderer) =>
   t.root.findAllByType(CaptureStatusOverlay)[0]?.props.phase as string;
+
+/** The sweep's `host_sweep_timeline.json`, parsed — exactly one, in the
+ *  sweep's own session directory. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function timeline(): Record<string, any> {
+  const files = written.filter((w) => w.uri.endsWith('/host_sweep_timeline.json'));
+  expect(files.map((w) => w.uri)).toEqual([`file://${sessionDir}/host_sweep_timeline.json`]);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return JSON.parse(files[0]!.body) as Record<string, any>;
+}
 
 describe('M8 — a sweep\'s finish releases the camera natively BEFORE <Camera> unmounts it', () => {
   it('walks the table', async () => {
@@ -241,6 +274,71 @@ describe('M8 — a sweep\'s finish releases the camera natively BEFORE <Camera> 
     await tick(2000);
     expect(cameraMounted(tree)).toBe(true);
     expect(overlayPhase(tree)).toBe('idle');
+    // …and its timeline records exactly that: polls answered, no release
+    // seen, no stitching, no stamp — and an order with nothing broken in it.
+    await resolveFinish();
+    await tick(100);
+    const f = timeline().finish;
+    expect(f.releasePoll.answered).toBeGreaterThan(0);
+    expect(f.cameraReleasedSeenAtMs).toBeNull();
+    expect(f.stitchingReportedAtMs).toBeNull();
+    expect(f.nativeCameraReleasedAtMs).toBeNull();
+    expect(f.releasedBySettle).toBe(false);
+    expect(f.derived.cameraUnmountedDuringFinish).toBe(false);
+    expect(f.derived.orderOk).toBe(true);
+    act(() => { tree.unmount(); });
+  });
+
+  it('⚑ the finish is WRITTEN in the order it happened — finishing, release seen, stitching, settled', async () => {
+    const ref = React.createRef<any>();
+    let tree!: ReactTestRenderer;
+    act(() => {
+      tree = create(
+        <Camera ref={ref} engine="sweep" defaultCaptureSource="non-ar" panMode="both"
+          rectCrop={false} showPreview={false} />,
+      );
+    });
+    await tick(0);
+    await act(async () => { ref.current.startPanorama(); });
+    await tick(300);
+    // ⚠ ONE MORE SWEEPING TICK BEFORE THE STOP, and it is about the fake
+    // clock, not the engine. `tick` fires every interval inside one
+    // synchronous advance, so the polls it issues are ANSWERED at the
+    // advance's end — the same instant a stop called straight after stamps
+    // the finish, which the window (half-open) rightly counts as after it.
+    await tick(300);
+    await act(async () => { await ref.current.stopPanorama(); });
+    await tick(300);
+    released = true;
+    await tick(300);
+    expect(overlayPhase(tree)).toBe('stitching');
+    await resolveFinish();
+    await tick(100);
+    const t = timeline();
+    const f = t.finish;
+    expect(t.outcome).toBe('resolved');
+    expect(f.finishingAtMs).not.toBeNull();
+    expect(f.cameraReleasedSeenAtMs).not.toBeNull();
+    expect(f.stitchingReportedAtMs).not.toBeNull();
+    expect(f.finishingAtMs).toBeLessThanOrEqual(f.cameraReleasedSeenAtMs);
+    expect(f.cameraReleasedSeenAtMs).toBeLessThanOrEqual(f.stitchingReportedAtMs);
+    expect(f.stitchingReportedAtMs).toBeLessThanOrEqual(f.stopSettledAtMs);
+    // Native's own stamp, no later than the poll that saw it.
+    expect(f.nativeCameraReleasedAtMs).toBe(releasedAtMs);
+    expect(f.nativeCameraReleasedAtMs).toBeLessThanOrEqual(f.cameraReleasedSeenAtMs);
+    expect(f.releasedBySettle).toBe(true);
+    expect(f.finishingHeadline).toBe('Finishing the panorama…');
+    expect(f.derived.cameraUnmountedDuringFinish).toBe(true);
+    expect(f.derived.orderOk).toBe(true);
+    expect(f.derived.orderViolations).toEqual([]);
+    // THE STATUS RATE ON ANDROID'S VISION-CAMERA ARM: there is no push channel —
+    // the status reaches JS by the fast poll alone, and the file says which.
+    expect(t.platform).toBe('android');
+    expect(t.context.frameSource).toBe('host');
+    expect(t.context.statusPollMs).toBe(125);
+    expect(t.statusRate.push.ticks).toBe(0);
+    expect(t.statusRate.push.empty).toBe(0);
+    expect(t.statusRate.poll.ticks).toBeGreaterThan(0);
     act(() => { tree.unmount(); });
   });
 

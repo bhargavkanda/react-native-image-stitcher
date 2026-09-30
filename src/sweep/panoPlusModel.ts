@@ -155,6 +155,10 @@ function str(v: unknown, fallback = ''): string {
 function nullableStr(v: unknown): string | null {
   return typeof v === 'string' && v !== '' ? v : null;
 }
+/** A native wall-clock stamp: a finite positive epoch-ms number, else null. */
+function epochMsOrNull(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : null;
+}
 function rec(v: unknown): Record<string, unknown> | null {
   return v != null && typeof v === 'object' && !Array.isArray(v)
     ? (v as Record<string, unknown>)
@@ -456,6 +460,9 @@ export function coercePanoPlusStatus(raw: unknown): PanoPlusStatus | null {
     viewfinderNote: str(s.viewfinderNote),
     vcDeviceRefusal: nullableStr(s.vcDeviceRefusal),
     cameraReleased: s.cameraReleased === true,
+    // FAIL CLOSED: `0`, absent or not a finite positive number is "not
+    // reported", never a time — see the type.
+    cameraReleasedAtMs: epochMsOrNull(s.cameraReleasedAtMs),
     droppedQueue: num(s.droppedQueue),
     droppedPack: num(s.droppedPack),
     engineMs: num(s.engineMs),
