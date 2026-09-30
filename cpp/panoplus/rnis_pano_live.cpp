@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // rnis_pano_live.cpp — see the header for what this owns and, more
-// importantly, for what it deliberately does NOT own (threads).
+// importantly, for what it deliberately does NOT own (the frame thread).
 //
 // Every decision here has a twin in ios/RNISPanoCore.mm and the twin is named
 // in the comment, because the two must not drift: one operator sweeping on an
@@ -19,15 +19,27 @@
 #include <opencv2/imgproc.hpp>
 
 #include <sys/stat.h>
+#include <time.h>
+#if defined(__linux__)
+// Android is __linux__ too.  The writer's niceness and the ingest thread's
+// core sample are Linux facilities; the Mac host build compiles neither.
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstring>
+#include <deque>
+#include <functional>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace rnis {
@@ -133,6 +145,46 @@ double wallMs() {
                system_clock::now().time_since_epoch()).count();
 }
 
+/// CPU time THIS THREAD has consumed, in ms (NaN when the clock is refused,
+/// which `Samples::add` drops rather than recording a zero).
+///
+/// ⚠ THE NUMBER THAT SEPARATES THE THREE READINGS OF A SLOW INGEST. Wall time
+/// alone cannot tell "the work got bigger" from "the thread was waiting for a
+/// core" from "it ran on a slow core". Beside `ingestMs` this says which:
+/// cpu ≈ wall with both high is expensive work or a slow (little / throttled)
+/// core; cpu well below wall is a thread that was runnable and not running —
+/// contention. Process-wide CPU time cannot make that split.
+double threadCpuMs() {
+    struct timespec ts;
+    if (::clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) != 0) return NAN;
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1.0e6;
+}
+
+/// The core this thread is on right now, or -1 where that cannot be asked
+/// (the Mac host). The raw `getcpu` syscall rather than `sched_getcpu()`,
+/// which bionic declares only under _GNU_SOURCE.
+int currentCpu() {
+#if defined(__linux__) && defined(SYS_getcpu)
+    unsigned cpu = 0;
+    if (::syscall(SYS_getcpu, &cpu, nullptr, nullptr) == 0) return (int)cpu;
+#endif
+    return -1;
+}
+
+/// A timing block from four numbers, in `Samples::appendJson`'s shape, for
+/// the writer's reservoir (read out under ITS lock, so the Samples object
+/// itself never crosses a thread).
+void appendTimingJson(std::string& s, const char* key, double p50, double p99,
+                      double mx, long long n) {
+    kv(s, key);
+    s += "{";
+    kvNum(s, "p50", p50);
+    kvNum(s, "p99", p99);
+    kvNum(s, "max", mx);
+    kvInt(s, "n", n);
+    s += "}";
+}
+
 /// A bounded sample keeper.  Bounded because it lives for the whole sweep on a
 /// per-frame path: 4096 samples is ~2 minutes at 30 fps and 32 KB, and past
 /// that the OLDEST are dropped so the percentiles describe the recent sweep
@@ -174,7 +226,274 @@ private:
     double max_ = 0.0;
 };
 
+/// The production pack encode — the code that used to run inline in `ingest`.
+bool imwritePackFrame(const std::string& path, const cv::Mat& bgr, int quality,
+                      std::string* err) {
+    std::vector<int> params;
+    params.push_back(cv::IMWRITE_JPEG_QUALITY);
+    params.push_back(quality);
+    const bool ok = cv::imwrite(path, bgr, params);
+    if (!ok && err != nullptr) *err = "cv::imwrite returned false";
+    return ok;
+}
+
 }  // namespace
+
+// ════════════════════════════════════════════════════════════════════════════
+//  detail::PackWriter — the pack frames, off the ingest thread
+// ════════════════════════════════════════════════════════════════════════════
+//
+// ⚠ WHY THIS EXISTS. The encode used to run inside `ingest`, justified by a
+// comment that said a third thread "would need its own copy of `bgr`". It
+// would not: `bgr` is allocated fresh on every call and the engine only READS
+// it (FrameInput::bgr is `const cv::Mat*`, and the tail-flush reference it
+// keeps is shallow and read-only), so a refcounted handle outlives the call
+// with no copy at all — which is what iOS has always done. The premise was
+// false and the cost was real: a full-resolution software JPEG in front of
+// every next frame of a `PackFrames::All` sweep.
+//
+// The shape is the iOS pack queue's (bounded by OUTSTANDING frames, drop and
+// count, never a block) with the worker discipline of `PreviewPump` (one
+// std::thread, a mutex and a condition variable, idempotent stop, joined on
+// every exit, a catch-all around the only call that can throw).
+
+namespace detail {
+
+struct PackWriter::State {
+    mutable std::mutex      mu;
+    std::condition_variable cv;
+    std::deque<PackJob>     q;
+    std::thread             worker;
+    PackEncoder             encode;
+
+    bool   running  = false;
+    bool   stopping = false;
+    double stopDeadlineMs = 0.0;
+    bool   inFlight = false;
+
+    int  queueMax = 0;
+    int  nice = 0;
+    bool niceApplied = false;
+    bool started = false;
+
+    long long enqueued = 0, written = 0, failed = 0;
+    long long droppedQueueFull = 0, droppedAtStop = 0, bytes = 0;
+    int       highWater = 0;
+    Samples   writeMs;
+    std::string firstError;
+
+    void loop() {
+#if defined(__linux__) && defined(SYS_gettid)
+        // PER-THREAD on Linux: PRIO_PROCESS with a TID renices this thread
+        // alone, not the process. `nice` is written before the thread exists,
+        // so reading it here needs no lock; the result is published under it.
+        if (nice != 0) {
+            const long tid = ::syscall(SYS_gettid);
+            const bool ok = ::setpriority(PRIO_PROCESS, (id_t)tid, nice) == 0;
+            std::lock_guard<std::mutex> g(mu);
+            niceApplied = ok;
+        }
+#endif
+        std::unique_lock<std::mutex> lk(mu);
+        for (;;) {
+            cv.wait(lk, [this] { return !q.empty() || stopping; });
+            if (stopping && (q.empty() || nowMs() >= stopDeadlineMs)) {
+                // Out of budget, or nothing left: whatever is still queued is
+                // not written, and says so.
+                droppedAtStop += (long long)q.size();
+                q.clear();
+                return;
+            }
+            PackJob job = std::move(q.front());
+            q.pop_front();
+            inFlight = true;
+            lk.unlock();
+
+            bool ok = false;
+            std::string err;
+            const double t0 = nowMs();
+            try {
+                ok = encode ? encode(job.path, job.bgr, job.quality, &err)
+                            : imwritePackFrame(job.path, job.bgr, job.quality, &err);
+            } catch (const std::exception& e) {
+                ok = false;
+                err = std::string("pack frame encode threw: ") + e.what();
+            } catch (...) {
+                ok = false;
+                err = "pack frame encode threw an unknown native error";
+            }
+            const double ms = nowMs() - t0;
+            long long size = 0;
+            if (ok) {
+                struct stat st;
+                if (::stat(job.path.c_str(), &st) == 0) size = (long long)st.st_size;
+            }
+            // The frame's pixels go NOW, before the lock: if this was the last
+            // handle, the release frees ~6 MB and that is no work to hold a
+            // lock across.
+            job.bgr.release();
+
+            lk.lock();
+            inFlight = false;
+            writeMs.add(ms);
+            if (ok) {
+                ++written;
+                bytes += size;
+            } else {
+                // NOT swallowed: `framesWritten` must never overstate what is
+                // on disk or the pack lies about its own contents.
+                ++failed;
+                if (firstError.empty()) {
+                    firstError = err.empty() ? std::string("pack frame not written") : err;
+                }
+            }
+        }
+    }
+};
+
+PackWriter::PackWriter() : st_(new State()) {}
+
+PackWriter::~PackWriter() { stop(0.0); }
+
+bool PackWriter::start(int queueMax, PackEncoder encoder, int niceness,
+                       std::string* err) {
+    if (err != nullptr) err->clear();
+    State& S = *st_;
+    std::lock_guard<std::mutex> g(S.mu);
+    if (S.running || S.worker.joinable()) {
+        if (err != nullptr) *err = "the pack writer is already running";
+        return false;
+    }
+    S.encode = std::move(encoder);
+    S.queueMax = std::max(1, queueMax);
+    S.nice = niceness;
+    S.niceApplied = false;
+    S.stopping = false;
+    S.inFlight = false;
+    S.q.clear();
+    S.enqueued = S.written = S.failed = 0;
+    S.droppedQueueFull = S.droppedAtStop = S.bytes = 0;
+    S.highWater = 0;
+    S.writeMs = Samples();
+    S.firstError.clear();
+    try {
+        S.worker = std::thread([&S] { S.loop(); });
+    } catch (const std::exception& e) {
+        if (err != nullptr) *err = std::string("could not start the pack writer: ") + e.what();
+        return false;
+    } catch (...) {
+        if (err != nullptr) *err = "could not start the pack writer";
+        return false;
+    }
+    S.running = true;
+    S.started = true;
+    return true;
+}
+
+bool PackWriter::enqueue(PackJob&& job) {
+    State& S = *st_;
+    std::lock_guard<std::mutex> g(S.mu);
+    if (!S.running) {
+        ++S.droppedAtStop;
+        return false;
+    }
+    // ⚠ OUTSTANDING, not queued: the frame being encoded holds its 6 MB too,
+    // and a bound that ignored it would let the memory note in the header lie
+    // by one frame. The same count iOS's `packPending` keeps.
+    const int outstanding = (int)S.q.size() + (S.inFlight ? 1 : 0);
+    if (outstanding >= S.queueMax) {
+        ++S.droppedQueueFull;
+        return false;
+    }
+    S.q.push_back(std::move(job));
+    ++S.enqueued;
+    if (outstanding + 1 > S.highWater) S.highWater = outstanding + 1;
+    S.cv.notify_one();
+    return true;
+}
+
+void PackWriter::stop(double budgetMs) noexcept {
+    State& S = *st_;
+    std::thread t;
+    try {
+        std::lock_guard<std::mutex> g(S.mu);
+        if (!S.running && !S.worker.joinable()) return;
+        S.running = false;
+        S.stopping = true;
+        S.stopDeadlineMs = nowMs() + std::max(0.0, budgetMs);
+        t = std::move(S.worker);
+    } catch (...) {
+        return;
+    }
+    S.cv.notify_all();
+    if (t.joinable()) {
+        try { t.join(); } catch (...) {}
+    }
+    try {
+        std::lock_guard<std::mutex> g(S.mu);
+        // The worker drained or dropped the queue on its way out; this only
+        // matters if it never ran (a thread that could not be scheduled
+        // before the join is still a thread that ran its loop).
+        S.droppedAtStop += (long long)S.q.size();
+        S.q.clear();
+    } catch (...) {
+    }
+}
+
+void PackWriter::reset() noexcept {
+    stop(0.0);
+    State& S = *st_;
+    try {
+        std::lock_guard<std::mutex> g(S.mu);
+        S.started = false;
+        S.queueMax = 0;
+        S.nice = 0;
+        S.niceApplied = false;
+        S.enqueued = S.written = S.failed = 0;
+        S.droppedQueueFull = S.droppedAtStop = S.bytes = 0;
+        S.highWater = 0;
+        S.writeMs = Samples();
+        S.firstError.clear();
+    } catch (...) {
+    }
+}
+
+bool PackWriter::running() const noexcept {
+    try {
+        std::lock_guard<std::mutex> g(st_->mu);
+        return st_->running;
+    } catch (...) {
+        return false;
+    }
+}
+
+PackWriterStats PackWriter::stats(bool withTimings) const {
+    const State& S = *st_;
+    PackWriterStats o;
+    std::lock_guard<std::mutex> g(S.mu);
+    o.started = S.started;
+    o.queueMax = S.queueMax;
+    o.enqueued = S.enqueued;
+    o.written = S.written;
+    o.failed = S.failed;
+    o.droppedQueueFull = S.droppedQueueFull;
+    o.droppedAtStop = S.droppedAtStop;
+    o.bytes = S.bytes;
+    o.highWater = S.highWater;
+    o.outstanding = (int)S.q.size() + (S.inFlight ? 1 : 0);
+    o.niceRequested = S.nice;
+    o.niceApplied = S.niceApplied;
+    o.writeMsN = S.writeMs.count();
+    if (withTimings) {
+        o.writeMsP50 = S.writeMs.pct(0.50);
+        o.writeMsP99 = S.writeMs.pct(0.99);
+        o.writeMsMax = S.writeMs.max();
+    }
+    o.firstError = S.firstError;
+    return o;
+}
+
+}  // namespace detail
 
 // ════════════════════════════════════════════════════════════════════════════
 //  Impl
@@ -218,15 +537,43 @@ struct Session::Impl {
 
     // ── Counters ────────────────────────────────────────────────────────
     long long engineFrames = 0;
-    long long framesWritten = 0;
-    long long frameWriteFailed = 0;
-    long long droppedPack = 0;      // pack frames declined by the cap
-    long long packBytes = 0;
+    // The pack DECISION for every frame that reached the engine lands in
+    // exactly one of these or in the writer's own counters (the identity is
+    // written into meta.json's `pack` block): not wanted by the mode,
+    // skipped by the everyN cadence, declined by the cap, or handed to the
+    // writer — which then writes it, fails it, refuses it (queue full) or
+    // drops it at stop.
+    long long packNotWanted = 0;
+    long long packCadenceSkipped = 0;
+    long long droppedPackCap = 0;   // pack frames declined by the cap
+    long long packEnqueued = 0;     // the cap counts THESE: it bounds disk use
     bool      frameCapHit = false;
     long long convertFailed = 0;
     std::string firstError;
 
+    // ── The pack writer ─────────────────────────────────────────────────
+    // Started only when `packFrames != None`: a `None` sweep spawns no
+    // thread. `framesWritten`, `frameWriteFailed` and the byte count are the
+    // WRITER'S — they mean "on disk", so they lag the ingest by up to
+    // `packQueueMax` frames while the sweep runs and are final after
+    // `finalizeSweep` has stopped it.
+    detail::PackWriter packWriter;
+    bool packWriterArmed = false;
+    std::string packWriterStartError;
+
     Samples engineMs, previewMs, ingestMs;
+    // Per-stage ingest timings (A1.0). Each is recorded only when its stage
+    // RAN — a skipped stage is never a zero sample, the rule `previewMs`
+    // already follows. `packMs` is the hand-off to the writer, not the
+    // encode; the encode is the writer's own `writeMs`.
+    Samples convertMs, packMs, rowsMs;
+    // CPU time of the ingest thread across the same span as `ingestMs`.
+    Samples ingestCpuMs;
+    // Which core each ingest finished on (Linux/Android only). Tells a slow
+    // ingest on a little core from one on a big core that was contended.
+    static const int kCoreSlots = 32;
+    long long ingestCore[kCoreSlots] = {0};
+    long long ingestCoreUnknown = 0;
 
     // ── The live preview ────────────────────────────────────────────────
     // Owned wholesale by the pump: refresh throttle, render, coalesced atomic
@@ -273,7 +620,12 @@ struct Session::Impl {
 Session::Session() : impl_(new Impl()) {}
 
 Session::~Session() {
-    if (impl_ != nullptr) impl_->closeWriters();
+    if (impl_ != nullptr) {
+        // Budget 0: a destructor is a teardown, not a finish. Queued frames
+        // are counted as dropped and the in-flight encode is joined.
+        impl_->packWriter.stop(0.0);
+        impl_->closeWriters();
+    }
 }
 
 StartReport Session::start(const Options& opt) {
@@ -376,6 +728,24 @@ StartReport Session::start(const Options& opt) {
     S.previewArmed = S.preview.start(pc, &S.previewStartError);
     if (!S.previewArmed) S.noteError("preview pump: " + S.previewStartError);
 
+    // ── Start the pack writer — only when there will be pack frames ─────
+    // Same non-fatal policy as the pump: a writer that cannot start costs the
+    // pack its pixels, never the sweep. The sweep then runs as `None` (rows
+    // only) and says why in meta.json.
+    S.packWriterStartError.clear();
+    if (S.opt.packFrames != PackFrames::None) {
+        S.packWriterArmed = S.packWriter.start(opt.packQueueMax, opt.packEncoder,
+                                               opt.packWriterNice,
+                                               &S.packWriterStartError);
+        if (!S.packWriterArmed) {
+            S.noteError("pack writer: " + S.packWriterStartError);
+            S.opt.packFrames = PackFrames::None;
+        }
+    } else {
+        S.packWriter.reset();
+        S.packWriterArmed = false;
+    }
+
     S.startedWallMs = wallMs();
     S.startedMs = nowMs();
     S.running = true;
@@ -408,6 +778,7 @@ IngestReport Session::ingest(const unsigned char* nv21, size_t len,
     if (!S.running) return out;
 
     const double t0 = nowMs();
+    const double cpu0 = threadCpuMs();
 
     if (nv21 == nullptr || in.width <= 0 || in.height <= 0) {
         out.error = "null buffer or degenerate dimensions";
@@ -432,6 +803,7 @@ IngestReport Session::ingest(const unsigned char* nv21, size_t len,
 
     cv::Mat bgr, grayWork;
     rnis::pano::FrameOutcome row;
+    const double cv0 = nowMs();
     try {
         // ── Conversion ──────────────────────────────────────────────────
         // `bgr` is allocated FRESH (cvtColor into an empty Mat allocates) and
@@ -461,6 +833,9 @@ IngestReport Session::ingest(const unsigned char* nv21, size_t len,
         S.noteError(out.error);
         return out;
     }
+    // A1.0 — NV21→BGR into a fresh full-resolution Mat plus the INTER_AREA
+    // luma resize: the one stage of the ingest that was never timed.
+    S.convertMs.add(nowMs() - cv0);
 
     rnis::pano::FrameInput fi;
     fi.bgr = &bgr;
@@ -537,46 +912,44 @@ IngestReport Session::ingest(const unsigned char* nv21, size_t len,
     }
 
     // ── Pack frame ──────────────────────────────────────────────────────
-    // On the SAME thread as the engine, deliberately: a third thread would
-    // need its own copy of `bgr` (6.2 MB at 1920×1080) to outlive this call,
-    // and the memory budget in the header does not have room for a queue of
-    // them.  The cost is throughput, which is why `PackFrames::None` is the
-    // Android default and why choosing `All` is documented as costing frame
-    // rate rather than being free.
+    // HANDED OFF, NOT ENCODED HERE. The encode runs on `detail::PackWriter`'s
+    // own worker: `bgr` was allocated fresh for this frame and nothing writes
+    // into it again, so the job carries a SHALLOW, refcounted handle — no
+    // copy, the iOS hand-off. What stays on this thread is the decision and a
+    // push onto a bounded queue.
+    //
+    // ⚠ STILL BELOW EVERY EARLY RETURN. A frame the engine never saw (null or
+    // short buffer, a conversion or an engine that threw) must not get a
+    // JPEG, because it gets no track row either — and a JPEG with no row is
+    // invisible to a row-driven replay.
     const bool wantFrame =
         S.opt.packFrames == PackFrames::All ||
         (S.opt.packFrames == PackFrames::Painted && out.painted);
-    if (wantFrame) {
+    if (!wantFrame) {
+        ++S.packNotWanted;
+    } else {
         const int everyN = S.opt.packFrameEveryN > 0 ? S.opt.packFrameEveryN : 1;
         if ((in.seq % everyN) != 0) {
-            // cadence, not a drop
-        } else if (S.framesWritten >= (long long)S.opt.packMaxFrames) {
-            ++S.droppedPack;
+            // Cadence, not a drop — but COUNTED, or the pack identity cannot
+            // close on an everyN > 1 sweep.
+            ++S.packCadenceSkipped;
+        } else if (S.packEnqueued >= (long long)S.opt.packMaxFrames) {
+            // Counted against what was HANDED OVER, so the cap still bounds
+            // the disk the sweep can use whatever the writer does with them.
+            ++S.droppedPackCap;
             S.frameCapHit = true;
         } else {
+            const double pk0 = nowMs();
             char name[64];
             std::snprintf(name, sizeof(name), "frame_%06lld.jpg", (long long)in.seq);
-            const std::string path = joinPath(S.framesDir, name);
-            bool wrote = false;
-            try {
-                std::vector<int> params;
-                params.push_back(cv::IMWRITE_JPEG_QUALITY);
-                params.push_back(S.opt.packFrameQuality);
-                wrote = cv::imwrite(path, bgr, params);
-            } catch (const cv::Exception& e) {
-                S.noteError(std::string("pack frame: ") + e.what());
-            } catch (...) {
-                S.noteError("pack frame: unknown native error");
-            }
-            if (wrote) {
-                ++S.framesWritten;
-                struct stat st;
-                if (::stat(path.c_str(), &st) == 0) S.packBytes += (long long)st.st_size;
-            } else {
-                // NOT swallowed: `framesWritten` must never overstate what is
-                // on disk or the pack lies about its own contents.
-                ++S.frameWriteFailed;
-            }
+            detail::PackJob job;
+            job.path = joinPath(S.framesDir, name);
+            job.bgr = bgr;   // shallow: see above
+            job.quality = S.opt.packFrameQuality;
+            job.seq = in.seq;
+            // A refusal (queue full) is counted by the writer itself.
+            if (S.packWriter.enqueue(std::move(job))) ++S.packEnqueued;
+            S.packMs.add(nowMs() - pk0);
         }
     }
 
@@ -599,6 +972,10 @@ IngestReport Session::ingest(const unsigned char* nv21, size_t len,
     // a writer-local counter, because it is the ONLY join between a row and
     // its pixels.  The tail-flush row is ledger-only and keeps its reserved
     // seq of -1; nothing here may emit it.
+    //
+    // Both rows stay SYNCHRONOUS on this thread, unlike the pack frame: their
+    // ORDER is the replay join and each is ~1 KB. `rowsMs` times the pair.
+    const double rw0 = nowMs();
     if (S.trackFp != nullptr) {
         replay::TrackRow tr;
         tr.seq = in.seq;
@@ -626,9 +1003,17 @@ IngestReport Session::ingest(const unsigned char* nv21, size_t len,
         // mid-sweep must not cost the ledger.  30 rows is ~1 s at 30 fps.
         if ((++S.ledgerRows % 30) == 0) std::fflush(S.ledgerFp);
     }
+    S.rowsMs.add(nowMs() - rw0);
 
     out.totalMs = nowMs() - t0;
     S.ingestMs.add(out.totalMs);
+    // The same span, in THIS THREAD's CPU time — see `threadCpuMs`.
+    S.ingestCpuMs.add(threadCpuMs() - cpu0);
+    {
+        const int core = currentCpu();
+        if (core >= 0 && core < Impl::kCoreSlots) ++S.ingestCore[core];
+        else ++S.ingestCoreUnknown;
+    }
 
     // ── Status snapshot ─────────────────────────────────────────────────
     // Built here, cached, and handed to whichever thread polls — the Android
@@ -791,8 +1176,16 @@ void Session::appendStatus(std::string& s, const FrameOutcome* row) const {
     kvBool(s, "previewArmed", S.previewArmed);
 
     kvInt(s, "droppedQueue", 0);   // the CALLER owns backpressure; see below
-    kvInt(s, "droppedPack", S.droppedPack);
-    kvInt(s, "framesWritten", S.framesWritten);
+    // PACK WRITES THAT WILL NOT REACH DISK, whichever gate declined them: the
+    // cap, a full writer queue, or the stop. `framesWritten` is ON DISK and
+    // so LAGS the ingest by up to `packQueueMax` frames while the writer
+    // works — meta.json, written after the writer is stopped, is the final
+    // word. Cheap counters only: this is rebuilt on every ingest.
+    {
+        const detail::PackWriterStats pw = S.packWriter.stats(false);
+        kvInt(s, "droppedPack", S.droppedPackCap + pw.droppedQueueFull + pw.droppedAtStop);
+        kvInt(s, "framesWritten", pw.written);
+    }
     kvInt(s, "convertFailed", S.convertFailed);
     kv(s, "abort");
     if (st.abortReason.empty()) s += "null"; else jstr(s, st.abortReason);
@@ -852,6 +1245,17 @@ std::string Session::finalizeSweep(bool* empty) {
     }
     const double f0 = nowMs();
     S.running = false;
+
+    // ── DRAIN THE PACK WRITER FIRST ─────────────────────────────────────
+    // Before anything reads a pack count: the summary and meta.json below
+    // must describe what is ON DISK, not what was queued. 1500 ms is ~20
+    // encodes at 1080p against a queue of `packQueueMax` (3 by default), so
+    // in practice it is a full drain; whatever it could not reach is counted
+    // as `droppedAtStop` rather than silently missing. This runs on the
+    // caller's finalize thread (never the NativeModules queue — see the
+    // header), inside its 12 s join budget.
+    S.packWriter.stop(1500.0);
+    const detail::PackWriterStats pw = S.packWriter.stats(true);
 
     std::string s;
     s += "{";
@@ -1217,6 +1621,8 @@ std::string Session::finalizeSweep(bool* empty) {
     S.engineMs.appendJson(s, "engineMs");
     S.previewMs.appendJson(s, "previewMs");
     S.ingestMs.appendJson(s, "ingestMs");
+    // A1.0 — where the rest of `ingestMs` goes, and what it cost in CPU.
+    appendStageTimings(s, pw);
     // `arThreadUs` is an ARKit-arm field with no Android producer.  Emitted as
     // an EMPTY sample block (n: 0) rather than omitted, so the JS shape is one
     // schema and a reader can tell "not measured here" from "measured at zero".
@@ -1276,20 +1682,24 @@ std::string Session::finalizeSweep(bool* empty) {
 
     // ⚠ `droppedQueue` IS STRUCTURALLY ZERO HERE and that is not a claim that
     // nothing was dropped.  Backpressure lives in the CAPTURE ARM on this leg
-    // (the recorder's single-in-flight gate), so the honest count is the
-    // caller's `droppedBusy` and the caller merges it into this summary.  A
-    // zero written by the party that cannot see the drops would be a lie the
-    // shape of a measurement.
+    // (the recorder's single-in-flight gate, the plugin arms' latest-wins
+    // slots), so the honest count is the caller's and the caller merges it
+    // into this summary.  A zero written by the party that cannot see the
+    // drops would be a lie the shape of a measurement.
     kvInt(s, "droppedQueue", 0);
-    kvInt(s, "droppedPack", S.droppedPack);
-    kvInt(s, "framesWritten", S.framesWritten);
+    // Every pack write that did not reach disk for a reason other than a
+    // failed encode — the cap, a full writer queue, the stop. Split below.
+    kvInt(s, "droppedPack", S.droppedPackCap + pw.droppedQueueFull + pw.droppedAtStop);
+    kvInt(s, "framesWritten", pw.written);
     // The REPLAY INPUT's row count.  A COUNT, not a presence: `trackPath` is
     // reported unconditionally (on the Camera2 arm the file exists and the
     // host wrote it), so only this number distinguishes "this layer wrote N
     // rows" from "this layer wrote nothing".
     kvInt(s, "trackRows", S.trackRows);
-    kvInt(s, "frameWriteFailed", S.frameWriteFailed);
-    kvInt(s, "packBytes", S.packBytes);
+    kvInt(s, "frameWriteFailed", pw.failed);
+    kvInt(s, "packBytes", pw.bytes);
+    // A1.1 — the writer's own ledger, flat. See `appendPackCounts`.
+    appendPackCounts(s, pw);
     kvInt(s, "intrinsicsRescaled", 0);
     kvBool(s, "packFrameCapHit", S.frameCapHit);
     kvInt(s, "convertFailed", S.convertFailed);
@@ -1313,7 +1723,7 @@ std::string Session::finalizeSweep(bool* empty) {
     s += "}";
 
     writeMeta(st, holes, env, haveCanvas ? canvas.cols : 0,
-              haveCanvas ? canvas.rows : 0, cropLo, cropHi, sweepMs, pv);
+              haveCanvas ? canvas.rows : 0, cropLo, cropHi, sweepMs, pv, pw);
 
     // The pump is joined only NOW: `flush` above and `writeMeta` below both
     // read it, and stopping it earlier would publish the counters of a worker
@@ -1327,11 +1737,56 @@ std::string Session::finalizeSweep(bool* empty) {
     return s;
 }
 
+void Session::appendStageTimings(std::string& s,
+                                 const detail::PackWriterStats& pw) const {
+    const Impl& S = *impl_;
+    // A1.0 — `ingestMs` split into its stages, so a slow ingest can be
+    // attributed from the pack instead of inferred: the conversion, the pack
+    // hand-off, the two rows. The engine and the preview already had theirs.
+    S.convertMs.appendJson(s, "convertMs");
+    S.packMs.appendJson(s, "packMs");
+    S.rowsMs.appendJson(s, "rowsMs");
+    // The encode that used to be inside `ingestMs`, now on the writer.
+    appendTimingJson(s, "packWriteMs", pw.writeMsP50, pw.writeMsP99,
+                     pw.writeMsMax, pw.writeMsN);
+    // THE INGEST THREAD'S CPU TIME over the `ingestMs` span. Read the two
+    // together: cpu ≈ wall is work (or a slow core); cpu << wall is a
+    // runnable thread that was not running.
+    S.ingestCpuMs.appendJson(s, "ingestCpuMs");
+    // Ingests per core, by index (Linux/Android; empty on a host that cannot
+    // say). Which indices are the big cores is the SoC's fact, not this
+    // file's: read each core's cpufreq/cpuinfo_max_freq on the device.
+    kv(s, "ingestCores"); s += "[";
+    int last = -1;
+    for (int i = 0; i < Impl::kCoreSlots; ++i) if (S.ingestCore[i] > 0) last = i;
+    for (int i = 0; i <= last; ++i) {
+        if (i) s += ",";
+        jint(s, S.ingestCore[i]);
+    }
+    s += "]";
+    kvInt(s, "ingestCoreUnknown", S.ingestCoreUnknown);
+}
+
+void Session::appendPackCounts(std::string& s,
+                               const detail::PackWriterStats& pw) const {
+    const Impl& S = *impl_;
+    kvBool(s, "packWriterStarted", pw.started);
+    kvInt(s, "packQueueMax", pw.queueMax);
+    kvInt(s, "packEnqueued", pw.enqueued);
+    kvInt(s, "droppedQueueFull", pw.droppedQueueFull);
+    kvInt(s, "droppedAtStop", pw.droppedAtStop);
+    kvInt(s, "droppedPackCap", S.droppedPackCap);
+    kvInt(s, "packCadenceSkipped", S.packCadenceSkipped);
+    kvInt(s, "packNotWanted", S.packNotWanted);
+    kvInt(s, "packQueueHighWater", pw.highWater);
+}
+
 void Session::writeMeta(const SessionStats& st,
                         const std::vector<std::pair<int, int> >& holes,
                         const std::vector<std::pair<int, int> >& env,
                         int outW, int outH, int cropLo, int cropHi,
-                        double sweepMs, const android::PreviewSnapshot& pv) {
+                        double sweepMs, const android::PreviewSnapshot& pv,
+                        const detail::PackWriterStats& pw) {
     Impl& S = *impl_;
     std::string m;
     m += "{";
@@ -1399,15 +1854,43 @@ void Session::writeMeta(const SessionStats& st,
     kvInt(m, "frameEveryN", S.opt.packFrameEveryN);
     kvInt(m, "frameQuality", S.opt.packFrameQuality);
     kvInt(m, "maxFrames", S.opt.packMaxFrames);
-    kvInt(m, "framesWritten", S.framesWritten);
+    // ON DISK — read after the writer was stopped, so final.
+    kvInt(m, "framesWritten", pw.written);
     // The REPLAY INPUT's row count.  A COUNT, not a presence: `trackPath` is
     // reported unconditionally (on the Camera2 arm the file exists and the
     // host wrote it), so only this number distinguishes "this layer wrote N
     // rows" from "this layer wrote nothing".
     kvInt(m, "trackRows", S.trackRows);
-    kvInt(m, "frameWriteFailed", S.frameWriteFailed);
+    kvInt(m, "frameWriteFailed", pw.failed);
     kvBool(m, "frameCapHit", S.frameCapHit);
-    kvInt(m, "bytes", S.packBytes);
+    kvInt(m, "bytes", pw.bytes);
+    // A1.1 — the async writer. `queueMax` counts the frame being encoded.
+    kvInt(m, "queueMax", pw.queueMax);
+    kvInt(m, "enqueued", pw.enqueued);
+    kvInt(m, "droppedQueueFull", pw.droppedQueueFull);
+    kvInt(m, "droppedAtStop", pw.droppedAtStop);
+    kvInt(m, "droppedCap", S.droppedPackCap);
+    kvInt(m, "cadenceSkipped", S.packCadenceSkipped);
+    kvInt(m, "notWanted", S.packNotWanted);
+    kvInt(m, "queueHighWater", pw.highWater);
+    appendTimingJson(m, "writeMs", pw.writeMsP50, pw.writeMsP99, pw.writeMsMax, pw.writeMsN);
+    kvBool(m, "writerStarted", pw.started);
+    kvStr(m, "writerStartError", S.packWriterStartError);
+    kvInt(m, "writerNice", pw.niceRequested);
+    kvBool(m, "writerNiceApplied", pw.niceApplied);
+    kv(m, "writerFirstError");
+    if (pw.firstError.empty()) m += "null"; else jstr(m, pw.firstError);
+    // THE IDENTITY THIS BLOCK IS READ WITH. Every frame that reached the
+    // engine lands in exactly one bucket, whatever the mode or the cadence.
+    kvInt(m, "engineFrames", S.engineFrames);
+    kvStr(m, "identity", std::string(
+        "engineFrames == framesWritten + frameWriteFailed + droppedQueueFull + "
+        "droppedAtStop + droppedCap + cadenceSkipped + notWanted. On 'all' with "
+        "frameEveryN 1, notWanted and cadenceSkipped are 0 (and engineFrames is "
+        "trackRows when this layer writes the track). droppedQueueFull > 0 "
+        "means the WRITER fell behind: the pack "
+        "lost those JPEGs, the sweep lost nothing, and replay names each gap "
+        "(framesMissing)."));
     m += "}";
 
     kv(m, "preview"); m += "{";
@@ -1453,6 +1936,7 @@ void Session::writeMeta(const SessionStats& st,
     S.engineMs.appendJson(m, "engineMs");
     S.previewMs.appendJson(m, "previewMs");
     S.ingestMs.appendJson(m, "ingestMs");
+    appendStageTimings(m, pw);
 
     // Verbatim, unparsed: the capture arm's own evidence (which camera, which
     // basis, what the AE lock read back).  This session cannot know any of it
@@ -1495,6 +1979,11 @@ void Session::cancel() {
     // whether a publish happened to be in flight.
     S.preview.stop();
     S.previewArmed = false;
+    // The pack writer, with NO drain budget: cancel is the cheap exit, and a
+    // teardown on the UI thread has 1 s for everything. Frames still queued
+    // are counted as dropped; the one being encoded completes and is joined
+    // (one encode, ~25-50 ms at 1080p). Idempotent, like the pump's stop.
+    S.packWriter.stop(0.0);
     // FILES ARE KEPT.  iOS's cancel deletes the session directory because its
     // only caller is an operator abandoning a sweep.  On Android the ownerless
     // teardowns (module invalidate, host destroy) reach here too, and deleting

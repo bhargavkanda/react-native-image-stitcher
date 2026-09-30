@@ -420,8 +420,9 @@ target_link_libraries(rnis_pano_android_preview PUBLIC Threads::Threads)
 # cpp/rnis_pano_live.{hpp,cpp} is everything RNISPanoCore.mm does that is NOT
 # Objective-C: engine lifecycle, pixel conversion, per-frame ingest, the ledger,
 # canvas.jpg, meta.json, the status snapshot and the finalize summary.  It holds
-# NO threads (the caller owns those, and the preview pump owns its own), which
-# is exactly what makes it runnable here with no camera and no JNI.
+# NO frame thread (the caller owns that; the preview pump and the pack writer
+# own theirs, each behind an injectable encode), which is exactly what makes it
+# runnable here with no camera and no JNI.
 #
 # That is the point of the split.  On iOS the same logic needs a device, an
 # ARKit session and a camera to execute one line of, and the defects it has

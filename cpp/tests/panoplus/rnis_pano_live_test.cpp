@@ -9,9 +9,10 @@
 // defects no suite could reach: on iOS the equivalent logic lives inline in
 // `RNISPanoCore.mm`, which needs a device, an ARKit session and a camera to
 // execute one line of. `cpp/rnis_pano_live.{hpp,cpp}` exists so the Android
-// twin of that seam is a plain C++ object with no threads and no platform
+// twin of that seam is a plain C++ object with no frame thread and no platform
 // dependency — which means these are runnable today, on a Mac, before the
-// phone is ever plugged in.
+// phone is ever plugged in. (Its two owned workers — the preview pump and the
+// pack writer — take an injectable encode, so they are too.)
 //
 // They assert the things a device test could not tell you apart:
 //
@@ -34,18 +35,24 @@
 #include <gtest/gtest.h>
 
 #include <opencv2/core.hpp>
+#include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <mutex>
 #include <set>
 #include <stdexcept>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -119,7 +126,67 @@ live::Options optionsFor(const std::string& dir) {
     // The preview is exercised by its own suite
     // (rnis_pano_android_preview_test.cpp); here it is left at its defaults so
     // these tests measure the SESSION and not the pump.
+    //
+    // ⚠ AND THE PACK WRITER'S QUEUE IS MADE DEEP, deliberately. The encode is
+    // ASYNC now and drops a frame when `packQueueMax` are outstanding, so on a
+    // slow CI host back-to-back ingests could fill the production default of 3
+    // before the worker dequeues the first — and every test below that counts
+    // JPEGs would be a race. The drop-on-full behaviour has its OWN tests
+    // (PanoLivePackWriter.*), which set the bound they are about.
+    o.packQueueMax = 64;
     return o;
+}
+
+/// A latch for holding an encode: `wait()` blocks until `open()`.
+struct Latch {
+    std::mutex mu;
+    std::condition_variable cv;
+    bool isOpen = false;
+    void open() {
+        { std::lock_guard<std::mutex> g(mu); isOpen = true; }
+        cv.notify_all();
+    }
+    bool wait(int ms) {
+        std::unique_lock<std::mutex> lk(mu);
+        return cv.wait_for(lk, std::chrono::milliseconds(ms), [this] { return isOpen; });
+    }
+};
+
+double msSince(std::chrono::steady_clock::time_point t0) {
+    return std::chrono::duration<double, std::milli>(
+               std::chrono::steady_clock::now() - t0).count();
+}
+
+/// A small BGR frame for the writer's own tests.
+cv::Mat bgrFrame(int w, int h, unsigned char v) {
+    return cv::Mat(h, w, CV_8UC3, cv::Scalar(v, v, v));
+}
+
+/// The integer after `"key":` in `json` (first occurrence), or -1.
+long long jsonInt(const std::string& json, const std::string& key) {
+    const std::string k = "\"" + key + "\":";
+    const size_t at = json.find(k);
+    if (at == std::string::npos) return -1;
+    return std::atoll(json.c_str() + at + k.size());
+}
+
+/// The `n` of the sample block `"key":{…,"n":N}`, or -1.
+long long sampleN(const std::string& json, const std::string& key) {
+    const std::string k = "\"" + key + "\":{";
+    const size_t at = json.find(k);
+    if (at == std::string::npos) return -1;
+    const size_t end = json.find('}', at);
+    const size_t n = json.find("\"n\":", at);
+    if (n == std::string::npos || n > end) return -1;
+    return std::atoll(json.c_str() + n + 4);
+}
+
+/// The p50 of the sample block `"key":{"p50":X,…}`, or -1.
+double sampleP50(const std::string& json, const std::string& key) {
+    const std::string k = "\"" + key + "\":{\"p50\":";
+    const size_t at = json.find(k);
+    if (at == std::string::npos) return -1.0;
+    return std::atof(json.c_str() + at + k.size());
 }
 
 }  // namespace
@@ -716,6 +783,11 @@ TEST(PanoLiveSession, PackFramesNoneWritesNoJpegAndStillLedgersEveryFrame) {
     bool empty = false;
     const std::string summary = s.finalizeSweep(&empty);
     EXPECT_NE(summary.find("\"framesWritten\":0"), std::string::npos);
+    // A `None` sweep spawns NO writer thread and hands it nothing: the async
+    // writer must cost a frame-less sweep exactly zero.
+    EXPECT_NE(summary.find("\"packWriterStarted\":false"), std::string::npos) << summary;
+    EXPECT_EQ(jsonInt(summary, "packEnqueued"), 0);
+    EXPECT_EQ(jsonInt(summary, "packNotWanted"), 5);
     // The engine's own decision trace survives a frame-less pack — which is the
     // whole argument for defaulting Android to "none": the ROWS are the cheap
     // half of a replay twin and the pixels are the expensive one.
@@ -736,12 +808,17 @@ TEST(PanoLiveSession, PackFramesAllWritesOneJpegPerIngestedFrame) {
         const std::vector<unsigned char> f = makeNv21(w, h, i * 6);
         ASSERT_TRUE(s.ingest(f.data(), f.size(), frameAt(w, h, i, 1.0e9 + i * 33.0e6)).ran);
     }
-    EXPECT_TRUE(exists(start.framesDir + "/frame_000000.jpg"));
-    EXPECT_TRUE(exists(start.framesDir + "/frame_000002.jpg"));
 
     bool empty = false;
     const std::string summary = s.finalizeSweep(&empty);
+    // ⚠ ASSERTED AFTER FINALIZE, and the order is the point: the encode is
+    // ASYNC, so a file checked straight after `ingest` returns is a race with
+    // the writer. `finalizeSweep` drains it before it reports.
+    EXPECT_TRUE(exists(start.framesDir + "/frame_000000.jpg"));
+    EXPECT_TRUE(exists(start.framesDir + "/frame_000002.jpg"));
     EXPECT_NE(summary.find("\"framesWritten\":3"), std::string::npos) << summary;
+    EXPECT_EQ(jsonInt(summary, "packEnqueued"), 3);
+    EXPECT_EQ(jsonInt(summary, "droppedQueueFull"), 0);
 }
 
 TEST(PanoLiveSession, ThePackFrameCapIsRecordedRatherThanSilent) {
@@ -764,6 +841,370 @@ TEST(PanoLiveSession, ThePackFrameCapIsRecordedRatherThanSilent) {
     // mystery about the camera.
     EXPECT_NE(summary.find("\"packFrameCapHit\":true"), std::string::npos) << summary;
     EXPECT_NE(summary.find("\"droppedPack\":3"), std::string::npos) << summary;
+    // The cap now counts frames HANDED TO THE WRITER, not frames on disk —
+    // which is what still makes it a bound on disk use while the writes are
+    // in flight. Split out, so a cap drop never reads as a writer drop.
+    EXPECT_EQ(jsonInt(summary, "packEnqueued"), 2);
+    EXPECT_EQ(jsonInt(summary, "droppedPackCap"), 3);
+    EXPECT_EQ(jsonInt(summary, "droppedQueueFull"), 0);
+}
+
+// ── A1.1 — the pack writer, alone ───────────────────────────────────────────
+//
+// The encode used to run inline in `ingest`, in front of every next frame on
+// a `PackFrames::All` sweep. It now runs on `detail::PackWriter`, and these pin
+// the four properties that move makes load-bearing: the ingest thread never
+// waits on it, the bound is real and every refusal is counted, a stop is
+// bounded, and the frame it holds is the caller's frame — kept alive by the
+// refcount, never copied.
+
+TEST(PanoLivePackWriter, AFullQueueDropsCountsAndNeverBlocks) {
+    Latch gate;
+    std::atomic<int> began(0);
+    live::detail::PackWriter w;
+    std::string err;
+    // queueMax 2 counts the frame BEING ENCODED: one in flight + one queued.
+    ASSERT_TRUE(w.start(2, [&](const std::string&, const cv::Mat&, int, std::string*) {
+        ++began;
+        gate.wait(5000);
+        return true;
+    }, 0, &err)) << err;
+
+    live::detail::PackJob j1; j1.path = "a"; j1.bgr = bgrFrame(8, 8, 1);
+    ASSERT_TRUE(w.enqueue(std::move(j1)));
+    for (int i = 0; i < 500 && began.load() == 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    ASSERT_EQ(began.load(), 1) << "#1 never reached the encoder";
+    live::detail::PackJob j2; j2.path = "b"; j2.bgr = bgrFrame(8, 8, 2);
+    ASSERT_TRUE(w.enqueue(std::move(j2)));
+
+    // #3 finds two outstanding and is REFUSED — at once, while #1's encode is
+    // still held. A blocking enqueue would sit here for the latch's 5 s.
+    live::detail::PackJob j3; j3.path = "c"; j3.bgr = bgrFrame(8, 8, 3);
+    const auto t0 = std::chrono::steady_clock::now();
+    EXPECT_FALSE(w.enqueue(std::move(j3)));
+    EXPECT_LT(msSince(t0), 50.0) << "enqueue must never wait on an encode";
+    live::detail::PackWriterStats st = w.stats();
+    EXPECT_EQ(st.droppedQueueFull, 1);
+    EXPECT_EQ(st.outstanding, 2);
+    EXPECT_EQ(st.highWater, 2);
+    // The niceness knob defaults to "inherit": nothing is reniced unasked.
+    EXPECT_EQ(st.niceRequested, 0);
+    EXPECT_FALSE(st.niceApplied);
+
+    gate.open();
+    w.stop(2000.0);
+    st = w.stats();
+    EXPECT_EQ(st.written, 2);
+    EXPECT_EQ(st.enqueued, 2);
+    EXPECT_EQ(st.droppedAtStop, 0);
+    EXPECT_EQ(st.outstanding, 0);
+    EXPECT_EQ(st.writeMsN, 2);
+}
+
+TEST(PanoLivePackWriter, StopDrainsWithinBudgetAndCountsTheRest) {
+    std::atomic<int> began(0);
+    live::detail::PackWriter w;
+    std::string err;
+    ASSERT_TRUE(w.start(8, [&](const std::string&, const cv::Mat&, int, std::string*) {
+        ++began;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        return true;
+    }, 0, &err)) << err;
+    for (int i = 0; i < 3; ++i) {
+        live::detail::PackJob j; j.path = "f"; j.bgr = bgrFrame(8, 8, (unsigned char)i);
+        ASSERT_TRUE(w.enqueue(std::move(j)));
+    }
+    for (int i = 0; i < 500 && began.load() == 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_GE(began.load(), 1);
+
+    // Budget 0 — the cancel path: the encode in flight completes and is
+    // JOINED, everything behind it is dropped and COUNTED. Within about one
+    // encode, never the three.
+    const auto t0 = std::chrono::steady_clock::now();
+    w.stop(0.0);
+    EXPECT_LT(msSince(t0), 140.0) << "stop(0) waited for more than the in-flight encode";
+    live::detail::PackWriterStats st = w.stats();
+    EXPECT_GE(st.droppedAtStop, 2);
+    EXPECT_EQ(st.written + st.droppedAtStop, 3) << "every enqueued frame lands in one bucket";
+    EXPECT_FALSE(w.running());
+
+    // Idempotent: a second stop is a no-op, not a second count.
+    const auto t1 = std::chrono::steady_clock::now();
+    w.stop(0.0);
+    EXPECT_LT(msSince(t1), 20.0);
+    EXPECT_EQ(w.stats().droppedAtStop, st.droppedAtStop);
+    // And a frame handed to a stopped writer is refused and counted, never
+    // silently accepted into a queue nobody will drain.
+    live::detail::PackJob late; late.path = "late"; late.bgr = bgrFrame(8, 8, 9);
+    EXPECT_FALSE(w.enqueue(std::move(late)));
+    EXPECT_EQ(w.stats().droppedAtStop, st.droppedAtStop + 1);
+}
+
+TEST(PanoLivePackWriter, AGenerousStopBudgetDrainsEverything) {
+    live::detail::PackWriter w;
+    std::string err;
+    ASSERT_TRUE(w.start(8, [&](const std::string&, const cv::Mat&, int, std::string*) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        return true;
+    }, 0, &err)) << err;
+    for (int i = 0; i < 4; ++i) {
+        live::detail::PackJob j; j.path = "f"; j.bgr = bgrFrame(8, 8, (unsigned char)i);
+        ASSERT_TRUE(w.enqueue(std::move(j)));
+    }
+    // The finalize path: a budget wide enough for the queue writes all of it.
+    w.stop(2000.0);
+    const live::detail::PackWriterStats st = w.stats();
+    EXPECT_EQ(st.written, 4);
+    EXPECT_EQ(st.droppedAtStop, 0);
+}
+
+TEST(PanoLivePackWriter, AFailedOrThrowingEncodeIsCountedAndTheWorkerSurvives) {
+    live::detail::PackWriter w;
+    std::string err;
+    std::atomic<int> calls(0);
+    ASSERT_TRUE(w.start(8, [&](const std::string&, const cv::Mat&, int, std::string* e) -> bool {
+        const int k = calls++;
+        if (k == 0) { if (e) *e = "disk full"; return false; }
+        // An escaping exception on the writer's std::thread would be
+        // std::terminate — the whole app, for one pack frame.
+        if (k == 1) throw std::runtime_error("encoder exploded");
+        return true;
+    }, 0, &err)) << err;
+    for (int i = 0; i < 3; ++i) {
+        live::detail::PackJob j; j.path = "f"; j.bgr = bgrFrame(8, 8, (unsigned char)i);
+        ASSERT_TRUE(w.enqueue(std::move(j)));
+    }
+    w.stop(2000.0);
+    const live::detail::PackWriterStats st = w.stats();
+    EXPECT_EQ(st.failed, 2);
+    // …and the frame AFTER the throw was still written: the worker survived.
+    EXPECT_EQ(st.written, 1);
+    // NOT swallowed: the first reason is kept verbatim.
+    EXPECT_EQ(st.firstError, "disk full");
+}
+
+TEST(PanoLivePackWriter, TheQueuedFrameOutlivesTheCallersHandleWithoutACopy) {
+    Latch gate;
+    std::atomic<int> seenValue(-1);
+    std::atomic<const unsigned char*> seenData(nullptr);
+    live::detail::PackWriter w;
+    std::string err;
+    ASSERT_TRUE(w.start(4, [&](const std::string&, const cv::Mat& bgr, int, std::string*) {
+        gate.wait(5000);
+        seenValue = bgr.at<cv::Vec3b>(3, 3)[0];
+        seenData = bgr.data;
+        return true;
+    }, 0, &err)) << err;
+
+    cv::Mat mine = bgrFrame(16, 16, 77);
+    const unsigned char* original = mine.data;
+    live::detail::PackJob j; j.path = "f"; j.bgr = mine;   // shallow, as ingest does
+    ASSERT_TRUE(w.enqueue(std::move(j)));
+    // The caller lets go of its handle — exactly what `ingest` does when it
+    // returns — and allocates over the heap it just freed.
+    mine.release();
+    cv::Mat churn = bgrFrame(16, 16, 5);
+    gate.open();
+    w.stop(2000.0);
+
+    // The refcount kept the ORIGINAL pixels alive: same buffer, same value.
+    EXPECT_EQ(seenValue.load(), 77);
+    EXPECT_EQ(seenData.load(), original) << "the writer must hold the frame, not a copy of it";
+    EXPECT_NE(churn.data, original);
+}
+
+TEST(PanoLivePackWriter, DestroyingARunningWriterJoinsInsteadOfTerminating) {
+    const auto t0 = std::chrono::steady_clock::now();
+    {
+        live::detail::PackWriter w;
+        std::string err;
+        ASSERT_TRUE(w.start(8, [&](const std::string&, const cv::Mat&, int, std::string*) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+            return true;
+        }, 0, &err)) << err;
+        for (int i = 0; i < 4; ++i) {
+            live::detail::PackJob j; j.path = "f"; j.bgr = bgrFrame(8, 8, (unsigned char)i);
+            w.enqueue(std::move(j));
+        }
+        // No stop(): the destructor must stop and JOIN, or a joinable
+        // std::thread is destroyed and the process terminates here.
+    }
+    EXPECT_LT(msSince(t0), 1000.0);
+}
+
+// ── A1.1 — the writer inside the session ────────────────────────────────────
+
+TEST(PanoLiveSession, TheIngestNoLongerPaysForThePackEncode) {
+    const std::string dir = makeTempDir("packasync");
+    live::Session s;
+    live::Options o = optionsFor(dir);   // packQueueMax 64: nothing is refused
+    o.packFrames = live::PackFrames::All;
+    // A 40 ms encode — about what a 1080p software JPEG costs a degraded A35 —
+    // that still writes a real file, so the pack can be checked on disk.
+    o.packEncoder = [](const std::string& path, const cv::Mat& bgr, int q, std::string*) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(40));
+        std::vector<int> params;
+        params.push_back(cv::IMWRITE_JPEG_QUALITY);
+        params.push_back(q);
+        return cv::imwrite(path, bgr, params);
+    };
+    const live::StartReport start = s.start(o);
+    ASSERT_TRUE(start.ok) << start.error;
+
+    const int w = 320, h = 240;
+    for (int i = 0; i < 5; ++i) {
+        const std::vector<unsigned char> f = makeNv21(w, h, i * 6);
+        ASSERT_TRUE(s.ingest(f.data(), f.size(), frameAt(w, h, i, 1.0e9 + i * 33.0e6)).ran);
+    }
+    bool empty = false;
+    const std::string summary = s.finalizeSweep(&empty);
+
+    // THE POINT: the 40 ms encode is no longer inside the ingest. Before the
+    // move every ingest here was >= 40 ms by construction.
+    EXPECT_LT(sampleP50(summary, "ingestMs"), 40.0) << summary.substr(0, 600);
+    EXPECT_LT(sampleP50(summary, "packMs"), 2.0) << "the hand-off is a push, not an encode";
+    EXPECT_GE(sampleP50(summary, "packWriteMs"), 40.0) << "the encode ran — on the writer";
+    // …and nothing was lost to it: finalize drained the writer before it
+    // counted, so every frame is on disk.
+    EXPECT_EQ(jsonInt(summary, "framesWritten"), 5);
+    for (int i = 0; i < 5; ++i) {
+        char name[64];
+        std::snprintf(name, sizeof(name), "/frame_%06d.jpg", i);
+        EXPECT_TRUE(exists(start.framesDir + name)) << name;
+    }
+}
+
+TEST(PanoLiveSession, CancelWithQueuedFramesNeitherHangsNorCrashes) {
+    const std::string dir = makeTempDir("packcancel");
+    const auto t0 = std::chrono::steady_clock::now();
+    double cancelMs = 0.0;
+    // Counted at the START of each encode, so an encode in flight is counted.
+    std::atomic<int> encodes(0);
+    {
+        live::Session s;
+        live::Options o = optionsFor(dir);
+        o.packFrames = live::PackFrames::All;
+        o.packEncoder = [&encodes](const std::string&, const cv::Mat&, int, std::string*) {
+            ++encodes;
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            return true;
+        };
+        ASSERT_TRUE(s.start(o).ok);
+        const int w = 160, h = 120;
+        for (int i = 0; i < 6; ++i) {
+            const std::vector<unsigned char> f = makeNv21(w, h, i * 4);
+            s.ingest(f.data(), f.size(), frameAt(w, h, i, 1.0e9 + i * 33.0e6));
+        }
+        // Cancel is the cheap exit (a UI-thread teardown has 1 s for
+        // everything): it joins the ONE encode in flight and drops the rest.
+        // Draining all six would take ~600 ms.
+        const int beforeCancel = encodes.load();
+        const auto c0 = std::chrono::steady_clock::now();
+        s.cancel();
+        cancelMs = msSince(c0);
+        const int atCancel = encodes.load();
+        EXPECT_FALSE(s.running());
+        // At most ONE encode more than had begun: the worker may have taken
+        // the next frame between the read above and the stop landing.
+        EXPECT_LE(atCancel, beforeCancel + 1);
+        // ⚠ THE QUEUE WAS DROPPED BY cancel(), NOT BY THE DESTRUCTOR. The
+        // session is still alive here; if cancel() had not stopped the writer
+        // it would go on encoding the queue (one every 100 ms) until ~Session
+        // stopped it at the end of this scope — well within the bounds below,
+        // so only a count taken INSIDE the scope can tell the two apart.
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        EXPECT_EQ(encodes.load(), atCancel) << "an encode started after cancel() returned";
+        EXPECT_LT(atCancel, 6) << "no frame was still queued at the cancel; the test proves nothing";
+        // The destructor after cancel must be clean — a second stop is a no-op.
+    }
+    EXPECT_LT(cancelMs, 400.0) << "cancel waited for the queue, not just the in-flight encode";
+    EXPECT_LT(msSince(t0), 2000.0);
+    EXPECT_TRUE(exists(dir + "/frames"));
+}
+
+TEST(PanoLiveSession, MetaCarriesPerStageTimings) {
+    const int w = 320, h = 240;
+    for (const live::PackFrames mode : {live::PackFrames::All, live::PackFrames::None}) {
+        const std::string dir = makeTempDir(mode == live::PackFrames::All ? "stageall" : "stagenone");
+        live::Session s;
+        live::Options o = optionsFor(dir);
+        o.packFrames = mode;
+        ASSERT_TRUE(s.start(o).ok);
+        for (int i = 0; i < 5; ++i) {
+            const std::vector<unsigned char> f = makeNv21(w, h, i * 6);
+            ASSERT_TRUE(s.ingest(f.data(), f.size(), frameAt(w, h, i, 1.0e9 + i * 33.0e6)).ran);
+        }
+        bool empty = false;
+        const std::string summary = s.finalizeSweep(&empty);
+        const std::string meta = readAll(dir + "/meta.json");
+        ASSERT_FALSE(meta.empty());
+        for (const std::string* doc : {&summary, &meta}) {
+            EXPECT_EQ(sampleN(*doc, "convertMs"), 5) << doc->substr(0, 300);
+            EXPECT_EQ(sampleN(*doc, "rowsMs"), 5);
+            // A skipped write is never a sample: 5 on `all`, 0 on `none`.
+            EXPECT_EQ(sampleN(*doc, "packMs"), mode == live::PackFrames::All ? 5 : 0);
+            // The ingest thread's own CPU time, one sample per ingest.
+            EXPECT_EQ(sampleN(*doc, "ingestCpuMs"), 5);
+            EXPECT_NE(doc->find("\"ingestCores\":["), std::string::npos);
+        }
+    }
+}
+
+TEST(PanoLiveSession, ThePackIdentityClosesWhenTheCadenceAndTheQueueBothDrop) {
+    // verdict A.3: an identity that omits the everyN cadence does not close
+    // on an everyN > 1 sweep, and one that omits the writer's refusals does
+    // not close when the writer falls behind. Both are exercised here at once.
+    const std::string dir = makeTempDir("packidentity");
+    Latch gate;
+    live::Session s;
+    live::Options o = optionsFor(dir);
+    o.packFrames = live::PackFrames::All;
+    o.packFrameEveryN = 2;
+    // ONE outstanding, and the first encode held until every ingest is done:
+    // every later cadence frame finds the writer full, deterministically.
+    o.packQueueMax = 1;
+    o.packEncoder = [&gate](const std::string&, const cv::Mat&, int, std::string*) {
+        gate.wait(5000);
+        return true;
+    };
+    ASSERT_TRUE(s.start(o).ok);
+    const int w = 160, h = 120;
+    const int n = 8;
+    for (int i = 0; i < n; ++i) {
+        const std::vector<unsigned char> f = makeNv21(w, h, i * 4);
+        ASSERT_TRUE(s.ingest(f.data(), f.size(), frameAt(w, h, i, 1.0e9 + i * 33.0e6)).ran);
+    }
+    gate.open();
+    bool empty = false;
+    s.finalizeSweep(&empty);
+    const std::string meta = readAll(dir + "/meta.json");
+    const size_t at = meta.find("\"pack\":{");
+    ASSERT_NE(at, std::string::npos);
+    // Up to the NEXT block: `pack` nests `writeMs`, so its first '}' is not
+    // its end.
+    const size_t end = meta.find("\"preview\":{", at);
+    ASSERT_NE(end, std::string::npos);
+    const std::string pack = meta.substr(at, end - at);
+
+    const long long written = jsonInt(pack, "framesWritten");
+    const long long failed = jsonInt(pack, "frameWriteFailed");
+    const long long full = jsonInt(pack, "droppedQueueFull");
+    const long long atStop = jsonInt(pack, "droppedAtStop");
+    const long long cap = jsonInt(pack, "droppedCap");
+    const long long cadence = jsonInt(pack, "cadenceSkipped");
+    const long long notWanted = jsonInt(pack, "notWanted");
+    const long long frames = jsonInt(pack, "engineFrames");
+    EXPECT_EQ(frames, n);
+    EXPECT_EQ(cadence, n / 2) << pack;
+    // seq 0 took the one slot; seq 2, 4 and 6 found it held.
+    EXPECT_EQ(written, 1) << pack;
+    EXPECT_EQ(full, 3) << pack;
+    EXPECT_EQ(written + failed + full + atStop + cap + cadence + notWanted, frames) << pack;
+    EXPECT_NE(pack.find("\"identity\":"), std::string::npos);
 }
 
 // ── the summary's honesty about what it cannot see ──────────────────────────

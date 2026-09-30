@@ -58,7 +58,7 @@ done
 # reduced-coverage mode to have a lower number for.
 PROJECTS=(
   "core|cpp/tests|147|138"
-  "panoplus|cpp/tests/panoplus|560|560"
+  "panoplus|cpp/tests/panoplus|572|572"
 )
 
 # ── Host OpenCV ──────────────────────────────────────────────────────────
