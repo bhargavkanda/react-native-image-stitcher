@@ -186,19 +186,40 @@ public class PanoPlusBridge: NSObject, RCTInvalidating {
     private static let releaseLock = NSLock()
     private static var releaseGen: UInt64 = 0
     private static var releasedGen: UInt64 = .max
+    /// U5c — WHEN the current generation let its camera go, in wall-clock
+    /// epoch ms (the clock JS's `Date.now()` and the pack's meta clocks read);
+    /// 0 until then. Guarded by `releaseLock` with the generation it belongs
+    /// to. The boolean alone reaches JS only if a 100 ms poll lands between
+    /// the release and the settle, and a finalize of 44-228 ms (measured) is
+    /// often shorter — so the finish could not say when the camera was let go.
+    private static var releasedAtMs: Double = 0
     private static func beginRelease() {
-        releaseLock.lock(); releaseGen &+= 1; releaseLock.unlock()
+        // The `releasedAtMs = 0` is hygiene, not the guarantee: under this
+        // lock `cameraReleasedAtMs()` answers 0 for any generation that has
+        // not released, whatever the stored value.
+        releaseLock.lock(); releaseGen &+= 1; releasedAtMs = 0; releaseLock.unlock()
     }
     private static func currentReleaseGen() -> UInt64 {
         releaseLock.lock(); defer { releaseLock.unlock() }
         return releaseGen
     }
     private static func markReleased(_ g: UInt64) {
-        releaseLock.lock(); if g == releaseGen { releasedGen = g }; releaseLock.unlock()
+        releaseLock.lock()
+        if g == releaseGen {
+            releasedGen = g
+            releasedAtMs = Date().timeIntervalSince1970 * 1000
+        }
+        releaseLock.unlock()
     }
     private static func cameraReleased() -> Bool {
         releaseLock.lock(); defer { releaseLock.unlock() }
         return releasedGen == releaseGen
+    }
+    /// U5c — the current generation's release instant, or 0 when it has not
+    /// released (fail closed: 0 is "not reported", never a time).
+    private static func cameraReleasedAtMs() -> Double {
+        releaseLock.lock(); defer { releaseLock.unlock() }
+        return releasedGen == releaseGen ? releasedAtMs : 0
     }
 
     /// ── ONE CLAIM, TAKEN ONCE, WITH A GENERATION (M5 review) ─────────────
@@ -1062,6 +1083,9 @@ public class PanoPlusBridge: NSObject, RCTInvalidating {
         // M8 — read through the FINISH, when the core may already answer
         // `running: false`: JS unmounts the camera on it.
         st["cameraReleased"] = Self.cameraReleased()
+        // U5c — and WHEN (epoch ms; 0 = not released). `stop()` marks the
+        // release BEFORE the finalize, so this is the true release point.
+        st["cameraReleasedAtMs"] = Self.cameraReleasedAtMs()
         resolver(st)
     }
 

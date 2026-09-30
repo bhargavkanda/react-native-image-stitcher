@@ -14,13 +14,36 @@
 
 package io.imagestitcher.rn.panoplus
 
+import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 class PanoPlusArFramePluginTest {
 
     private fun armed() = PanoPlusArArmState().apply { arm() }
+
+    /** Slots made by a test, disarmed afterwards so no worker outlives it. */
+    private val slots = mutableListOf<PanoPlusArIngestSlot>()
+
+    private fun slot(fn: (PanoPlusArIngestSlot.ArJob) -> Unit = {}): PanoPlusArIngestSlot =
+        PanoPlusArIngestSlot(fn).also { it.arm(); slots += it }
+
+    @After
+    fun tearDown() {
+        for (s in slots) { s.disarm(); s.awaitIdle(2000) }
+    }
+
+    private fun frame(buf: ByteArray, ts: Double) = PanoPlusArIngestSlot.ArFrame(
+        buf = buf, width = 4, height = 2, tsNs = ts, fx = 1400.0, fy = 1400.0,
+        cx = 2.0, cy = 1.0, q = doubleArrayOf(0.0, 0.0, 0.0, 1.0),
+        exposureDurationS = 0.0, exposureISO = 0.0,
+    )
 
     @Test
     fun `an UNARMED arm refuses without counting a SKIP — but the call is still seen`() {
@@ -71,11 +94,21 @@ class PanoPlusArFramePluginTest {
     }
 
     @Test
-    fun `a good tracking frame is admitted, and the sequence advances only then`() {
+    fun `a good tracking frame is admitted, and the sequence is assigned at the hand-off`() {
         val s = armed()
         assertEquals(ArFrameVerdict.INGEST, s.verdict("normal", 1920, 1080, 1400.0, 1400.0))
-        assertEquals(0L, s.nextSeq())
-        assertEquals(1L, s.nextSeq())
+        // The engine's seq is the SLOT's, assigned at submit (the vc
+        // convention), so a frame that never reaches submit consumes none.
+        val gate = CountDownLatch(1)
+        val seqs = java.util.Collections.synchronizedList(mutableListOf<Long>())
+        val slot = slot { job -> seqs += job.seq; gate.await(2, TimeUnit.SECONDS) }
+        val b0 = s.admit(1_000.0, 16, slot)!!
+        assertTrue(slot.submit(frame(b0, 1_000.0)))
+        val b1 = s.admit(1_001.0, 16, slot)!!
+        assertTrue(slot.submit(frame(b1, 1_001.0)))
+        gate.countDown()
+        assertTrue(slot.awaitIdle(2000))
+        assertEquals(listOf(0L, 1L), seqs.toList())
     }
 
     @Test
@@ -111,6 +144,11 @@ class PanoPlusArFramePluginTest {
         val s = armed()
         s.verdict("limited", 1920, 1080, 1400.0, 1400.0)
         s.recordIngest(ran = true, wasPainted = true, outcome = 3)
+        s.recordSubmitThrew("x"); s.recordEngineThrew("x"); s.recordPoseRowThrew("x")
+        s.recordRegisterThrew("x")
+        s.disarm()
+        s.verdict("normal", 1920, 1080, 1400.0, 1400.0)   // skippedNotArmed
+        s.recordCopy(1.0)
         s.arm()
         for (k in listOf(
             "ingested", "painted", "skippedNotTracking", "skippedBadGeometry", "ingestThrew",
@@ -118,8 +156,27 @@ class PanoPlusArFramePluginTest {
             // derived from counters().keys so that a NEW counter which someone
             // forgets to reset fails this test instead of silently joining it.
             "seen", "droppedBusy",
+            // A1.2 — the split throws and the unarmed calls.
+            "skippedNotArmed", "submitThrew", "engineThrew", "poseRowThrew", "registerThrew",
+            // A1.0 — the GL-thread timings.
+            "tickIntervalMsP50", "copyMsP50",
         )) {
             assertEquals("$k must reset on arm", 0.0, s.counters()[k])
+        }
+    }
+
+    @Test
+    fun `the SLOT's counters reset on its arm too`() {
+        val slot = slot()
+        slot.acquire(16)?.let { slot.returnBuffer(it) }
+        assertNull(slot.acquire(Int.MAX_VALUE))                  // allocFailed
+        slot.arm()
+        for (k in listOf(
+            "offered", "taken", "superseded", "droppedBusy", "refusedAtAcquire", "allocFailed",
+            "refusedPostAcquire", "droppedAtDisarm", "submitFailed", "workerThrew",
+            "ingestWallMsP50", "workerIdleMsTotal",
+        )) {
+            assertEquals("$k must reset on arm", 0.0, slot.counters()[k])
         }
     }
 
@@ -141,40 +198,133 @@ class PanoPlusArFramePluginTest {
     // breakage is silent.
 
     @Test
-    fun `a busy-dropped frame is counted, and does NOT advance the duplicate watermark`() {
-        // THE ORDERING THE PRODUCTION CODE DEPENDS ON. process() takes the busy
-        // gate BEFORE acceptTs, so a frame refused for backpressure leaves the
-        // watermark untouched and the GL loop's re-offer of that SAME frame can
-        // still be taken. Reversing it loses the frame for good — a whole camera
-        // period per busy cycle, measured at roughly a third of the engine's
-        // input. This test is what makes that reversal fail loudly.
+    fun `a duplicate is refused before any buffer is taken`() {
+        // A1.2 — THE NEW ORDER. With a latest-wins slot a frame is never
+        // refused for backpressure, so the GL loop's re-render of a frame that
+        // was ALREADY taken can be refused first — and must cost no buffer:
+        // at 3.11 MB a frame, a pooled buffer per re-render would be the
+        // allocation churn the pool exists to avoid.
         val s = armed()
-        assertTrue(s.acceptTs(1_000.0))          // frame A: taken
-        s.recordDroppedBusy()                    // frame B: refused by the gate...
-        assertEquals(1.0, s.counters()["droppedBusy"])
-        // ...and because the gate ran FIRST, B never reached acceptTs. Its
-        // re-offer is therefore still new, not a duplicate.
-        assertTrue("the re-offered frame must still be acceptable", s.acceptTs(1_001.0))
-        assertEquals("a gate refusal is not a duplicate", 0.0, s.counters()["skippedDuplicate"])
+        val slot = slot()
+        val b = s.admit(1_000.0, 16, slot)
+        assertNotNull(b)
+        assertNull("the same frame again", s.admit(1_000.0, 16, slot))
+        assertNull("one that went backwards", s.admit(999.0, 16, slot))
+        assertEquals(2.0, s.counters()["skippedDuplicate"])
+        // Only the first reached the slot: the duplicates were never OFFERED.
+        assertEquals(1.0, slot.counters()["offered"])
+        slot.returnBuffer(b!!)
     }
 
     @Test
-    fun `seen counts every call, so seen minus duplicates is the distinct-frame count`() {
-        // `seen` is a RENDER count, not a delivery count — the GL loop re-offers
-        // the same ARCore frame until a newer one lands. An investigation has
-        // already been misled by reading it as frames delivered, so the identity
-        // it is safe to use is pinned here.
+    fun `a pool-exhaustion refusal does not advance the watermark`() {
+        // THE RESCUE THE OLD ORDER EXISTED FOR, KEPT: if a buffer is ever
+        // unavailable, the watermark stays put, so the GL loop's re-offer of
+        // the SAME frame can still be taken when one frees up. With one
+        // producer and three buffers exhaustion cannot happen in production;
+        // it is forced here by holding all three.
         val s = armed()
-        repeat(3) { s.verdict("normal", 1920, 1080, 1400.0, 1400.0) }
-        assertTrue(s.acceptTs(2_000.0))
-        assertTrue(!s.acceptTs(2_000.0))         // the GL thread re-rendered it
-        assertTrue(!s.acceptTs(2_000.0))         // and again
-        assertEquals(3.0, s.counters()["seen"])
-        assertEquals(2.0, s.counters()["skippedDuplicate"])
-        val distinct = (s.counters()["seen"] as Double) - (s.counters()["skippedDuplicate"] as Double)
-        assertEquals(1.0, distinct, 0.0)
+        val slot = slot()
+        val held = listOf(
+            s.admit(1_000.0, 16, slot)!!, s.admit(1_001.0, 16, slot)!!, s.admit(1_002.0, 16, slot)!!,
+        )
+        assertNull(s.admit(1_003.0, 16, slot))                 // refused: pool out
+        assertEquals(1.0, slot.counters()["droppedBusy"])
+        assertEquals("a refusal is not a duplicate", 0.0, s.counters()["skippedDuplicate"])
+        slot.returnBuffer(held[0])
+        assertNotNull("the re-offered frame must still be acceptable", s.admit(1_003.0, 16, slot))
+        assertEquals(0.0, s.counters()["skippedDuplicate"])
     }
 
+    @Test
+    fun `a disarm between the verdict and the buffer is a REFUSAL, not droppedBusy`() {
+        // verdict B.1 — `droppedBusy == 0` is an A1 bar. A stop landing between
+        // the GL thread's verdict and its acquire must not read as
+        // backpressure, or the bar fails spuriously on every sweep's last tick.
+        val s = armed()
+        val slot = slot()
+        assertEquals(ArFrameVerdict.INGEST, s.verdict("normal", 1920, 1080, 1400.0, 1400.0))
+        slot.disarm()                                           // the stop lands here
+        assertNull(s.admit(1_000.0, 16, slot))
+        assertEquals(0.0, slot.counters()["droppedBusy"])
+        assertEquals(1.0, slot.counters()["refusedAtAcquire"])
+        assertTrue((s.counters()["lastOutcome"] as String).contains("stopped"))
+    }
+
+    @Test
+    fun `a buffer that cannot be allocated is labelled, keeps the frame re-offerable, and is partitioned`() {
+        // The slot catches the allocation's OutOfMemory itself (acquire never
+        // throws); here, the arm's side: the refusal is NAMED, the watermark
+        // stays put so the GL loop's re-offer is taken, and the identities
+        // close — with `offered` counting the frame TWICE, which is why the
+        // note says requests, not distinct frames.
+        val s = armed()
+        val slot = slot { s.recordIngest(ran = true, wasPainted = false, outcome = 3) }
+        assertEquals(ArFrameVerdict.INGEST, s.verdict("normal", 1920, 1080, 1400.0, 1400.0))
+        assertNull(s.admit(1_000.0, Int.MAX_VALUE, slot))        // the allocation throws
+        assertTrue((s.counters()["lastOutcome"] as String).contains("could not be allocated"))
+        assertEquals(ArFrameVerdict.INGEST, s.verdict("normal", 1920, 1080, 1400.0, 1400.0))
+        val b = s.admit(1_000.0, 16, slot)
+        assertNotNull("the re-offered frame must still be acceptable", b)
+        assertEquals(0.0, s.counters()["skippedDuplicate"])
+        assertTrue(slot.submit(frame(b!!, 1_000.0)))
+        assertTrue(slot.awaitIdle(2000))
+        val c = s.counters(slot.counters())
+        assertEquals(1.0, c["allocFailed"])
+        assertEquals(2.0, c["offered"])
+        assertEquals(0.0, c["droppedBusy"])
+        assertEquals(true, c["identitySeenHolds"])
+        assertEquals(true, c["identityOfferedHolds"])
+        assertEquals(true, c["identityTakenHolds"])
+    }
+
+    @Test
+    fun `seen and offered partition EXACTLY — the old seen-minus-duplicates identity is gone`() {
+        // A1.2 — THE IDENTITIES THE PACK IS READ WITH, CLOSED.
+        //   seen    = skippedNotArmed + skippedNotTracking + skippedBadGeometry
+        //           + skippedDuplicate + offered
+        //   offered = taken + superseded + droppedBusy + refusedAtAcquire
+        //           + refusedPostAcquire + droppedAtDisarm + submitFailed
+        //           + submitThrew + pendingNow
+        //   taken   = ingested + engineThrew + workerThrew + inFlight
+        // (allocFailed sits in `offered` too; see the allocation test above.)
+        // The old note said distinct ~= seen - skippedDuplicate; under the
+        // busy gate it was false (164 against 131 on the 2026-09-29 pack).
+        val s = PanoPlusArArmState()
+        val gate = CountDownLatch(1)
+        val slot = slot { job ->
+            gate.await(2, TimeUnit.SECONDS)
+            s.recordIngest(ran = true, wasPainted = job.seq % 2L == 0L, outcome = 3)
+        }
+        s.verdict("normal", 1920, 1080, 1400.0, 1400.0)          // not armed yet
+        s.arm()
+        // Mirror process(): verdict, admit, copy, submit.
+        fun offer(ts: Double, tracking: String = "normal") {
+            if (s.verdict(tracking, 1920, 1080, 1400.0, 1400.0) != ArFrameVerdict.INGEST) return
+            val b = s.admit(ts, 16, slot) ?: return
+            slot.submit(frame(b, ts))
+        }
+        offer(1.0)                   // taken, blocks on the gate
+        offer(1.0)                   // duplicate
+        offer(2.0, "limited")        // not tracking
+        offer(3.0)                   // pending
+        offer(4.0)                   // supersedes 3
+        offer(5.0)                   // supersedes 4
+        assertEquals(ArFrameVerdict.INGEST, s.verdict("normal", 1920, 1080, 1400.0, 1400.0))
+        val b = s.admit(6.0, 16, slot)!!                        // a copy that "throws"
+        slot.returnBuffer(b); s.recordSubmitThrew("OutOfMemoryError")
+        gate.countDown()
+        assertTrue(slot.awaitIdle(2000))
+        val c = s.counters(slot.counters())
+        assertEquals(true, c["identitySeenHolds"])
+        assertEquals(true, c["identityOfferedHolds"])
+        assertEquals(true, c["identityTakenHolds"])
+        assertEquals(7.0, c["seen"])
+        assertEquals(5.0, c["offered"])
+        assertEquals(2.0, c["superseded"])
+        assertEquals(2.0, c["ingested"])                        // 1 and 5
+        assertEquals(0.0, c["droppedBusy"])
+    }
     @Test
     fun `the pack note does NOT claim seen is what ARCore delivered`() {
         // The first version of this note shipped that claim into every pack. It
@@ -183,6 +333,15 @@ class PanoPlusArFramePluginTest {
         val note = armed().counters()["note"] as String
         assertTrue("the note must warn that seen is a render count", note.contains("GL RENDER TICK"))
         assertTrue(note.contains("skippedDuplicate"))
+        // …and it states the EXACT identities, not the approximate one.
+        assertTrue(note.contains("EXACT IDENTITIES"))
+        assertTrue(note.contains("= taken + superseded + droppedBusy"))
+        assertTrue(note.contains("allocFailed"))
+        assertFalse(note.contains("DISTINCT CAMERA FRAMES ~= seen"))
+        // `offered` is buffer REQUESTS: a busy or allocation refusal leaves the
+        // watermark, and the re-offer is requested — and counted — again.
+        assertFalse(note.contains("offered (DISTINCT frames"))
+        assertTrue(note.contains("buffer requests"))
     }
 
     @Test
@@ -191,5 +350,46 @@ class PanoPlusArFramePluginTest {
         s.recordThrew("IllegalStateException")
         assertEquals(1.0, s.counters()["ingestThrew"])
         assertTrue((s.counters()["lastOutcome"] as String).contains("IllegalStateException"))
+    }
+
+    @Test
+    fun `the four kinds of throw are counted apart — only two of them lose a frame`() {
+        // verdict B.2: one shared counter made the offered identity impossible
+        // to close, because a pose-row throw is NOT a lost frame and a submit
+        // throw is.
+        val s = armed()
+        s.recordPoseRowThrew("IOException")
+        s.recordSubmitThrew("OutOfMemoryError")
+        s.recordEngineThrew("IllegalStateException")
+        s.recordRegisterThrew("NoClassDefFoundError")
+        val c = s.counters()
+        assertEquals(1.0, c["poseRowThrew"])
+        assertEquals(1.0, c["submitThrew"])
+        assertEquals(1.0, c["engineThrew"])
+        assertEquals(1.0, c["registerThrew"])
+        assertEquals("the pre-split total", 4.0, c["ingestThrew"])
+    }
+
+    @Test
+    fun `the GL tick and the copy are timed — and an idle arm reports zeros, not absence`() {
+        val s = armed()
+        val c0 = s.counters()
+        for (k in listOf("tickIntervalMsP50", "tickIntervalMsP99", "copyMsP50", "copyMsP99")) {
+            assertEquals("$k on an idle arm", 0.0, c0[k])
+        }
+        s.noteTick(1_000_000_000L)
+        s.noteTick(1_020_000_000L)                               // 20 ms later
+        s.recordCopy(1.5)
+        val c = s.counters()
+        assertEquals(20.0, c["tickIntervalMsP50"] as Double, 1e-9)
+        assertEquals(1.5, c["copyMsP50"] as Double, 1e-9)
+        s.arm()
+        assertEquals(0.0, s.counters()["tickIntervalMsP50"])
+        // …and the previous TICK goes with them: the new sweep's first
+        // interval is measured from its own first tick, never across the gap
+        // between sweeps (here ~4 s, which would own the p99).
+        s.noteTick(5_000_000_000L)
+        s.noteTick(5_016_000_000L)
+        assertEquals(16.0, s.counters()["tickIntervalMsP99"] as Double, 1e-9)
     }
 }

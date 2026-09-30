@@ -796,18 +796,19 @@ class PanoPlusLiveModule(
             }
             val out = jsonToWritableMap(obj)
             // ⚠ THE DROP COUNT COMES FROM THE CAPTURE ARM, NOT THE ENGINE.
-            // Backpressure lives in the recorder's single-in-flight gate, so
+            // Backpressure lives in the capture arm (the recorder's
+            // single-in-flight gate, the AR plugin's latest-wins slot), so
             // the engine structurally cannot see a frame that never reached it
-            // and writes 0. Overwriting that 0 here with the recorder's own
-            // `droppedBusy` is the difference between a summary that reports
-            // the sweep and one that reports the half of it native could see.
-            out.putDouble("droppedQueue", optDbl(m, "droppedBusy", 0.0))
+            // and writes 0. Overwriting that 0 here with the arm's own count
+            // is the difference between a summary that reports the sweep and
+            // one that reports the half of it native could see.
+            out.putDouble("droppedQueue", armDroppedQueue(m))
             copyString(m, out, "packDir")
             copyString(m, out, "advisories")
             out.putDouble("framesArrived", optDbl(m, "framesArrived", 0.0))
             if (obj.optBoolean("empty", false)) {
                 val info = jsonToWritableMap(obj)
-                info.putDouble("droppedQueue", optDbl(m, "droppedBusy", 0.0))
+                info.putDouble("droppedQueue", armDroppedQueue(m))
                 inner.reject(
                     "panoplus-empty",
                     "the sweep painted nothing. " + emptyHint(obj, m),
@@ -826,6 +827,22 @@ class PanoPlusLiveModule(
             inner.reject(code ?: "panoplus-io", message ?: "pano+ stop failed")
         }
     }
+
+    /**
+     * The frames the CAPTURE ARM refused, for the summary's and the status's
+     * `droppedQueue`.
+     *
+     * ⚠ ON THE AR-PLUGIN ARM IT IS NOT THE RECORDER'S `droppedBusy`. That is
+     * the Camera2 encoder's counter and is structurally 0 on an arm with no
+     * Camera2 client: the 2026-09-29 AR result said `droppedQueue: 0` while 70
+     * of 131 distinct frames never reached the engine. The recorder names the
+     * plugin's own count (`superseded + droppedBusy`) as
+     * `arPluginDroppedQueue` when THIS sweep armed the plugin, and that wins.
+     */
+    private fun armDroppedQueue(rec: ReadableMap?): Double =
+        if (rec != null && rec.hasKey("arPluginDroppedQueue") && !rec.isNull("arPluginDroppedQueue"))
+            optDbl(rec, "arPluginDroppedQueue", 0.0)
+        else optDbl(rec, "droppedBusy", 0.0)
 
     /**
      * Why an empty sweep was empty, in one sentence the operator can act on.
@@ -926,20 +943,31 @@ class PanoPlusLiveModule(
                 putBoolean("running", false)
                 // M8 — read through the FINISH: JS unmounts the camera on it.
                 putBoolean("cameraReleased", PanoPlusCameraRelease.released)
+                // U5c — WHEN it was released (epoch ms; 0 = not released).
+                // This branch is the one a post-settle read lands in, so it
+                // must carry the stamp or the finish timeline loses it.
+                putDouble("cameraReleasedAtMs", PanoPlusCameraRelease.releasedAtMs)
             })
             return
         }
         val out = jsonToWritableMap(obj)
         out.putBoolean("cameraReleased", PanoPlusCameraRelease.released)
+        out.putDouble("cameraReleasedAtMs", PanoPlusCameraRelease.releasedAtMs)
         // The capture arm's own numbers, which the engine structurally cannot
         // see: it is never told about a frame that the backpressure gate
         // dropped before it, and `droppedQueue` written by the party that
         // cannot see the drops would be a lie the shape of a measurement.
         val rec = recorder.statusSnapshot()
         if (rec != null) {
-            out.putDouble("droppedQueue", optDbl(rec, "droppedBusy", 0.0))
+            out.putDouble("droppedQueue", armDroppedQueue(rec))
             out.putDouble("framesArrived", optDbl(rec, "framesArrived", 0.0))
-            out.putDouble("framesWritten", optDbl(rec, "framesWritten", 0.0))
+            // NOT on the AR-plugin arm: the recorder's `framesWritten` is its
+            // Camera2 writer's count, 0 on an arm with no Camera2 client, and
+            // overwriting the native pack writer's count with it made every
+            // AR sweep's HUD say no frame had been written.
+            if (!optBool(rec, "arPluginArm", false)) {
+                out.putDouble("framesWritten", optDbl(rec, "framesWritten", 0.0))
+            }
             // NOT `tracking`: that key is a 0/1/2 STATE and the native status
             // already carries the last frame's. This is the RUN LENGTH the
             // engine's reference latch needs, which is a different fact and

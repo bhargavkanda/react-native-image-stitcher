@@ -400,6 +400,34 @@ class RNSARCameraView @JvmOverloads constructor(
     }
 
     override fun onDrawFrame(gl: GL10?) {
+        // A1.0 — while a sweep that reports it is armed, EVERY tick is timed
+        // and counted, whichever of the body's early returns it takes: the
+        // loop paces everything the AR session's plugins receive, and a tick
+        // that returned early is still a tick the display waited on. The body
+        // is unchanged and runs in [drawFrame]; this wrapper only brackets it,
+        // so no return is added, removed or reordered.
+        //
+        // ⚠ AND ONLY THEN. This view is public and most hosts never arm a
+        // sweep; for them the tick is the body alone, with no clock read, no
+        // CPU-time read and no counter touched. See RNSARFrameStats for the
+        // cost rule.
+        if (!RNSARFrameStats.active) {
+            drawFrame()
+            return
+        }
+        val t0 = System.nanoTime()
+        val cpu0 = android.os.Debug.threadCpuTimeNanos()
+        RNSARFrameStats.tickBegin(t0)
+        try {
+            drawFrame()
+        } finally {
+            val cpu1 = if (cpu0 >= 0L) android.os.Debug.threadCpuTimeNanos() else -1L
+            RNSARFrameStats.tickEnd(t0, System.nanoTime(), if (cpu1 >= 0L) cpu1 - cpu0 else -1L)
+        }
+    }
+
+    /** The body of [onDrawFrame]; see the wrapper for why it is split. */
+    private fun drawFrame() {
         // Step 1 — paint the WHOLE surface black.  This is the letterbox:
         // anything outside the camera box below stays black.
         GLES20.glViewport(0, 0, surfaceWidth, surfaceHeight)
@@ -410,6 +438,7 @@ class RNSARCameraView @JvmOverloads constructor(
             // Session not yet attached (start() hasn't run, or
             // the bridge module instance was rebuilt).  Try once
             // more in case the bridge resolved it after onAttach.
+            RNSARFrameStats.countNoSession()
             val late = RNSARSession.instance?.getSessionForView()
             if (late != null) sessionRef.set(late)
             return
@@ -425,14 +454,18 @@ class RNSARCameraView @JvmOverloads constructor(
         // calls setDisplayGeometry when the box actually changes.
         applyDisplayGeometry()
 
+        val update0 = RNSARFrameStats.mark()
         val frame = try {
             session.update()
         } catch (e: SessionPausedException) {
+            RNSARFrameStats.countPaused()
             return  // session paused — wait for resume
         } catch (t: Throwable) {
+            RNSARFrameStats.countUpdateThrew()
             Log.w(TAG, "session.update failed: ${t.message}")
             return
         }
+        RNSARFrameStats.stageSince(RNSARFrameStats.Stage.UPDATE, update0)
 
         // Step 3 — confine the camera draw to the centred box; the black
         // cleared in step 1 remains as the bars around it.
@@ -441,7 +474,9 @@ class RNSARCameraView @JvmOverloads constructor(
 
         // Draw the camera background regardless of tracking state —
         // gives the user something to look at while AR initialises.
+        val draw0 = RNSARFrameStats.mark()
         backgroundRenderer.draw(frame)
+        RNSARFrameStats.stageSince(RNSARFrameStats.Stage.DRAW, draw0)
 
         val camera: Camera = frame.camera
 
@@ -461,10 +496,12 @@ class RNSARCameraView @JvmOverloads constructor(
         val zAxis = pose.zAxis
         val cameraForwardWorld = floatArrayOf(-zAxis[0], -zAxis[1], -zAxis[2])
         val cameraPosWorld = floatArrayOf(pose.tx(), pose.ty(), pose.tz())
+        val planes0 = RNSARFrameStats.mark()
         RNSARSession.instance?.evaluatePlanesForFrame(
             cameraForwardWorld,
             cameraPosWorld,
         )
+        RNSARFrameStats.stageSince(RNSARFrameStats.Stage.PLANES, planes0)
 
         // v0.8.0 Phase 4b.iii — ensure the host-worklet runtime is
         // installed before any per-frame fan-out can run.  Idempotent
@@ -488,8 +525,10 @@ class RNSARCameraView @JvmOverloads constructor(
         //
         // First reconcile ARCore anchors + publish their drift-corrected poses
         // so the renderer projects the refined positions, not frozen coords.
+        val overlay0 = RNSARFrameStats.mark()
         reconcileOverlayAnchors(session)
         maybeUpdateOverlayCamera(camera, box)
+        RNSARFrameStats.stageSince(RNSARFrameStats.Stage.OVERLAY, overlay0)
 
         // Forward to the incremental stitcher when capture is engaged,
         // OR when an AR frame-processor host worklet is registered (the
@@ -529,7 +568,9 @@ class RNSARCameraView @JvmOverloads constructor(
         // compare) when disabled or inside the throttle window.  Native-
         // plugin SYNC results (0.19.0) stashed by forwardToIncremental
         // above ride along under the meta's `plugins` field.
+        val meta0 = RNSARFrameStats.mark()
         maybeEmitArFrameMeta(frame, camera)
+        RNSARFrameStats.stageSince(RNSARFrameStats.Stage.AR_FRAME_META, meta0)
 
         // takePhoto consumer — runs on EVERY render tick (not just
         // when ingest is active), since the host calls takePhoto in
@@ -895,6 +936,13 @@ class RNSARCameraView @JvmOverloads constructor(
     /// onDrawFrame.
     private var forwardLogTick: Int = 0
 
+    /// A1.0 — the camera timestamp the previous forward saw, so a tick that
+    /// re-renders the SAME ARCore frame (LATEST_CAMERA_IMAGE with no newer
+    /// image) is counted: each one re-acquires and re-packs a frame every
+    /// plugin has already been offered. GL thread only, and read only while
+    /// the loop's timers are on (it costs a JNI call).
+    private var lastForwardedTsNs: Long = Long.MIN_VALUE
+
     private fun forwardToIncremental(
         frame: com.google.ar.core.Frame,
         camera: Camera,
@@ -902,12 +950,19 @@ class RNSARCameraView @JvmOverloads constructor(
         if (forwardLogTick++ % 30 == 0) {
             Log.i(TAG, "forwardToIncremental: ingestActive=$ingestActive trackingState=${camera.trackingState}")
         }
+        if (RNSARFrameStats.active) {
+            val ts = frame.timestamp
+            if (ts == lastForwardedTsNs) RNSARFrameStats.countReRender()
+            lastForwardedTsNs = ts
+        }
         // Acquire the camera image.  Each call may throw
         // NotYetAvailableException for the first ~1-2 frames before
         // ARCore catches up — silently skip those.
+        val forward0 = RNSARFrameStats.mark()
         val image = try {
             frame.acquireCameraImage()
         } catch (t: Throwable) {
+            RNSARFrameStats.countAcquireFailed()
             if (forwardLogTick % 30 == 1) {
                 Log.w(TAG, "forwardToIncremental: acquireCameraImage failed: ${t.message}")
             }
@@ -946,11 +1001,13 @@ class RNSARCameraView @JvmOverloads constructor(
             // (unsupported format), we still need to close.
             try { image.close() } catch (_: Throwable) {}
         } ?: run {
+            RNSARFrameStats.countPackNull()
             if (forwardLogTick % 30 == 1) {
                 Log.w(TAG, "forwardToIncremental: packNV21 returned null (unexpected format?)")
             }
             return
         }
+        RNSARFrameStats.stageSince(RNSARFrameStats.Stage.FORWARD, forward0)
 
         // Compute yaw + pitch from the ARCore quaternion using
         // the same convention the iOS Swift side uses (camera-
@@ -986,7 +1043,14 @@ class RNSARCameraView @JvmOverloads constructor(
         val tArr = camera.pose.translation
 
         val trackingPoor = camera.trackingState != TrackingState.TRACKING
-        val module = IncrementalStitcher.bridgeInstance ?: return
+        // ⚠ THIS RETURN ALSO SKIPS THE WORKLET FAN-OUT AND EVERY AR PLUGIN
+        // below, not only the keyframe ingest it guards. Counted (A1.0) so a
+        // plugin arm that received nothing can be told apart from one that
+        // refused everything; the behaviour itself is unchanged here.
+        val module = IncrementalStitcher.bridgeInstance ?: run {
+            RNSARFrameStats.countNoBridge()
+            return
+        }
         // 2026-05-15 (B3) — pass current display rotation so the
         // encoded JPEG gets an EXIF orientation tag.  Captured into
         // a local val so the lambda below closes over a primitive
@@ -1003,6 +1067,7 @@ class RNSARCameraView @JvmOverloads constructor(
         // completes before ARCore recycles the Image.  Only ingest when the host
         // has actively engaged capture (`setIncrementalIngestionActive(true)`).
         if (ingestActive) {
+        val stitch0 = RNSARFrameStats.mark()
         module.ingestFromARCameraView(
             tx = tArr[0].toDouble(),
             ty = tArr[1].toDouble(),
@@ -1063,6 +1128,7 @@ class RNSARCameraView @JvmOverloads constructor(
                 )
             },
         )
+        RNSARFrameStats.stageSince(RNSARFrameStats.Stage.STITCH_INGEST, stitch0)
         }  // closes `if (ingestActive)` (v0.8.0 Phase 4b.iii)
 
         // ── v0.8.0 Phase 4b.iii — AR frame-processor host-worklet fan-out ──
@@ -1120,7 +1186,12 @@ class RNSARCameraView @JvmOverloads constructor(
         // Acquired when EITHER depth (raw emission) OR mesh
         // (reconstruction) is requested.
         val depth: ArDepthData? =
-            if (flags.depth || flags.mesh) acquireDepth16Packed(frame) else null
+            if (flags.depth || flags.mesh) {
+                val depth0 = RNSARFrameStats.mark()
+                acquireDepth16Packed(frame).also {
+                    RNSARFrameStats.stageSince(RNSARFrameStats.Stage.DEPTH, depth0)
+                }
+            } else null
 
         // ── AR anchors ──────────────────────────────────────────────────
         //
@@ -1166,6 +1237,7 @@ class RNSARCameraView @JvmOverloads constructor(
         val anchorAlignments = Array(allAnchors.size) { allAnchors[it].alignment }
         val anchorExtents = Array<DoubleArray?>(allAnchors.size) { allAnchors[it].extent }
 
+        val worklets0 = RNSARFrameStats.mark()
         StitcherWorkletRuntime.dispatchToHostWorklets(
             nv21Bytes = packed.nv21,
             width = packed.width,
@@ -1198,6 +1270,7 @@ class RNSARCameraView @JvmOverloads constructor(
             anchorAlignments = anchorAlignments,
             anchorExtents = anchorExtents,
         )
+        RNSARFrameStats.stageSince(RNSARFrameStats.Stage.WORKLETS, worklets0)
 
         // ── 0.19.0 — native AR-plugin per-frame invocation ───────────────
         //
@@ -1317,6 +1390,7 @@ class RNSARCameraView @JvmOverloads constructor(
         // featurePoints stays null; we never crash the render loop.
         var featurePoints: FloatArray? = null
         if (RNSARSession.featurePointsCloudEnabled) {
+            val cloud0 = RNSARFrameStats.mark()
             try {
                 frame.acquirePointCloud().use { cloud ->
                     val buf = cloud.points  // direct FloatBuffer, stride-4
@@ -1341,6 +1415,7 @@ class RNSARCameraView @JvmOverloads constructor(
                 }
                 featurePoints = null
             }
+            RNSARFrameStats.stageSince(RNSARFrameStats.Stage.POINT_CLOUD, cloud0)
         }
 
         // The frame's exposure from ARCore's per-frame image metadata, for
@@ -1348,11 +1423,13 @@ class RNSARCameraView @JvmOverloads constructor(
         // 0, never a guess.
         var exposureNs = 0L
         var iso = 0
+        val metadata0 = RNSARFrameStats.mark()
         try {
             val md = frame.imageMetadata
             try { exposureNs = md.getLong(com.google.ar.core.ImageMetadata.SENSOR_EXPOSURE_TIME) } catch (_: Throwable) { }
             try { iso = md.getInt(com.google.ar.core.ImageMetadata.SENSOR_SENSITIVITY) } catch (_: Throwable) { }
         } catch (_: Throwable) { }
+        RNSARFrameStats.stageSince(RNSARFrameStats.Stage.IMAGE_METADATA, metadata0)
 
         val ctx = ARFrameContext(
             nv21 = packed.nv21,
@@ -1384,21 +1461,46 @@ class RNSARCameraView @JvmOverloads constructor(
 
         var sync: HashMap<String, Any?>? = null
         for (plugin in plugins) {
+            // A1.0 — each plugin's own cost on the GL thread, by its name,
+            // while a sweep that reports it is armed. This is the number that
+            // says whether ANOTHER plugin sharing the loop is what slows it (a
+            // throw is timed too — it cost the tick).
+            val plugin0 = RNSARFrameStats.mark()
             val result = try {
                 plugin.process(ctx)
             } catch (t: Throwable) {
                 if (forwardLogTick % 30 == 1) {
-                    Log.w(TAG, "AR plugin '${plugin.name()}' threw in process(): ${t.message}")
+                    Log.w(TAG, "AR plugin '${pluginNameOrNull(plugin) ?: "?"}' threw in process(): ${t.message}")
                 }
                 null
             }
+            val timed = plugin0 != RNSARFrameStats.NOT_TIMING
+            val pluginNs = if (timed) System.nanoTime() - plugin0 else 0L
+            // Untimed and no result: nothing needs the name, so — as before
+            // the timers — it is not read.
+            if (!timed && result == null) continue
+            // ⚠ THE NAME, READ ONCE AND GUARDED. `name()` is the host's code as
+            // much as `process()` is, and this loop runs inside onDrawFrame: a
+            // throw from it here would end the GL thread. A name that cannot
+            // be read times nothing and keys nothing.
+            val name = pluginNameOrNull(plugin)
+            if (name == null) {
+                if (forwardLogTick % 30 == 1) Log.w(TAG, "an AR plugin's name() threw; its result is dropped")
+                continue
+            }
+            if (timed) RNSARFrameStats.plugin(name, pluginNs)
             if (result != null) {
                 if (sync == null) sync = HashMap()
-                sync[plugin.name()] = result
+                sync[name] = result
             }
         }
         lastPluginSyncResults = sync
     }
+
+    /// A plugin's `name()`, or null when the host's implementation throws —
+    /// never a throw on the GL thread (see [runArPlugins]).
+    private fun pluginNameOrNull(plugin: ARFramePlugin): String? =
+        try { plugin.name() } catch (_: Throwable) { null }
 
     /// Packed DEPTH16 result: dense (no row padding) uint16-per-pixel
     /// bytes plus the depth-map dimensions.  `bytes.size == width*height*2`.

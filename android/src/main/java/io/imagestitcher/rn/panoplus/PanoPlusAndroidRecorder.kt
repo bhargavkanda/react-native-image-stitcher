@@ -432,42 +432,6 @@ private class ImuSample(
     val deliveredElapsedNs: Long,
 )
 
-/** Running min / mean / max / p50 over a bounded reservoir. */
-private class Stat(private val cap: Int = 512) {
-    private val buf = DoubleArray(cap)
-    private var n = 0L
-    private var sum = 0.0
-    private var lo = Double.MAX_VALUE
-    private var hi = -Double.MAX_VALUE
-    @Synchronized fun add(v: Double) {
-        if (!v.isFinite()) return
-        if (n < cap) buf[n.toInt()] = v else buf[(n % cap).toInt()] = v
-        n++; sum += v
-        if (v < lo) lo = v
-        if (v > hi) hi = v
-    }
-    @Synchronized fun toJson(): String {
-        if (n == 0L) return Jo().i("n", 0L).end()
-        val k = minOf(n, cap.toLong()).toInt()
-        val c = buf.copyOf(k); c.sort()
-        return Jo().i("n", n).n("min", lo).n("p50", c[k / 2]).n("mean", sum / n).n("max", hi).end()
-    }
-    @Synchronized fun count(): Long = n
-
-    /**
-     * The p50, for the ONE consumer that needs a number rather than a JSON
-     * block: the live status the panel polls at 2 Hz while the sweep runs.
-     * `toJson()` stays the authority for the pack — this is the same sample
-     * set read a cheaper way.
-     */
-    @Synchronized fun p50(): Double {
-        if (n == 0L) return 0.0
-        val k = minOf(n, cap.toLong()).toInt()
-        val c = buf.copyOf(k); c.sort()
-        return c[k / 2]
-    }
-}
-
 // ════════════════════════════════════════════════════════════════════════
 //  The module
 // ════════════════════════════════════════════════════════════════════════
@@ -485,19 +449,51 @@ internal object PanoPlusCameraRelease {
     private val gen = java.util.concurrent.atomic.AtomicLong(0)
     @Volatile private var releasedGen: Long = -1L
     /**
+     * U5c — WHEN the current sweep let its cameras go, in wall-clock epoch ms
+     * (the clock JS's `Date.now()` and the pack's meta clocks read). 0 until
+     * then.
+     *
+     * The boolean alone reaches JS only if a 100 ms status poll happens to
+     * land between the release and the settle, and a native finalize of
+     * 44-228 ms (measured on the pulled packs) is often shorter than that —
+     * so the finish timeline could not say when the camera was let go. This
+     * is the exact instant, readable on any later poll, including the final
+     * post-settle one.
+     */
+    @Volatile private var releasedAt = 0.0
+    /**
      * A session was INSTALLED: its generation, and nothing is released for it
      * yet. Taken at install, not at `start()` entry — a start that loses the
      * install race, or a superseded session's teardown, must never mark the
      * sweep that did install as released (M8 review).
      */
-    fun begin(): Long = gen.incrementAndGet()
+    fun begin(): Long {
+        // NOT what keeps the stamp from leaking into the next sweep —
+        // [releasedAtMs]'s generation gate is, and a new generation fails it
+        // with or without this line. The reset only narrows that getter's
+        // check-then-read window: a read that passed the gate for the old
+        // generation just before this begin() then reads 0, not the old stamp.
+        releasedAt = 0.0
+        return gen.incrementAndGet()
+    }
     /** The session of generation `g` has let every camera go. A stale
      *  session's report is ignored. */
     fun release(g: Long) {
-        if (g == gen.get()) releasedGen = g
+        if (g == gen.get()) {
+            // The stamp FIRST, then the generation: both are volatile, so a
+            // reader that sees `released` is guaranteed to see this stamp too
+            // (a volatile write happens-before any read that observes it).
+            releasedAt = System.currentTimeMillis().toDouble()
+            releasedGen = g
+        }
     }
     /** Has the CURRENT sweep passed its camera-release point? */
     val released: Boolean get() = releasedGen == gen.get()
+    /**
+     * U5c — the current sweep's release instant in epoch ms, or 0 when it
+     * has not released (fail closed: 0 is "not reported", never a time).
+     */
+    val releasedAtMs: Double get() = if (released) releasedAt else 0.0
 }
 
 class PanoPlusAndroidRecorder(private val reactContext: ReactApplicationContext) :
@@ -698,7 +694,8 @@ class PanoPlusAndroidRecorder(private val reactContext: ReactApplicationContext)
         // be nearly free — a no-op JNI call that returned 0 once the session was
         // gone — but the ingest offload now COPIES the frame before it can
         // discover there is nothing to feed, so a leaked arm costs a 3.11 MB
-        // allocation per render tick on the render thread. Idempotent.
+        // copy per distinct camera frame on the render thread (into a pooled
+        // buffer since A1.2) and pins the pool. Idempotent.
         PanoPlusArFramePlugin.shared.disarm()
         val rec = session.getAndSet(null) ?: return
         try {
@@ -2458,6 +2455,12 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
      * start(), so it cannot leak across sweeps by construction.
      */
     @Volatile private var arPluginArmActive = false
+    /**
+     * A1.0 — the device state at the sweep's start (thermal, GC, process CPU),
+     * taken with the first device.json write so every arm has one. See
+     * PanoPlusPerf.
+     */
+    @Volatile private var perfStart: PanoPlusPerf.Sample? = null
     /**
      * THE ARM THIS SWEEP RAN ON — "ar" or "imu" — set by each start mode
      * before `startLiveEngine()` builds the provenance block.
@@ -6284,10 +6287,21 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
 
     /** Serialised: the "recording-started" snapshot runs on an IO coroutine
      *  while a stop() could arrive, and two interleaved writers would leave a
-     *  device.json that parses as far as it goes — worse than none. */
+     *  device.json that parses as far as it goes — worse than none.
+     *
+     *  @param samplePerf take `perf`'s device readings in this write. False on
+     *    a teardown with no owner ([shutdown] with `finalizeLive = false`),
+     *    which runs on the UI thread or RN's one NativeModules queue: the
+     *    thermal readings are binder calls into the thermal service, and that
+     *    teardown's budget is for letting the camera go. Its `perf` stop
+     *    fields are then null (not measured), never a reading. */
     @Synchronized
-    private fun writeDeviceJson(phase: String, reprobeCameras: Boolean = true) {
+    private fun writeDeviceJson(phase: String, reprobeCameras: Boolean = true, samplePerf: Boolean = true) {
         try {
+            val perfStartSample = perfStart
+                ?: (if (samplePerf) PanoPlusPerf.sample(ctx).also { perfStart = it } else null)
+            val perfStopSample =
+                if (phase == "recording-started" || !samplePerf) null else PanoPlusPerf.sample(ctx)
             val cam = chosen
             val size = outSize
             val (comparable, verdict) = clockVerdict()
@@ -7092,7 +7106,7 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
                         .raw(
                             "arPlugin",
                             if (arPluginArmActive) {
-                                joFromCounters(PanoPlusArFramePlugin.shared.state.counters())
+                                joFromCounters(PanoPlusArFramePlugin.shared.counters())
                             } else {
                                 jstr(
                                     "not applicable — this sweep did not arm the AR frame " +
@@ -7102,8 +7116,53 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
                                 )
                             },
                         )
+                        // ── A1.0: THE GL LOOP THAT PACES THE AR ARM ──────────
+                        // Every frame the plugin can see is offered from
+                        // RNSARCameraView.onDrawFrame, so its tick rate is a
+                        // ceiling on the arm — 57 Hz on 2026-09-17, 26.8 Hz on
+                        // 2026-09-29, and nothing in either pack could say
+                        // where the rest of the tick went. Frozen at the
+                        // plugin's disarm (live while armed), under the SAME
+                        // guard as `arPlugin` and for the same reason: the
+                        // timers are process-wide and reset only by an AR arm.
+                        .raw(
+                            "glLoop",
+                            if (arPluginArmActive) {
+                                joFromCounters(
+                                    PanoPlusArFramePlugin.shared.glLoopAtDisarm
+                                        ?: io.imagestitcher.rn.RNSARFrameStats.snapshot(),
+                                )
+                            } else {
+                                jstr(
+                                    "not applicable — this sweep did not arm the AR frame " +
+                                        "plugin, and the GL-loop timers are reset only by one.",
+                                )
+                            },
+                        )
+                        .s(
+                            "glLoopNote",
+                            if (!arPluginArmActive) null
+                            else "Per GL tick: tickMs is onDrawFrame's wall time and tickCpuMs " +
+                                "the GL thread's CPU time over it (wall >> cpu: runnable but " +
+                                "not running); tickIntervalMs is start-to-start and swapWaitMs " +
+                                "the gap from one tick's return to the next tick's start " +
+                                "(eglSwapBuffers + vsync). <stage>MsP50/P99 and <stage>N time " +
+                                "each consumer on the loop; plugin.<name>.* each AR plugin's " +
+                                "process(). reRenderTicks re-packed a camera frame already " +
+                                "forwarded; noBridge ticks skipped EVERY plugin. glCore.<i> " +
+                                "counts samples of the core the GL thread ran on.",
+                        )
                         .end(),
                 )
+
+                // ── A1.0: THE DEVICE STATE THE SWEEP RAN IN ─────────────
+                // On EVERY arm, so a vision-camera control sweep reports it
+                // too: the same phone ran the same engine 1.6x slower at 16:35
+                // than at 16:38 on 2026-09-29 and no pack could say why.
+                // See PanoPlusPerf. The start is sampled with the FIRST
+                // device.json write (this sweep's "recording-started"); the
+                // stop with every later one.
+                .raw("perf", PanoPlusPerf.toJson(perfStartSample, perfStopSample))
 
                 // ── Counts. Every fallback in this file lands here. ─────
                 .raw(
@@ -7242,6 +7301,13 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
             if (arPluginArmActive) PanoPlusArFramePlugin.shared.snapshot()
             else WritableNativeMap().apply { putBoolean("applicable", false) },
         )
+        // A1.2 — so the live module can tell which arm's counts are the
+        // capture arm's: on this arm `droppedBusy` / `framesWritten` above are
+        // the Camera2 writer's and structurally 0.
+        putBoolean("arPluginArm", arPluginArmActive)
+        if (arPluginArmActive) {
+            putDouble("arPluginDroppedQueue", PanoPlusArFramePlugin.shared.droppedQueue())
+        }
         // Polled LIVE by the panel so a sweep that can never latch is visible
         // while there is still time to re-run it, not only in device.json
         // afterwards. Read without a join, so it can lag the writer thread by a
@@ -7628,7 +7694,9 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
                 )
             }
 
-            if (::packDir.isInitialized) writeDeviceJson(reason, reprobeCameras)
+            // `perf` is not sampled on the ownerless teardown (finalizeLive =
+            // false): see writeDeviceJson's samplePerf.
+            if (::packDir.isInitialized) writeDeviceJson(reason, reprobeCameras, samplePerf = finalizeLive)
         }
 
         if (!already) {
@@ -7683,6 +7751,12 @@ private class Rec(private val ctx: Context, private val cfg: Config) : PanoPlusV
             putDouble("livePainted", livePainted.get().toDouble())
             putDouble("liveRefused", liveRefused.get().toDouble())
             putString("packFrames", cfg.packFrames)
+            // A1.2 — the AR-plugin arm's own refusals for the summary's
+            // `droppedQueue` (see PanoPlusLiveModule.armDroppedQueue). Only
+            // when THIS sweep armed the plugin: its counters are process-wide.
+            if (arPluginArmActive) {
+                putDouble("arPluginDroppedQueue", PanoPlusArFramePlugin.shared.droppedQueue())
+            }
         }
     }
 
