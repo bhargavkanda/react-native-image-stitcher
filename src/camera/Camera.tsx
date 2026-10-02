@@ -354,7 +354,9 @@ export type CameraCaptureResult =
        * requested (iOS non-AR): the extractor's reason slug
        * (`no-depth-aux` = no auxiliary depth in the capture — typically
        * a non-depth-capable mounted device; `native-module-missing` =
-       * JS newer than the installed binary).  Diagnostic only.
+       * JS newer than the installed binary; `no-lidar-mount` =
+       * `captureDepthData: 'lidar-only'` on a phone without a LiDAR mount,
+       * where depth delivery is deliberately off).  Diagnostic only.
        */
       depthUnavailableReason?: string;
       /** Non-fatal quality signals (empty when none). */
@@ -1215,8 +1217,18 @@ export interface CameraProps {
    * hardware.  Distinct from `enableDepth` above, which is the AR
    * frame-processor's per-frame depth.  Default `false` (depth delivery
    * adds per-shot latency).
+   *
+   * `'lidar-only'` — photo depth from the LiDAR mount ONLY.  On a LiDAR
+   * iPhone it behaves exactly like `true`.  On every other phone `true`
+   * would mount a two-colour-lens virtual camera (Dual Wide) at 1×, which
+   * the 1× non-AR sweep refuses (`panoplus-vc-device-unsupported`); under
+   * `'lidar-only'` the 1× mount stays the plain wide, depth delivery and
+   * the depth format bias stay OFF, the sweep is not refused, and each
+   * photo reports `depthUnavailableReason: 'no-lidar-mount'`.  The decision
+   * is made from the enumerated devices (`selectCaptureDevice`), not from
+   * a model list.
    */
-  captureDepthData?: boolean;
+  captureDepthData?: boolean | 'lidar-only';
   /**
    * Opt in to per-frame AR anchors (`CameraFrame.arAnchors` — detected
    * planes / images).  Default `false`.
@@ -5383,8 +5395,9 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         // iOS depth sidecar for tap photos (non-AR only): turns on
         // vision-camera depth delivery + the depth-capable format bias;
         // useCapture (threaded above) extracts the sidecar before the
-        // orientation re-encode.
-        captureDepthData={captureDepthData}
+        // orientation re-encode.  The EFFECTIVE opt-in: `'lidar-only'` on a
+        // phone without a LiDAR mount is false here (no bias, no delivery).
+        captureDepthData={capture.effectiveCaptureDepthData}
         // High-res still capture (document scanning): raises the photo cap so
         // the non-AR tap photo uses the device's largest 4:3 still (e.g.
         // 12.5 MP), while the 4:3 video/preview the frame-processor runs on is
@@ -5528,7 +5541,10 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       colourLensTypes: Platform.OS === 'ios'
         ? colourLensTypeCount(capture.device?.physicalDevices)
         : null,
-      depthMount: Platform.OS === 'ios' && captureDepthData === true,
+      // EFFECTIVE depth, not the request: `'lidar-only'` without a LiDAR
+      // mount leaves the plain wide mounted and must not be named as the
+      // cause of a refusal it does not produce.
+      depthMount: Platform.OS === 'ios' && capture.effectiveCaptureDepthData,
     });
 
   // ── PANORAMA OFF REFUSES THE SWEEP HOLD TOO, ON EITHER ARM (M3 review) ──
@@ -7062,7 +7078,11 @@ export interface SweepHostArmRefusalInput {
    * refuses the same mount before the hold, and says why.
    */
   colourLensTypes: number | null;
-  /** iOS `captureDepthData` is on — the usual reason a 1× mount is multi-lens. */
+  /**
+   * iOS photo depth is EFFECTIVELY on (`useCapture`'s
+   * `effectiveCaptureDepthData`) — the usual reason a 1× mount is
+   * multi-lens.  `'lidar-only'` on a phone without LiDAR is false here.
+   */
   depthMount: boolean;
 }
 

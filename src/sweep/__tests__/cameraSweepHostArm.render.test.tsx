@@ -1420,3 +1420,78 @@ describe('⚑ the sweep\'s hold overlay paints NOTHING over the live preview', (
     act(() => { tree.unmount(); });
   });
 });
+
+/**
+ * ── `captureDepthData: 'lidar-only'` through `<Camera>` ──────────────────
+ *
+ * The pure composition is pinned in `sweepHostOwnsCamera.test.ts`; this is
+ * the WIRING: `<Camera>` must hand `<CameraView>` and the sweep's refusal the
+ * EFFECTIVE depth (`useCapture`'s `effectiveCaptureDepthData`), not the
+ * request — otherwise 'lidar-only' on a non-LiDAR iPhone still turns on the
+ * depth format bias and vision-camera depth delivery on the plain wide, and
+ * any future refusal names photo depth as a cause it is not.
+ *
+ * ⚠ BOTH device hooks are overridden: `selectCaptureDevice` reads the LIST.
+ * iOS lineups shaped like vision-camera's report (factor-style zoom, so no
+ * multicam; the LiDAR constituent is a second `wide-angle-camera`).
+ */
+describe("⚑ LiDAR-only depth — <Camera captureDepthData='lidar-only'> wires the EFFECTIVE depth", () => {
+  const iosBack = (id: string, p: Record<string, unknown> = {}) => ({
+    ...DEVICE, id, name: id, ...p,
+  });
+  const PLAIN = iosBack('plain-wide');
+  const UW = iosBack('uw', { physicalDevices: ['ultra-wide-angle-camera'], hasTorch: false });
+  const DUAL_WIDE = iosBack('dual-wide', {
+    physicalDevices: ['ultra-wide-angle-camera', 'wide-angle-camera'], isMultiCam: true,
+  });
+  const LIDAR = iosBack('lidar', {
+    physicalDevices: ['wide-angle-camera', 'wide-angle-camera'], isMultiCam: true,
+  });
+  const arrange = (lineup: unknown[]) => {
+    (Platform as { OS: string }).OS = 'ios';
+    vc.useCameraDevices = () => lineup;
+  };
+  const refusalCode = () =>
+    (surfaceProps(undefined as never).hostArmRefusal as { code?: string } | null)?.code;
+  /** No iOS native module in a render test → the vc arm is unavailable. */
+  const NEXT_REASON = 'panoplus-vc-arm-unavailable';
+
+  it('non-LiDAR iPhone: the plain wide is mounted, CameraView gets NO depth, the 1× sweep is not refused for its lenses', async () => {
+    arrange([PLAIN, UW, DUAL_WIDE]);
+    const tree = await render({ captureDepthData: 'lidar-only' });
+    const views = cameraViews(tree);
+    expect(views).toHaveLength(1);
+    expect((views[0].props.device as { id: string }).id).toBe('plain-wide');
+    expect(views[0].props.captureDepthData).toBe(false);
+    // The lens check PASSED: what remains is this harness's absent iOS native
+    // module, which the precedence ranks BELOW a multi-lens mount — so a
+    // multi-lens mount would have answered first.
+    expect(refusalCode()).toBe(NEXT_REASON);
+    act(() => { tree.unmount(); });
+  });
+
+  it('the same phone with captureDepthData true is UNCHANGED: Dual Wide, depth on, refused naming photo depth', async () => {
+    arrange([PLAIN, UW, DUAL_WIDE]);
+    const tree = await render({ captureDepthData: true });
+    const views = cameraViews(tree);
+    expect((views[0].props.device as { id: string }).id).toBe('dual-wide');
+    expect(views[0].props.captureDepthData).toBe(true);
+    const r = surfaceProps(tree).hostArmRefusal as { code?: string; message?: string } | null;
+    expect(r?.code).toBe('panoplus-vc-device-unsupported');
+    expect(r?.message).toMatch(/photo depth/);
+    act(() => { tree.unmount(); });
+  });
+
+  it('LiDAR iPhone: the LiDAR mount, depth ON, one colour lens — not refused for its lenses', async () => {
+    arrange([PLAIN, UW, DUAL_WIDE, LIDAR]);
+    const tree = await render({ captureDepthData: 'lidar-only' });
+    const views = cameraViews(tree);
+    expect((views[0].props.device as { id: string }).id).toBe('lidar');
+    expect(views[0].props.captureDepthData).toBe(true);
+    // The lens check PASSED: what remains is this harness's absent iOS native
+    // module, which the precedence ranks BELOW a multi-lens mount — so a
+    // multi-lens mount would have answered first.
+    expect(refusalCode()).toBe(NEXT_REASON);
+    act(() => { tree.unmount(); });
+  });
+});

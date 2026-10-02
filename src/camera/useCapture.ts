@@ -38,8 +38,10 @@ import {
 } from 'react-native-vision-camera';
 
 import {
+  classifyDepthMount,
   selectCaptureDevice,
   zoomForLens,
+  type CaptureDepthMount,
   type CaptureDeviceMode,
   type DeviceLike,
 } from './selectCaptureDevice';
@@ -126,8 +128,16 @@ export interface UseCaptureOptions {
    * Works on dual-camera iPhones (stereo disparity) and LiDAR models
    * (absolute depth).  No-op on Android and on depth-less devices —
    * `depthPath` is simply absent.  Default off.
+   *
+   * `'lidar-only'` — depth from the LiDAR mount ONLY (see
+   * `SelectCaptureDeviceOptions.preferDepth`).  On a LiDAR iPhone it is
+   * `true`.  On any other phone the 1× mount stays the plain wide (so the
+   * 1× non-AR sweep is not refused for a multi-lens mount), depth delivery
+   * stays off (`effectiveCaptureDepthData` is false — hand THAT to
+   * `<CameraView captureDepthData>`), no extraction runs, and each photo
+   * reports `depthUnavailableReason: 'no-lidar-mount'`.
    */
-  captureDepthData?: boolean;
+  captureDepthData?: boolean | 'lidar-only';
 }
 
 
@@ -232,6 +242,20 @@ export interface UseCaptureReturn {
    * no zoom needed).  Pass to `<CameraView zoom>`.
    */
   deviceZoom: number | undefined;
+  /**
+   * Where the 1× mount's photo depth comes from under `captureDepthData`
+   * (`CaptureDeviceSelection.depthMount`): `'lidar'`, `'stereo'`, or
+   * `'none'` — always `'none'` on Android and when depth was not asked for.
+   * On the legacy path (no `lens`) it describes the device actually mounted.
+   */
+  depthMount: CaptureDepthMount;
+  /**
+   * The depth opt-in to hand `<CameraView captureDepthData>`: `true` passes
+   * through unchanged (as before `'lidar-only'` existed); `'lidar-only'` is
+   * true only when `depthMount` is `'lidar'`, so a phone without LiDAR
+   * neither biases the format pick nor enables vision-camera depth delivery.
+   */
+  effectiveCaptureDepthData: boolean;
 }
 
 
@@ -303,7 +327,10 @@ export function useCapture(options: UseCaptureOptions = {}): UseCaptureReturn {
         // a depth-capable virtual device as the 1× primary (iOS only; see
         // SelectCaptureDeviceOptions.preferDepth for the wide+tele FOV
         // trade). Without the opt-in the plain-wide pick is unchanged.
-        preferDepth: captureDepthData === true && Platform.OS === 'ios',
+        // 'lidar-only' admits the LiDAR mount alone (plain wide otherwise).
+        preferDepth: Platform.OS === 'ios'
+          ? (captureDepthData === 'lidar-only' ? 'lidar-only' : captureDepthData === true)
+          : false,
         // Galaxy S24 Ultra field finding (SCG26, 2026-07-27): on Android,
         // don't trust a multicam device's zoom-reach claim to the
         // ultra-wide when a real standalone ultra-wide id exists — see
@@ -346,6 +373,23 @@ export function useCapture(options: UseCaptureOptions = {}): UseCaptureReturn {
     device = legacyDevice ?? legacyFallback;
     activeZoom = undefined;
   }
+
+  // The EFFECTIVE depth. With a `lens` the selection's primary decides it
+  // (the 0.5× standalone ultra-wide has no depth on any phone, and the
+  // per-capture `ultra-wide-no-depth` slug says so). On the legacy path the
+  // selection is not what is mounted, so the mounted device is classified.
+  let depthMount: CaptureDepthMount;
+  if (lens != null) {
+    depthMount = selection.depthMount;
+  } else if (Platform.OS !== 'ios' || !captureDepthData || device == null) {
+    depthMount = 'none';
+  } else {
+    const offered = classifyDepthMount(device as unknown as DeviceLike);
+    depthMount = captureDepthData === 'lidar-only' && offered !== 'lidar' ? 'none' : offered;
+  }
+  const effectiveCaptureDepthData =
+    captureDepthData === true
+    || (captureDepthData === 'lidar-only' && depthMount === 'lidar');
 
   // v0.15 diagnostic (dev-only) — for the "0.5× pill shows but tapping
   // doesn't switch the camera" report on Android (Samsung).  Logs the
@@ -446,7 +490,16 @@ export function useCapture(options: UseCaptureOptions = {}): UseCaptureReturn {
         // is an advisory extra (`depthPath` simply stays unset).
         let depthTmpPath: string | undefined;
         let depthUnavailableReason: string | undefined;
-        if (captureDepthData && Platform.OS === 'ios') {
+        if (
+          Platform.OS === 'ios'
+          && captureDepthData === 'lidar-only'
+          && !effectiveCaptureDepthData
+        ) {
+          // 'lidar-only' on a phone with no LiDAR mount: depth delivery is
+          // off (see `effectiveCaptureDepthData`), so there is nothing to
+          // extract — name the absence instead of running the extractor.
+          depthUnavailableReason = 'no-lidar-mount';
+        } else if (effectiveCaptureDepthData && Platform.OS === 'ios') {
           const depth = await extractPhotoDepth(
             photo.path,
             `${photo.path}.depth.bin`,
@@ -551,7 +604,15 @@ export function useCapture(options: UseCaptureOptions = {}): UseCaptureReturn {
     })();
     inFlightRef.current = promise;
     return promise;
-  }, [flash, enableQualityChecks, qualityThresholds, takePhotoOptions, captureDepthData, lens]);
+  }, [
+    flash,
+    enableQualityChecks,
+    qualityThresholds,
+    takePhotoOptions,
+    captureDepthData,
+    effectiveCaptureDepthData,
+    lens,
+  ]);
 
   return {
     cameraRef,
@@ -568,5 +629,7 @@ export function useCapture(options: UseCaptureOptions = {}): UseCaptureReturn {
     ultraWideFactor: selection.ultraWideFactor,
     deviceHasTorch: device?.hasTorch ?? false,
     deviceZoom: activeZoom,
+    depthMount,
+    effectiveCaptureDepthData,
   };
 }

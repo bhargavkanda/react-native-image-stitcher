@@ -83,6 +83,7 @@ import {
   _sweepShouldSettleForTests as shouldSettle,
   cameraKindFor,
 } from '../Camera';
+import { selectCaptureDevice, type DeviceLike } from '../selectCaptureDevice';
 
 /** The state in which the host owns the camera: non-AR, no hatch (M5: both platforms). */
 const OK: SweepHostOwnsCameraInput = {
@@ -221,6 +222,52 @@ describe('the iOS multi-lens mount (M5 review) — refused before the hold, by i
     expect(r?.message).toMatch(/photo depth/);
     expect(sweepFailureCameraCode(r?.code)).toBe('SWEEP_DEVICE_UNSUPPORTED');
     expect(sweepHostArmRefusal({ ...READY, colourLensTypes: null })).toBeNull();
+  });
+
+  // LiDAR-only depth — the pick, the lens count and the refusal composed as
+  // `<Camera>` composes them (selection → mounted device's physicalDevices →
+  // `depthMount` from the EFFECTIVE depth), on a non-LiDAR iPhone lineup.
+  const back = (p: Partial<DeviceLike>): DeviceLike => ({
+    id: String(Math.random()), position: 'back', physicalDevices: ['wide-angle-camera'],
+    isMultiCam: false, hasTorch: true, minZoom: 1, neutralZoom: 1, maxZoom: 10, ...p,
+  });
+  const NON_LIDAR: DeviceLike[] = [
+    back({ id: 'plain-wide' }),
+    back({ id: 'uw', physicalDevices: ['ultra-wide-angle-camera'], hasTorch: false }),
+    back({ id: 'dual', physicalDevices: ['wide-angle-camera', 'telephoto-camera'], isMultiCam: true }),
+    back({ id: 'dual-wide', physicalDevices: ['ultra-wide-angle-camera', 'wide-angle-camera'], isMultiCam: true }),
+  ];
+  const refusalFor = (preferDepth: boolean | 'lidar-only') => {
+    const sel = selectCaptureDevice(NON_LIDAR, { preferDepth, platform: 'ios' });
+    // `effectiveCaptureDepthData` (useCapture): `true` passes through,
+    // 'lidar-only' only on a LiDAR mount.
+    const effective = preferDepth === true
+      || (preferDepth === 'lidar-only' && sel.depthMount === 'lidar');
+    return {
+      sel,
+      refusal: sweepHostArmRefusal({
+        ...READY,
+        captureMode: sel.mode,
+        deviceId: sel.device?.id ?? '',
+        colourLensTypes: colourLensTypeCount(sel.device?.physicalDevices),
+        depthMount: effective,
+      }),
+    };
+  };
+  it('⚑ lidar-only on a non-LiDAR iPhone keeps the plain wide — the 1× sweep is NOT refused', () => {
+    const { sel, refusal } = refusalFor('lidar-only');
+    expect(sel.device?.id).toBe('plain-wide');
+    expect(sel.depthMount).toBe('none');
+    expect(refusal).toBeNull();
+  });
+  it('the boolean-true path on the same phone is STILL refused, naming photo depth (regression pin)', () => {
+    const { sel, refusal } = refusalFor(true);
+    expect(sel.device?.id).toBe('dual-wide');
+    expect(refusal?.code).toBe('panoplus-vc-device-unsupported');
+    expect(refusal?.message).toMatch(/photo depth/);
+  });
+  it('depth off: the plain wide sweeps (unchanged)', () => {
+    expect(refusalFor(false).refusal).toBeNull();
   });
 });
 

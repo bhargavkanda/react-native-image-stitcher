@@ -56,6 +56,18 @@ export type CaptureDeviceMode =
   /** No ultra-wide anywhere; wide-angle only (no 0.5× chip). */
   | 'wide-only';
 
+/**
+ * Where the photo depth of the `1×` primary mount would come from (iOS):
+ *   - `'lidar'`  — a wide-only VIRTUAL device (`Back LiDAR Depth Camera`):
+ *     sensor depth at the full wide FOV, one colour lens.
+ *   - `'stereo'` — a multi-lens virtual device (Dual Wide / Triple / Dual):
+ *     disparity from two colour lenses.
+ *   - `'none'`   — no depth: depth was not requested, the platform has no
+ *     AVDepthData (Android), the primary is a plain physical lens, or
+ *     `preferDepth: 'lidar-only'` found no LiDAR mount.
+ */
+export type CaptureDepthMount = 'lidar' | 'stereo' | 'none';
+
 export interface CaptureDeviceSelection<D extends DeviceLike = DeviceLike> {
   /** The device to mount for the `1×` lens (and for `multicam`, all lenses). */
   device: D | null;
@@ -84,6 +96,16 @@ export interface CaptureDeviceSelection<D extends DeviceLike = DeviceLike> {
    * device.
    */
   ultraWideFactor: number | null;
+  /**
+   * The depth source of the `1×` primary mount under the requested
+   * `preferDepth` — the EFFECTIVE depth, which is what a host should hand
+   * `<CameraView captureDepthData>`, not the request.  Always `'none'` when
+   * `preferDepth` is falsy or `platform` is `'android'`; under
+   * `preferDepth: 'lidar-only'` only ever `'lidar'` or `'none'`.  Describes
+   * the PRIMARY (the `1×` mount): the `0.5×` standalone ultra-wide carries
+   * no depth on any phone, which the photo result reports per capture.
+   */
+  depthMount: CaptureDepthMount;
 }
 
 const hasLens = (d: DeviceLike, lens: LensType) =>
@@ -150,8 +172,20 @@ export interface SelectCaptureDeviceOptions {
    *          finding 2026-07-10).  Only phones with no better depth
    *          source pay this, knowingly.
    * Falls through to the normal pick when no depth-capable device exists.
+   *
+   * `'lidar-only'` — depth ONLY from the LiDAR mount (item 1 above): on a
+   * phone that has one the pick is identical to `true`; on a phone without
+   * one the 1× primary is the ordinary plain-wide pick, exactly as with
+   * `false`, and `depthMount` is `'none'`.  Why it exists: a non-LiDAR
+   * iPhone's best depth mount combines two colour lenses (Dual Wide), and
+   * a 1× non-AR sweep refuses a multi-lens mount (`<Camera>`'s
+   * `panoplus-vc-device-unsupported`), so `true` costs those phones the 1×
+   * sweep for stereo photo depth.  `'lidar-only'` keeps the sweep on every
+   * iPhone and takes depth only where it is single-lens and absolute.
+   * In `multicam` mode the mount is the wide+ultra-wide virtual whatever
+   * is asked, so `'lidar-only'` reports `depthMount: 'none'` there.
    */
-  preferDepth?: boolean;
+  preferDepth?: boolean | 'lidar-only';
   /**
    * `Platform.OS` at the call site.  Threaded in (not read directly) so
    * this module stays pure/synchronous and unit-testable without a
@@ -214,11 +248,23 @@ export function selectCaptureDevice<D extends DeviceLike>(
       has0_5x: false,
       hasTorch: false,
       ultraWideFactor: null,
+      depthMount: 'none',
     };
   }
 
   // Label-only; computed once over the whole back set (see ultraWideFactorOf).
   const ultraWideFactor = ultraWideFactorOf(back);
+
+  // The depth source the chosen primary actually offers, under the request.
+  // Android has no AVDepthData path in this SDK at all, so it never reports
+  // one whatever the device pick (which `preferDepth` still drives, as it
+  // always has, for direct callers).
+  const lidarOnly = opts.preferDepth === 'lidar-only';
+  const depthMountOf = (d: D): CaptureDepthMount => {
+    if (!opts.preferDepth || opts.platform === 'android') return 'none';
+    const offered = classifyDepthMount(d);
+    return lidarOnly && offered !== 'lidar' ? 'none' : offered;
+  };
 
   // ── 1. Prefer a multi-cam device that carries BOTH wide + ultra-wide.
   // Among candidates, prefer the one that ALSO has a torch (so flash
@@ -265,6 +311,7 @@ export function selectCaptureDevice<D extends DeviceLike>(
       has0_5x: true,
       hasTorch: device.hasTorch,
       ultraWideFactor,
+      depthMount: depthMountOf(device),
     };
   }
 
@@ -328,9 +375,11 @@ export function selectCaptureDevice<D extends DeviceLike>(
   const pickPrimary = (): D | undefined => {
     if (opts.preferDepth) {
       // Stable sort over the fewest-lens order keeps "fewer lenses
-      // first" as the within-rank tiebreak.
+      // first" as the within-rank tiebreak.  'lidar-only' admits rank 0
+      // ONLY: with no LiDAR mount it falls through to the plain pick
+      // below — no depth, and no multi-lens 1× mount.
       const virtuals = simplestWideFirst
-        .filter((d) => d.isMultiCam)
+        .filter((d) => d.isMultiCam && (!lidarOnly || depthMountRank(d) === 0))
         .sort((a, b) => depthMountRank(a) - depthMountRank(b));
       if (virtuals.length > 0) {
         const bestRank = depthMountRank(virtuals[0]);
@@ -353,6 +402,7 @@ export function selectCaptureDevice<D extends DeviceLike>(
       has0_5x: true,
       hasTorch: primary.hasTorch,
       ultraWideFactor,
+      depthMount: depthMountOf(primary),
     };
   }
 
@@ -367,7 +417,23 @@ export function selectCaptureDevice<D extends DeviceLike>(
     // Reported even here (has0_5x is false so no chip consumes it today), so
     // the field never lies about the hardware just because the chooser is off.
     ultraWideFactor,
+    depthMount: depthMountOf(wideOnly),
   };
+}
+
+/**
+ * The depth source a mounted back device OFFERS, independent of any request:
+ * `'lidar'` for a wide-only virtual (the LiDAR Depth Camera — vision-camera
+ * reports its LiDAR constituent as a second `wide-angle-camera`), `'stereo'`
+ * for any other virtual (its constituents include an ultra-wide or a tele),
+ * `'none'` for a plain physical lens, which never delivers AVDepthData.
+ * Same ranking as `selectCaptureDevice`'s `depthMountRank` (rank 0 = LiDAR).
+ */
+export function classifyDepthMount(d: DeviceLike): CaptureDepthMount {
+  if (!d.isMultiCam) return 'none';
+  return !hasLens(d, 'ultra-wide-angle-camera') && !hasLens(d, 'telephoto-camera')
+    ? 'lidar'
+    : 'stereo';
 }
 
 /**

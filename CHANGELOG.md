@@ -18,6 +18,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`captureDepthData: 'lidar-only'`** (iOS, `<Camera>` and `useCapture`) —
+  photo depth from the LiDAR mount only. On a LiDAR iPhone it is `true`. On a
+  multi-lens iPhone without LiDAR, `true` mounts Dual Wide (ultra-wide + wide)
+  at 1×, and the 1× non-AR sweep refuses a mount that combines two colour
+  lenses (`panoplus-vc-device-unsupported`); `'lidar-only'` keeps the plain
+  wide there instead, leaves depth delivery and the depth format bias OFF,
+  never runs the extractor, and reports
+  `depthUnavailableReason: 'no-lidar-mount'` on each photo. The decision is
+  made from the enumerated devices, not a model list. `true` and `false` are
+  unchanged. `useCapture` also returns `depthMount` (`'lidar'` / `'stereo'` /
+  `'none'`: the 1× mount's depth source) and `effectiveCaptureDepthData` (the
+  boolean a direct host hands `<CameraView captureDepthData>`, which `<Camera>`
+  now does itself; the sweep's refusal reads the same effective value). Proven
+  by unit and render tests on enumeration fixtures only: no LiDAR-less iPhone
+  has run it. See [Photo depth](website/docs/photo-depth.md).
+
 - **`RNISARFrameContext.depthConfidenceBuffer` and `.smoothedDepthBuffer`**
   (iOS) — two more live ARKit buffers for native AR plugins, behind the same
   `<Camera enableDepth>` gate as `depthBuffer`:

@@ -468,7 +468,7 @@ for the full key list and defaults.
 
 | Prop | Type | Default | Description |
 |---|---|---|---|
-| `captureDepthData` | `boolean` | `false` | **iOS, non-AR photo path.** Save each tap photo's `AVDepthData` as a `<photo>.depth.bin` sidecar (float32 metres + JSON header) and return its path as `depthPath` on the photo result. Stereo depth on dual-camera iPhones, LiDAR-backed absolute depth on Pro models. Silently yields no sidecar on Android, in AR capture, and on single-lens hardware. Adds per-shot latency while depth delivery runs. |
+| `captureDepthData` | `boolean \| 'lidar-only'` | `false` | **iOS, non-AR photo path.** Save each tap photo's `AVDepthData` as a `<photo>.depth.bin` sidecar (float32 metres + JSON header) and return its path as `depthPath` on the photo result. Stereo depth on dual-camera iPhones, LiDAR-backed absolute depth on Pro models. Silently yields no sidecar on Android, in AR capture, and on single-lens hardware. Adds per-shot latency while depth delivery runs. `'lidar-only'` takes depth from the LiDAR mount only: elsewhere the 1× mount stays the plain wide (so the 1× non-AR sweep is not refused) and each photo reports `depthUnavailableReason: 'no-lidar-mount'` — see [Photo depth](./photo-depth.md). |
 
 See [Photo depth sidecar](./photo-depth.md) for the sidecar file format,
 device requirements, and consumption notes.

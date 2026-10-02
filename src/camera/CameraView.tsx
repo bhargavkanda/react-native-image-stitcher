@@ -136,6 +136,12 @@ export interface CameraViewProps {
    * qualifies; a plain single wide-angle does not).  No-op on Android and
    * on depth-less devices/formats — capture proceeds without a sidecar.
    * Default off (depth delivery adds per-shot latency).
+   *
+   * Always the EFFECTIVE boolean, never the request: `<Camera>` hands this
+   * `useCapture`'s `effectiveCaptureDepthData`, so `captureDepthData:
+   * 'lidar-only'` on a phone without a LiDAR mount arrives here as `false`
+   * and neither biases the format pick nor enables depth delivery.  A
+   * direct Layer-2 host should pass the same field.
    */
   captureDepthData?: boolean;
   /**

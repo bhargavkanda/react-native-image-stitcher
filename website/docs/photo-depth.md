@@ -42,6 +42,37 @@ surfaces instead).
 Depth delivery adds per-shot latency (stereo/LiDAR processing), which is
 why the prop is opt-in.
 
+## LiDAR-only depth mount — `captureDepthData="lidar-only"`
+
+`captureDepthData` (`true`) mounts the best depth-capable camera at 1×. On a
+LiDAR iPhone that is the `Back LiDAR Depth Camera` (one colour lens, absolute
+depth). On every other multi-lens iPhone it is **Dual Wide** — a virtual
+camera that combines the ultra-wide and the wide — and a 1× non-AR sweep
+(`engine="sweep"`) refuses a camera that combines two colour lenses
+(`panoplus-vc-device-unsupported`), because it can switch lens between frames
+without notice. So `true` trades the 1× sweep for stereo photo depth on those
+phones.
+
+`captureDepthData="lidar-only"` takes depth **only** from the LiDAR mount:
+
+| Phone | 1× mount | Depth delivery | Photo result |
+|---|---|---|---|
+| LiDAR iPhone | `Back LiDAR Depth Camera` (same as `true`) | on | `depthPath` as with `true` |
+| Multi-lens iPhone without LiDAR | the plain wide (same as `false`) | **off** — no format bias, no `enableDepthData` | `depthUnavailableReason: "no-lidar-mount"`; the extractor never runs |
+| Android | unchanged | off | no `depthPath`, no reason (as with `true`) |
+
+The decision comes from the enumerated devices, not from a model list, and it
+is made once per device list — not per shot. The 1× sweep is therefore never
+refused for its lenses under `"lidar-only"`. `true` and `false` are unchanged.
+
+A direct `useCapture` host reads the decision back: `depthMount`
+(`"lidar"` / `"stereo"` / `"none"`, the 1× mount's depth source) and
+`effectiveCaptureDepthData` — hand **that** boolean, not the request, to
+`<CameraView captureDepthData>`; `<Camera>` does so itself.
+
+> Unit-tested against enumeration fixtures only: no LiDAR-less iPhone has run
+> this path yet.
+
 ## Sidecar container format — `RNISDEP1`, version 1
 
 `<photo>.depth.bin`, little-endian throughout:
@@ -114,6 +145,8 @@ photo capture. `depthPath` is absent when:
 
 - the platform is Android, or the capture ran in AR mode;
 - the device/format has no depth support (single-lens hardware);
+- `captureDepthData="lidar-only"` on a phone without a LiDAR mount
+  (`depthUnavailableReason: "no-lidar-mount"` — depth was deliberately off);
 - the host app's native lib predates this feature;
 - depth extraction or the sidecar file move failed (a `console.warn`
   explains why).

@@ -94,8 +94,11 @@ export interface CaptureResult {
    * (iOS): the extractor's reason slug — `no-depth-aux` = the capture
    * carried no auxiliary depth (typically a non-depth-capable mounted
    * device); `native-module-missing` = the JS is newer than the installed
-   * binary.  Diagnostic only.  Absent when depth was produced or never
-   * requested.
+   * binary; `ultra-wide-no-depth` = a 0.5× capture (no hardware covers the
+   * ultra-wide FOV with depth); `no-lidar-mount` = `captureDepthData:
+   * 'lidar-only'` on a phone without a LiDAR mount (delivery deliberately
+   * off, the extractor never ran).  Diagnostic only.  Absent when depth was
+   * produced or never requested.
    */
   depthUnavailableReason?: string;
 }

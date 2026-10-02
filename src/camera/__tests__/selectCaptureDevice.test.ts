@@ -14,6 +14,7 @@
  */
 
 import {
+  classifyDepthMount,
   selectCaptureDevice,
   zoomForLens,
   type DeviceLike,
@@ -386,6 +387,128 @@ describe('selectCaptureDevice preferDepth (captureDepthData device pick)', () =>
     const lidar = lidarDepthCam();
     const sel = selectCaptureDevice([dual, lidar, plainWide, uw]);
     expect(sel.device).toBe(plainWide);
+  });
+
+  // ── preferDepth 'lidar-only' + the EFFECTIVE depth mount ───────────────
+  // vision-camera reports the LiDAR Depth Camera's LiDAR constituent as a
+  // second 'wide-angle-camera' (see Camera.tsx colourLensTypeCount), so the
+  // real-enumeration form is pinned alongside the single-entry builder.
+  const realLidar = () => lidarDepthCam({
+    physicalDevices: ['wide-angle-camera', 'wide-angle-camera'],
+  });
+
+  it('16-Pro-like lineup, lidar-only → the LiDAR virtual, depthMount lidar', () => {
+    const plainWide = standaloneWide();
+    const uw = standaloneUltraWide();
+    const lidar = realLidar();
+    const lineup = [plainWide, uw, dualWideTele(), dualWide({ minZoom: 1 }),
+      tripleCam({ minZoom: 1 }), lidar];
+    const sel = selectCaptureDevice(lineup, { preferDepth: 'lidar-only' });
+    expect(sel.mode).toBe('standalone-uw');
+    expect(sel.device).toBe(lidar);
+    expect(sel.depthMount).toBe('lidar');
+    expect(sel.ultraWideDevice).toBe(uw); // 0.5× swap unchanged
+    // Same pick as `true` on a LiDAR phone — 'lidar-only' changes nothing there.
+    expect(selectCaptureDevice(lineup, { preferDepth: true }).device).toBe(lidar);
+    expect(selectCaptureDevice(lineup, { preferDepth: true }).depthMount).toBe('lidar');
+  });
+
+  it('⚑ no LiDAR (plainWide, uw, dualTele, dualUwWide), lidar-only → plainWide, depthMount none, 0.5× swap unchanged', () => {
+    // FAILED before 'lidar-only': the only depth opt-in was `true`, which mounts
+    // Dual Wide — two colour lenses, refused by the 1× non-AR sweep.
+    const plainWide = standaloneWide();
+    const uw = standaloneUltraWide();
+    const dualTele = dualWideTele();
+    const dualUwWide = dualWide({ minZoom: 1 });
+    const lineup = [plainWide, uw, dualTele, dualUwWide];
+    const sel = selectCaptureDevice(lineup, { preferDepth: 'lidar-only' });
+    expect(sel.mode).toBe('standalone-uw');
+    expect(sel.device).toBe(plainWide);
+    expect(sel.depthMount).toBe('none');
+    expect(sel.ultraWideDevice).toBe(uw);
+    expect(sel.has0_5x).toBe(true);
+    expect(sel.hasTorch).toBe(true);
+    // Identical pick to no depth at all.
+    const off = selectCaptureDevice(lineup);
+    expect(sel.device).toBe(off.device);
+    expect(sel.ultraWideDevice).toBe(off.ultraWideDevice);
+  });
+
+  it('lidar-only never takes a stereo virtual, even when it is the only virtual (wide-only)', () => {
+    const plainWide = standaloneWide();
+    const dual = dualWideTele();
+    const sel = selectCaptureDevice([dual, plainWide], { preferDepth: 'lidar-only' });
+    expect(sel.mode).toBe('wide-only');
+    expect(sel.device).toBe(plainWide);
+    expect(sel.depthMount).toBe('none');
+  });
+
+  it('lidar-only: rank 0 still dominates torch (torchless LiDAR over a torch-bearing plain wide)', () => {
+    const plainWide = standaloneWide({ hasTorch: true });
+    const uw = standaloneUltraWide();
+    const lidar = realLidar();
+    lidar.hasTorch = false;
+    const sel = selectCaptureDevice([plainWide, uw, lidar], { preferDepth: 'lidar-only' });
+    expect(sel.device).toBe(lidar);
+    expect(sel.depthMount).toBe('lidar');
+    expect(sel.hasTorch).toBe(false);
+  });
+
+  it('preferDepth true is UNCHANGED on a non-LiDAR phone → dualUwWide, depthMount stereo (regression pin)', () => {
+    const plainWide = standaloneWide();
+    const uw = standaloneUltraWide();
+    const dualUwWide = dualWide({ minZoom: 1 });
+    const sel = selectCaptureDevice([plainWide, uw, dualWideTele(), dualUwWide], {
+      preferDepth: true,
+    });
+    expect(sel.device).toBe(dualUwWide);
+    expect(sel.depthMount).toBe('stereo');
+  });
+
+  it('preferDepth true with no virtual at all → plain wide, depthMount none (no fabricated depth)', () => {
+    const plainWide = standaloneWide();
+    const sel = selectCaptureDevice([plainWide, standaloneUltraWide()], { preferDepth: true });
+    expect(sel.device).toBe(plainWide);
+    expect(sel.depthMount).toBe('none');
+  });
+
+  it('multicam mode: true → stereo; lidar-only → none (the mount is wide+uw whatever is asked)', () => {
+    const wideUwVirtual = dualWide();
+    const t = selectCaptureDevice([wideUwVirtual], { preferDepth: true });
+    const l = selectCaptureDevice([wideUwVirtual], { preferDepth: 'lidar-only' });
+    expect(t.mode).toBe('multicam');
+    expect(l.mode).toBe('multicam');
+    expect(l.device).toBe(t.device); // device pick unaffected
+    expect(t.depthMount).toBe('stereo');
+    expect(l.depthMount).toBe('none');
+  });
+
+  it('preferDepth false / omitted → depthMount none on every lineup', () => {
+    const lineup = [standaloneWide(), standaloneUltraWide(), realLidar(), dualWide({ minZoom: 1 })];
+    expect(selectCaptureDevice(lineup, { preferDepth: false }).depthMount).toBe('none');
+    expect(selectCaptureDevice(lineup).depthMount).toBe('none');
+    expect(selectCaptureDevice([]).depthMount).toBe('none');
+    expect(selectCaptureDevice([], { preferDepth: 'lidar-only' }).depthMount).toBe('none');
+  });
+
+  it('android → depthMount none (no AVDepthData path), and the device pick is untouched', () => {
+    const lineup = [standaloneWide(), standaloneUltraWide(), realLidar(), dualWide({ minZoom: 1 })];
+    for (const preferDepth of [true, 'lidar-only'] as const) {
+      const a = selectCaptureDevice(lineup, { preferDepth, platform: 'android' });
+      const i = selectCaptureDevice(lineup, { preferDepth, platform: 'ios' });
+      expect(a.depthMount).toBe('none');
+      expect(a.device).toBe(i.device);
+    }
+  });
+
+  it('classifyDepthMount: plain lens none, wide-only virtual lidar, any other virtual stereo', () => {
+    expect(classifyDepthMount(standaloneWide())).toBe('none');
+    expect(classifyDepthMount(standaloneUltraWide())).toBe('none');
+    expect(classifyDepthMount(realLidar())).toBe('lidar');
+    expect(classifyDepthMount(lidarDepthCam())).toBe('lidar');
+    expect(classifyDepthMount(dualWide())).toBe('stereo');
+    expect(classifyDepthMount(dualWideTele())).toBe('stereo');
+    expect(classifyDepthMount(tripleCam())).toBe('stereo');
   });
 });
 
