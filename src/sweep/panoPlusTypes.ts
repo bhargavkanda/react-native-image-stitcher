@@ -1659,8 +1659,9 @@ export interface PanoPlusSubjectDistanceFit {
  */
 export interface PanoPlusGain {
   /** Whether the summary carried a `gain` block at all. `false` ⇒ every number
-   *  below is a parse DEFAULT (`cumEnd` 1, `scaleMin`/`scaleMax` 1, the rest
-   *  0) — a reading nobody took, not a clean chain. Both producers emit the
+   *  below is a parse DEFAULT (`cumEnd` 1, `cumClamp` 2, `localWindowPx` 40,
+   *  `scaleMin`/`scaleMax` 1, the rest 0) — a reading nobody took, not a
+   *  clean chain. Both producers emit the
    *  block today; a summary from an older binary does not, and a reader must
    *  say NOT REPORTED rather than quote the defaults. */
   reported: boolean;
