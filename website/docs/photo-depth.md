@@ -62,8 +62,11 @@ phones.
 | Android | unchanged | off | no `depthPath`, no reason (as with `true`) |
 
 The decision comes from the enumerated devices, not from a model list, and it
-is made once per device list — not per shot. The 1× sweep is therefore never
-refused for its lenses under `"lidar-only"`. `true` and `false` are unchanged.
+is made once per device list — not per shot. `"lidar-only"` therefore never
+costs the 1× sweep its camera: where it does not mount the LiDAR camera, the 1×
+mount is exactly what `false` mounts (a phone whose 1× is already a combined
+camera is refused for its lenses as it would be with `false`, and the refusal
+does not blame photo depth). `true` and `false` are unchanged.
 
 A direct `useCapture` host reads the decision back: `depthMount`
 (`"lidar"` / `"stereo"` / `"none"`, the 1× mount's depth source) and

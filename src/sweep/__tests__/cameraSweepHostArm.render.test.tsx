@@ -1494,4 +1494,36 @@ describe("⚑ LiDAR-only depth — <Camera captureDepthData='lidar-only'> wires 
     expect(refusalCode()).toBe(NEXT_REASON);
     act(() => { tree.unmount(); });
   });
+
+  // The refusal's `depthMount` input is the only consumer that can tell the
+  // EFFECTIVE depth from the request once the lens count already refuses:
+  // a zoom-reaching wide+ultra-wide virtual is mounted in multicam mode
+  // WHATEVER is asked, so 'lidar-only' (no LiDAR mount → effective false)
+  // must get the generic message, never "photo depth is on … turn photo
+  // depth off" (advice that would change nothing). The cases above cannot
+  // see this: their 'lidar-only' mounts all pass the lens check.
+  it('multicam 1× mount: lidar-only is refused for the LENSES, never blamed on photo depth; true still names it', async () => {
+    const MULTICAM = iosBack('multicam', {
+      physicalDevices: ['ultra-wide-angle-camera', 'wide-angle-camera'],
+      isMultiCam: true,
+      minZoom: 0.5,
+    });
+    for (const [captureDepthData, namesDepth] of [['lidar-only', false], [true, true]] as const) {
+      arrange([MULTICAM]);
+      // eslint-disable-next-line no-await-in-loop
+      const tree = await render({ captureDepthData });
+      const views = cameraViews(tree);
+      // Precondition at its source: the mount IS the two-colour-lens virtual.
+      expect((views[0].props.device as { id: string }).id).toBe('multicam');
+      expect(views[0].props.captureDepthData).toBe(namesDepth);
+      const r = surfaceProps(tree).hostArmRefusal as { code?: string; message?: string } | null;
+      expect(r?.code).toBe('panoplus-vc-device-unsupported');
+      if (namesDepth) {
+        expect(r?.message).toMatch(/photo depth/);
+      } else {
+        expect(r?.message).not.toMatch(/photo depth/);
+      }
+      act(() => { tree.unmount(); });
+    }
+  });
 });
