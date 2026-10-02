@@ -452,6 +452,52 @@ export interface PanoPlusEngineOptions {
    *  edge sits flat while the canvas does not. Preview only; the canvas and
    *  every parity surface are untouched by this knob. */
   leadOutTraj?: boolean;
+
+  // ── THE LOW-LIGHT REGISTRATION GATE (2026-09-07) ────────────────────────
+  // Seven knobs, read by these exact names on both platforms
+  // (`RNISPanoCore.startWithOptions` / `engineKnobKeys`) and echoed in the
+  // pack's `meta.json` config. All seven default 0 in the engine, so a host
+  // that sends none of them is byte-identical: no statistic is computed and no
+  // ledger row gains a field.
+  /** `0` off (native default) · `1` LOG-ONLY — on every frame that reached the
+   *  centre correlation the texture / peak / periodicity statistics are
+   *  computed and written to that frame's `ledger.jsonl` row
+   *  (`crossGated`, `crossTextureVar`, `crossPeakPSR`, `crossPeakMass`,
+   *  `crossDominantPeriodPx`, `crossPeakSecondary`, `crossResidualRawPx`);
+   *  placement is untouched · `2` GATE — on a latched frame that fails any
+   *  armed test the measured cross residual is replaced by 0, so the frame is
+   *  placed by the attitude on the cross axis (`crossGated` names why).
+   *
+   *  ⚠ COST. `1` runs a second whitened correlation surface per frame (two
+   *  forward DFTs and an inverse) on the ingest thread: an instrument for
+   *  internal builds, not a production setting. `2` is not calibrated (the
+   *  offline study found texture gating to be an illumination detector) and
+   *  needs at least one threshold or the period guard. Native refuses an
+   *  inconsistent set at start (`Invalid pano+ config: …`) rather than running
+   *  another mode. */
+  crossResidualGate?: number;
+  /** Gate (a), texture: minimum variance of the 3×3 Laplacian of the
+   *  correlation window, DN² (native 0 = test disarmed). Read at
+   *  `crossResidualGate: 2` only. */
+  crossTextureMinVar?: number;
+  /** Gate (a), peak: minimum peak-to-sidelobe ratio of the whitened
+   *  correlation surface (native 0 = disarmed). */
+  crossPeakMinPSR?: number;
+  /** Gate (a), peak: minimum share of the surface's absolute mass inside the
+   *  centroid box (native 0 = disarmed). */
+  crossPeakMinMass?: number;
+  /** Guard (b), periodicity: `1` also gates a frame whose cross residual
+   *  exceeds {@link crossPeriodMaxFrac} × the window's dominant texture period,
+   *  or whose secondary correlation peak reaches {@link crossPeakSecondaryFrac}
+   *  of the primary — the one-period alias on repeating texture (native 0).
+   *  Requires `crossResidualGate: 2` and one of those two thresholds. */
+  crossPeriodGuard?: number;
+  /** Guard (b): the residual bar as a fraction of the dominant period
+   *  (native 0 = disarmed). */
+  crossPeriodMaxFrac?: number;
+  /** Guard (b): the secondary-peak bar as a fraction of the primary peak
+   *  (native 0 = disarmed). */
+  crossPeakSecondaryFrac?: number;
   /* ⚠ THERE IS DELIBERATELY NO `lensModelOverride` / `lensK1` / `lensK2` HERE.
    * Native carries them, and native does NOT read them from this dictionary:
    * they are the one path that applies arbitrary radial coefficients to an
@@ -1612,6 +1658,12 @@ export interface PanoPlusSubjectDistanceFit {
  * defect the engine is not yet allowed to correct.
  */
 export interface PanoPlusGain {
+  /** Whether the summary carried a `gain` block at all. `false` ⇒ every number
+   *  below is a parse DEFAULT (`cumEnd` 1, `scaleMin`/`scaleMax` 1, the rest
+   *  0) — a reading nobody took, not a clean chain. Both producers emit the
+   *  block today; a summary from an older binary does not, and a reader must
+   *  say NOT REPORTED rather than quote the defaults. */
+  reported: boolean;
   cumEnd: number;
   leak: number;
   cumClamp: number;
@@ -1769,6 +1821,11 @@ export interface PanoPlusArExposureProbe {
  *    the gate refuses (a lens switch mid-sweep). A finding, not noise.
  */
 export interface PanoPlusLens {
+  /** Whether the summary carried a `lens` block at all. `false` ⇒ the fields
+   *  below are parse defaults (`applied` false, `gate` `'unknown'`): the
+   *  binary did not say what the gate decided, which is not the same fact as
+   *  "the gate refused". */
+  reported: boolean;
   applied: boolean;
   gate: string;
   device: string;

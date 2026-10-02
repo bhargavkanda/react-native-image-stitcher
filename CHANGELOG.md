@@ -34,6 +34,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   by unit and render tests on enumeration fixtures only: no LiDAR-less iPhone
   has run it. See [Photo depth](website/docs/photo-depth.md).
 
+- **pano+ low-light registration gate knobs on iOS, and typed** —
+  `crossResidualGate` (0 off, 1 log-only, 2 gate) and its six thresholds
+  (`crossTextureMinVar`, `crossPeakMinPSR`, `crossPeakMinMass`,
+  `crossPeriodGuard`, `crossPeriodMaxFrac`, `crossPeakSecondaryFrac`) are now
+  `PanoPlusEngineOptions` keys read by the same names on both platforms. iOS
+  had no marshal for them (a host's `crossResidualGate: 1` was dropped there),
+  wrote no cross block in `ledger.jsonl`, and did not echo them in
+  `meta.json`; it now does all three, with the shared writer's guard, keys
+  and order, so every row is unchanged while the knob is 0. Android's flat
+  start options now forward them too (before, only an explicit
+  `configOverrides` did). All seven default 0 in the engine, so a host that
+  sends none is unaffected. `1` costs a second whitened correlation per
+  frame: an instrument for internal builds, not a production setting. The
+  iOS arm is proven by source and unit tests only; no iPhone has run it.
+
 - **`RNISARFrameContext.depthConfidenceBuffer` and `.smoothedDepthBuffer`**
   (iOS) — two more live ARKit buffers for native AR plugins, behind the same
   `<Camera enableDepth>` gate as `depthBuffer`:
@@ -431,6 +446,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sweep engine has not been released, so no published version is affected.
 
 ### Fixed
+- **A pano+ summary with no `gain` block read as a perfectly flat exposure
+  chain.** The parser filled the absent block with `cumEnd` 1 and `leak` 0,
+  and the residual page printed "chained gain ended 1.000 · gainLeak 0.00"
+  for a reading nobody took. `PanoPlusGain` and `PanoPlusLens` now carry
+  `reported` (whether the block was present), and the residual page, the
+  integrity's `gainLine` and the banding sentence say NOT REPORTED instead of
+  quoting the defaults. The engine-applied gain clauses of the banding
+  verdict apply only when the block is present (with it absent they could
+  not fire before either). Summaries that carry the blocks read as before.
 - **Android 4:3 camera streams ran at 640x480.** vision-camera builds an
   Android device's formats from CameraX's hard-coded quality ladder, whose
   only 4:3 video size is 640x480, so the tap photo's preview, the keyframe

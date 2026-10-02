@@ -1474,6 +1474,124 @@ describe('residual lines — the operator’s evaluation gate, on the phone', ()
   });
 });
 
+// ── AN ABSENT GAIN / LENS BLOCK IS "NOT REPORTED", NEVER A CLEAN READING ──
+//
+// `gainOf` coerced a summary with no `gain` block to cumEnd 1 / leak 0 /
+// scaleMin = scaleMax 1, and the residual page printed exactly that to the
+// operator — a perfectly flat, uncorrected exposure chain nobody measured.
+// Absence now has its own state (`reported: false`, on `lens` too), and every
+// sentence that used to quote the defaults names the absence instead. The
+// presence goldens pin that a summary WITH the block reads as before.
+describe('an absent gain / lens block is NOT REPORTED, never a clean reading', () => {
+  const ARMS = { rectify: true, gainMatch: true };
+  // A painted panorama whose seams and committed photometry were measured
+  // and are clean, so only the gain block varies between the cases.
+  const base = {
+    width: 4000,
+    height: 600,
+    counts: { seen: 300, painted: 280 },
+    unpaintedRuns: [],
+    unpaintedColumns: 0,
+    engineMs: {},
+    arThreadUs: {},
+    previewMs: {},
+    seam: {
+      boundaries: 280,
+      canvasJogSamples: 279,
+      measured: true,
+      lumaStepP95DN: 1.5,
+      photoSamples: 270,
+      photoStepP95DN: 0.4,
+      photoStepMaxDN: 1.1,
+      photoDriftLocalPct: 2.0,
+      photoDriftTotalPct: 3.0,
+    },
+  };
+  const residual = (raw: unknown, prefix: string) =>
+    panoPlusResidualLines(coercePanoPlusSummary(raw), ARMS).find((l) => l.startsWith(prefix));
+
+  it('parses PRESENCE, not values — the defaults themselves are unchanged', () => {
+    const none = coercePanoPlusSummary({});
+    expect(none.gain).toMatchObject({
+      reported: false, cumEnd: 1, leak: 0, scaleMin: 1, scaleMax: 1, localWindowPx: 40,
+    });
+    expect(none.lens).toMatchObject({ reported: false, applied: false, gate: 'unknown' });
+    // An EMPTY block is still a block: the producer said something.
+    expect(coercePanoPlusSummary({ gain: {} }).gain.reported).toBe(true);
+    expect(coercePanoPlusSummary({ lens: { gate: 'focal-mismatch' } }).lens)
+      .toMatchObject({ reported: true, applied: false, gate: 'focal-mismatch' });
+    // A non-object is absence, not a block.
+    const odd = coercePanoPlusSummary({ gain: 'x', lens: [] });
+    expect(odd.gain.reported).toBe(false);
+    expect(odd.lens.reported).toBe(false);
+  });
+
+  it('residual page, ABSENT: no chain end, no leak — the absence, by name', () => {
+    expect(residual(base, 'exposure: ')).toBe(
+      'exposure: chained gain NOT REPORTED (no gain block in this summary) · '
+        + 'seam DC step p95 1.5 DN',
+    );
+    const all = panoPlusResidualLines(coercePanoPlusSummary(base), ARMS).join('\n');
+    expect(all).not.toContain('chained gain ended');
+    expect(all).not.toContain('gainLeak');
+    expect(residual(base, 'banding: ')).toContain(
+      'committed band 2.0% over an unreported window · 3.0% end to end',
+    );
+  });
+
+  it('residual page, PRESENT: the line reads exactly as it always did', () => {
+    const withGain = { ...base, gain: { cumEnd: 0.764, leak: 0, cumClamp: 2, localWindowPx: 40 } };
+    expect(residual(withGain, 'exposure: ')).toBe(
+      'exposure: chained gain ended 0.764 · seam DC step p95 1.5 DN · gainLeak 0.00',
+    );
+    expect(residual(withGain, 'banding: ')).toContain(
+      'committed band 2.0% over 40 px · 3.0% end to end',
+    );
+  });
+
+  it('gainLine: absent over a panorama is NOT REPORTED, never the silence of "small drift"', () => {
+    expect(panoPlusIntegrity(coercePanoPlusSummary(base)).gainLine).toBe(
+      'exposure drift: chained gain NOT REPORTED — this summary carries no gain '
+        + 'block, so nothing here says whether the exposure chain drifted. NOT the '
+        + 'same thing as no drift.',
+    );
+    // No panorama, nothing to speak for.
+    expect(panoPlusIntegrity(coercePanoPlusSummary({ ...base, width: 0, height: 0 })).gainLine)
+      .toBeNull();
+    // Present: small drift stays silent, a real drift is quoted.
+    expect(panoPlusIntegrity(coercePanoPlusSummary({ ...base, gain: { cumEnd: 1.0 } })).gainLine)
+      .toBeNull();
+    expect(panoPlusIntegrity(coercePanoPlusSummary({ ...base, gain: { cumEnd: 0.764 } })).gainLine)
+      .toContain('chained gain ended at 0.764');
+  });
+
+  it('banding: the applied-field clauses leave the verdict when absent, and the sentence says so', () => {
+    const absent = panoPlusIntegrity(coercePanoPlusSummary(base));
+    expect(absent.photoMeasured).toBe(true);
+    expect(absent.hasBanding).toBe(false);
+    expect(absent.bandLine).toContain('photometry clean');
+    expect(absent.bandLine).toContain('over an unreported window');
+    expect(absent.bandLine).toContain(
+      'The engine-applied gain field is NOT REPORTED (no gain block), so its two '
+        + 'banding clauses are not in this verdict.',
+    );
+
+    const present = panoPlusIntegrity(coercePanoPlusSummary({ ...base, gain: { cumEnd: 1.0 } }));
+    expect(present.hasBanding).toBe(false);
+    expect(present.bandLine).toContain('over 40 px');
+    expect(present.bandLine).not.toContain('NOT REPORTED');
+
+    // …and with the block present, the applied clauses still fire.
+    const applied = panoPlusIntegrity(coercePanoPlusSummary({
+      ...base, gain: { cumEnd: 1.0, localP2PPct: 40.0, rangePct: 60.0 },
+    }));
+    expect(applied.breachesPhoto).toBe(true);
+    expect(applied.hasBanding).toBe(true);
+    expect(applied.bandLine).toContain('BANDING');
+    expect(applied.bandLine).not.toContain('NOT REPORTED');
+  });
+});
+
 describe('result shape (a contract other files key off)', () => {
   it('stamps kind + type panoplus and carries the pack root', () => {
     const summary = coercePanoPlusSummary({

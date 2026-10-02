@@ -688,6 +688,46 @@ describe('the elbow-fix knobs reach the native start bag', () => {
   });
 });
 
+// The low-light registration gate's seven knobs ride the same flat surface:
+// iOS reads them by these names in `startWithOptions` and Android's
+// `engineKnobKeys` forwards the same names (both pinned by
+// iosCrossKnobSourcePin.test.ts). A name changed on the way out is a knob
+// that silently did not apply on either platform.
+describe('the cross-gate knobs reach the native start bag', () => {
+  it('carries all seven, verbatim, under their C++ field names', async () => {
+    stitcherMock.__setOrientation('landscape-left');
+    const cross = {
+      crossResidualGate: 2,
+      crossTextureMinVar: 12.5,
+      crossPeakMinPSR: 3,
+      crossPeakMinMass: 0.2,
+      crossPeriodGuard: 1,
+      crossPeriodMaxFrac: 0.4,
+      crossPeakSecondaryFrac: 0.6,
+    };
+    const r = mount({ engineOptions: cross });
+    r.hold();
+    await settle();
+    expect(startedWith).toMatchObject(cross);
+    r.unmount();
+  });
+
+  it('sends none of them when the host sets none — the engine default (OFF) stands', async () => {
+    stitcherMock.__setOrientation('landscape-left');
+    const r = mount({});
+    r.hold();
+    await settle();
+    expect(startedWith).not.toBeNull();
+    for (const k of [
+      'crossResidualGate', 'crossTextureMinVar', 'crossPeakMinPSR', 'crossPeakMinMass',
+      'crossPeriodGuard', 'crossPeriodMaxFrac', 'crossPeakSecondaryFrac',
+    ]) {
+      expect(startedWith).not.toHaveProperty(k);
+    }
+    r.unmount();
+  });
+});
+
 describe('start → sweep → done, the whole wire', () => {
   it('sends the ARMS it was given and latches them onto the result', async () => {
     const done: PanoPlusCaptureResult[] = [];

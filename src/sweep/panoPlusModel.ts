@@ -3070,9 +3070,16 @@ function subjectDistanceFitOf(raw: unknown): PanoPlusSubjectDistanceFit {
   };
 }
 
+/** ABSENCE IS ITS OWN STATE. A summary with no `gain` block parses to the
+ *  defaults below so every consumer still gets a number — and `reported:
+ *  false` says none of them was measured. Before the flag, the defaults
+ *  (`cumEnd` 1, `scaleMin`/`scaleMax` 1) were printed to the operator as a
+ *  perfectly flat exposure chain on every summary that lacked the block. */
 function gainOf(raw: unknown): PanoPlusGain {
-  const g = rec(raw) ?? {};
+  const present = rec(raw);
+  const g = present ?? {};
   return {
+    reported: present != null,
     cumEnd: num(g.cumEnd, 1),
     leak: num(g.leak),
     cumClamp: num(g.cumClamp, 2),
@@ -3210,10 +3217,13 @@ function arExposureProbeOf(raw: unknown): PanoPlusArExposureProbe | null {
 
 /** v10 — the lens gate's verdict. Defaults read as NOT CORRECTED, never as
  *  corrected: a summary that lost the block must not claim a correction that
- *  may not have happened. */
+ *  may not have happened — and `reported: false` says the block was absent,
+ *  so "not corrected" is not mistaken for a refusal the gate made. */
 function lensOf(raw: unknown): PanoPlusLens {
-  const l = rec(raw) ?? {};
+  const present = rec(raw);
+  const l = present ?? {};
   return {
+    reported: present != null,
     applied: bool(l.applied),
     gate: typeof l.gate === 'string' ? l.gate : 'unknown',
     device: typeof l.device === 'string' ? l.device : '',
@@ -3406,8 +3416,10 @@ export interface PanoPlusIntegrity {
    *  pack carries no exposure evidence at all; "NOT READ" otherwise, because
    *  an unmeasured non-circular check must not read as a passed one. */
   arExposureLine: string | null;
-  /** The chained-exposure sentence, or `null` when the drift is small.
-   *  REPORTED, never folded into {@link isIntact}: the fix
+  /** The chained-exposure sentence, or `null` when the drift is small (or
+   *  there is no panorama). A summary with no gain block gets "NOT REPORTED"
+   *  here, never `null`: silence would read as a small drift that nobody
+   *  measured. REPORTED, never folded into {@link isIntact}: the fix
    *  ({@link PanoPlusEngineOptions.gainLeak}) is off pending the operator's
    *  approval, and gating a defect the engine may not correct would fail every
    *  pack for a reason nobody can act on. */
@@ -3498,6 +3510,22 @@ function uniformCrossCheck(seam: PanoPlusSeam): string {
       : '.');
 }
 
+/** The committed-band window as the summary REPORTED it. The window lives in
+ *  the gain block; with no block the parse default (40) is a guess about this
+ *  binary's config, so the sentence says the window was not reported instead. */
+function gainWindowText(gain: PanoPlusGain): string {
+  return gain.reported ? `${gain.localWindowPx} px` : 'an unreported window';
+}
+
+/** The banding sentence's statement that the engine-APPLIED field was not
+ *  reported (its two verdict clauses are then out of the verdict), or ''. */
+function gainAbsentClause(gain: PanoPlusGain): string {
+  return gain.reported
+    ? ''
+    : ' The engine-applied gain field is NOT REPORTED (no gain block), so its '
+      + 'two banding clauses are not in this verdict.';
+}
+
 export function panoPlusIntegrity(summary: PanoPlusSummary): PanoPlusIntegrity {
   const runs = summary.unpaintedRuns.length;
   const cols = summary.unpaintedColumns;
@@ -3570,8 +3598,13 @@ export function panoPlusIntegrity(summary: PanoPlusSummary): PanoPlusIntegrity {
     seam.photoStepP95DN > PANOPLUS_PHOTO_STEP_P95_BAR
     || seam.photoStepMaxDN > PANOPLUS_PHOTO_STEP_MAX_BAR
     || seam.photoDriftLocalPct > PANOPLUS_PHOTO_DRIFT_LOCAL_BAR
-    || summary.gain.localP2PPct > PANOPLUS_PHOTO_APPLIED_BAND_BAR
-    || summary.gain.rangePct > PANOPLUS_PHOTO_APPLIED_RANGE_BAR;
+    // The engine-APPLIED field's two clauses, only when the summary carried a
+    // gain block: an absent block parses to zeros, which would "pass" them by
+    // construction. Absent, they contribute nothing and `bandLine` says so —
+    // the committed-pixel clauses above still decide.
+    || (summary.gain.reported
+      && (summary.gain.localP2PPct > PANOPLUS_PHOTO_APPLIED_BAND_BAR
+        || summary.gain.rangePct > PANOPLUS_PHOTO_APPLIED_RANGE_BAR));
   const hasBanding = breachesPhoto || (painted && !photoMeasured);
   // A session that produced NO CANVAS has no panorama to be intact. It used
   // to satisfy every clause vacuously — no holes, nothing clipped, no seams —
@@ -3740,20 +3773,22 @@ export function panoPlusIntegrity(summary: PanoPlusSummary): PanoPlusIntegrity {
           : '')
         + `; committed brightness band `
         + `${seam.photoDriftLocalPct.toFixed(1)}% over `
-        + `${summary.gain.localWindowPx} px (worst at column `
+        + `${gainWindowText(summary.gain)} (worst at column `
         + `${seam.photoDriftWorstU}), ${seam.photoDriftTotalPct.toFixed(1)}% `
         + 'end to end. Measured on painted pixels, so this includes the '
         + "camera's own drift, not just the engine's correction."
         + uniformCrossCheck(seam)
+        + gainAbsentClause(summary.gain)
       : `photometry clean: seam DC step p95 ${seam.photoStepP95DN.toFixed(2)} DN · `
         + `band ${seam.photoDriftLocalPct.toFixed(1)}% over `
-        + `${summary.gain.localWindowPx} px `
+        + `${gainWindowText(summary.gain)} `
         + `across ${seam.photoSamples} boundaries`
         + (seam.photoSamples > 0
           ? ` (${seam.photoStepOverBar} over the `
             + `${PANOPLUS_PHOTO_STEP_MAX_BAR.toFixed(2)} DN bar)`
           : '')
-        + '.';
+        + '.'
+        + gainAbsentClause(summary.gain);
 
   // ── v6: WHAT THE CAMERA'S EXPOSURE ACTUALLY DID ───────────────────────
   // `rangeRatio` outranks the lock report: one says what the device told us
@@ -3835,9 +3870,18 @@ export function panoPlusIntegrity(summary: PanoPlusSummary): PanoPlusIntegrity {
         : '')
       + '.';
 
-  // REPORTED, NOT GATED — see PanoPlusIntegrity.gainLine.
+  // REPORTED, NOT GATED — see PanoPlusIntegrity.gainLine. An ABSENT block is
+  // not "small drift": it is no reading, and a panorama that exists is told so
+  // (the `exposure.metaFrames` discipline above), never handed the parse
+  // default's cumEnd 1.000 as a flat chain.
   const gainDrift = Math.abs(Math.log(Math.max(1e-6, summary.gain.cumEnd)));
-  const gainLine = gainDrift > 0.08
+  const gainLine = !summary.gain.reported
+    ? (empty
+      ? null
+      : 'exposure drift: chained gain NOT REPORTED — this summary carries no '
+        + 'gain block, so nothing here says whether the exposure chain '
+        + 'drifted. NOT the same thing as no drift.')
+    : gainDrift > 0.08
     ? `exposure drift: chained gain ended at ${summary.gain.cumEnd.toFixed(3)} `
       + `(${((summary.gain.cumEnd - 1) * 100).toFixed(0)}% end to end), `
       + `seam DC step p95 ${seam.lumaStepP95DN.toFixed(1)} DN. `
@@ -3942,9 +3986,14 @@ export function panoPlusResidualLines(
       + 'packs the SLOPE tracks (both call it a random walk) but the amplitude '
       + 'runs 1-4× high, because a running sum integrates this measurement’s '
       + 'own correlation noise. Reported, never gated.',
-    `exposure: chained gain ended ${summary.gain.cumEnd.toFixed(3)} · `
-      + `seam DC step p95 ${summary.seam.lumaStepP95DN.toFixed(1)} DN · `
-      + `gainLeak ${summary.gain.leak.toFixed(2)}`,
+    (summary.gain.reported
+      ? `exposure: chained gain ended ${summary.gain.cumEnd.toFixed(3)} · `
+        + `seam DC step p95 ${summary.seam.lumaStepP95DN.toFixed(1)} DN · `
+        + `gainLeak ${summary.gain.leak.toFixed(2)}`
+      // No block ⇒ no chain end and no leak to quote: the parse defaults
+      // (1.000, 0.00) printed here read as a flat, uncorrected chain.
+      : 'exposure: chained gain NOT REPORTED (no gain block in this summary) · '
+        + `seam DC step p95 ${summary.seam.lumaStepP95DN.toFixed(1)} DN`),
     // v6: the two numbers the operator's banding rejections were about.
     `banding: seam DC step p95 ${summary.seam.photoStepP95DN.toFixed(2)} / `
       + `max ${summary.seam.photoStepMaxDN.toFixed(2)} DN over `
@@ -3956,7 +4005,7 @@ export function panoPlusResidualLines(
       + `p95 ${summary.seam.photoUniStepP95DN.toFixed(2)} DN over `
       + `${summary.seam.photoUniSamples}) · committed band `
       + `${summary.seam.photoDriftLocalPct.toFixed(1)}% over `
-      + `${summary.gain.localWindowPx} px · `
+      + `${gainWindowText(summary.gain)} · `
       + `${summary.seam.photoDriftTotalPct.toFixed(1)}% end to end`,
     `camera exposure: ${summary.exposure.metaFrames > 0
       ? `ratio ${summary.exposure.rangeRatio.toFixed(3)} over `

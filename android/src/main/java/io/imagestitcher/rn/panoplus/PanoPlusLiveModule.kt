@@ -255,6 +255,15 @@ class PanoPlusLiveModule(
         // entry the same options object ran the control arm on one platform
         // and the trim on the other, with nothing reported.
         "seedLeadTrim",
+        // THE LOW-LIGHT REGISTRATION GATE (2026-09-07): the mode and its six
+        // thresholds. Reachable before only through explicit configOverrides,
+        // while iOS now reads the same flat keys (`RNISPanoCore.startWithOptions`)
+        // — so without these entries `engineOptions.crossResidualGate` armed
+        // the log-only pass on one platform and was dropped on the other,
+        // with nothing reported. All default 0 (OFF) in the engine.
+        "crossResidualGate", "crossTextureMinVar", "crossPeakMinPSR",
+        "crossPeakMinMass", "crossPeriodGuard", "crossPeriodMaxFrac",
+        "crossPeakSecondaryFrac",
     )
 
     // ── ReadableMap accessors that DEGRADE ──────────────────────────────

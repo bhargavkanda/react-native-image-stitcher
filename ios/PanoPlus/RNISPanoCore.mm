@@ -805,6 +805,30 @@ static NSDictionary *panoConfigDict(const rnis::pano::Config& c,
     // control arm). The same top-level key reaches Android through
     // PanoPlusLiveModule's engineKnobKeys.
     c.seedLeadTrim         = boolOr(options, @"seedLeadTrim", c.seedLeadTrim);
+    // ── THE LOW-LIGHT REGISTRATION GATE (Config::crossResidualGate) ─────
+    // The mode and its six thresholds, read by the names the shared replay
+    // knob table uses (rnis_pano_replay.cpp), so one options object arms the
+    // same mode on both platforms — until this block existed the iOS arm
+    // could not be armed at all, and a host's `crossResidualGate: 1` was
+    // silently dropped here while Android ran it.  All seven default 0 in
+    // the engine: OFF, no statistic computed and no ledger field written, so
+    // a host that sends none of them is byte-identical.  1 is LOG-ONLY (the
+    // statistics are ledgered, placement is untouched); 2 gates.  The two
+    // integer knobs round the way the replay table does (std::lround), not
+    // by truncation, so a fractional value arms the same mode on both arms.
+    // `configure()` below refuses an inconsistent set (2 with every
+    // threshold 0, a period guard without the gate) — the start rejects
+    // rather than running a mode the host did not ask for.
+    c.crossResidualGate    = (int)std::lround(
+        numOr(options, @"crossResidualGate", (double)c.crossResidualGate));
+    c.crossTextureMinVar   = numOr(options, @"crossTextureMinVar", c.crossTextureMinVar);
+    c.crossPeakMinPSR      = numOr(options, @"crossPeakMinPSR", c.crossPeakMinPSR);
+    c.crossPeakMinMass     = numOr(options, @"crossPeakMinMass", c.crossPeakMinMass);
+    c.crossPeriodGuard     = (int)std::lround(
+        numOr(options, @"crossPeriodGuard", (double)c.crossPeriodGuard));
+    c.crossPeriodMaxFrac   = numOr(options, @"crossPeriodMaxFrac", c.crossPeriodMaxFrac);
+    c.crossPeakSecondaryFrac = numOr(options, @"crossPeakSecondaryFrac",
+                                     c.crossPeakSecondaryFrac);
     // ── v6 ──────────────────────────────────────────────────────────────
     c.exposureNormalize    = boolOr(options, @"exposureNormalize", c.exposureNormalize);
     c.exposureGainClamp    = numOr(options, @"exposureGainClamp", c.exposureGainClamp);
@@ -1471,6 +1495,23 @@ static void panoDrainOneBody(const std::shared_ptr<SessionState>& S,
         // Identically 0.0 on every row when the flag is off, which is how a
         // pack states which chain produced it.
         ledgerLine += ",\"crossAvgDeltaPx\":"; appendNum(ledgerLine, row.crossAvgDeltaPx);
+        // The low-light registration gate's block — ONLY when the engine
+        // computed it (Config::crossResidualGate ≥ 1 and the frame reached
+        // the centre correlation).  Same guard, same keys and same order as
+        // the shared writer (`replay::appendLedgerLine`), so with the knob at
+        // 0 every row is byte-identical to the row before this block existed,
+        // and an iOS pack that ran the log-only arm diffs against the replay
+        // twin key for key.  A non-finite statistic lands as null.
+        if (row.crossStatsComputed) {
+            ledgerLine += ",\"crossGated\":"; appendInt(ledgerLine, row.crossGated);
+            ledgerLine += ",\"crossTextureVar\":"; appendNum(ledgerLine, row.crossTextureVar);
+            ledgerLine += ",\"crossPeakPSR\":"; appendNum(ledgerLine, row.crossPeakPSR);
+            ledgerLine += ",\"crossPeakMass\":"; appendNum(ledgerLine, row.crossPeakMass);
+            ledgerLine += ",\"crossDominantPeriodPx\":";
+            appendNum(ledgerLine, row.crossDominantPeriodPx);
+            ledgerLine += ",\"crossPeakSecondary\":"; appendNum(ledgerLine, row.crossPeakSecondary);
+            ledgerLine += ",\"crossResidualRawPx\":"; appendNum(ledgerLine, row.crossResidualRawPx);
+        }
         // ── v6: PHOTOMETRY ──────────────────────────────────────────────
         // expGain is the EXACT radiometric factor applied from the camera's
         // own exposure; photoScale is what the committed pixels actually
@@ -2944,6 +2985,18 @@ static NSDictionary *panoConfigDict(const rnis::pano::Config &c, const PackOptio
         // replay differ from the device: the replay reads a missing
         // seedLeadTrim as OFF (every pack before v16 was painted untrimmed).
         @"seedLeadTrim":         @(c.seedLeadTrim),
+        // The low-light registration gate — the mode and its six thresholds,
+        // under the replay knob table's names, so a pack that ran an arm
+        // replays under the same arm (`useMetaConfig`) instead of the twin
+        // reading an absent key as OFF.  The ledger's cross block is the
+        // OUTCOME; this is the REQUEST.
+        @"crossResidualGate":    @(c.crossResidualGate),
+        @"crossTextureMinVar":   @(c.crossTextureMinVar),
+        @"crossPeakMinPSR":      @(c.crossPeakMinPSR),
+        @"crossPeakMinMass":     @(c.crossPeakMinMass),
+        @"crossPeriodGuard":     @(c.crossPeriodGuard),
+        @"crossPeriodMaxFrac":   @(c.crossPeriodMaxFrac),
+        @"crossPeakSecondaryFrac": @(c.crossPeakSecondaryFrac),
         @"exposureNormalize":    @(c.exposureNormalize),
         @"exposureGainClamp":    @(c.exposureGainClamp),
         @"photoMinSamples":      @(c.photoMinSamples),
