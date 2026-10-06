@@ -27,7 +27,7 @@ Uncontrolled — read once at mount.
 |---|---|---|---|
 | `defaultCaptureSource` | `CaptureSource` (`'ar' \| 'non-ar'`) | `'non-ar'` | Initial capture source, read once at mount (uncontrolled). **Consider `'ar'`**: AR feeds the engine natively, so it is immune to the frame-processor build failure described in [Host integration](./host-integration.md#frame-processors--the-non-ar-capture-prerequisite) (caveats: on Android a device without Google Play Services for AR shows a blank AR preview with no automatic downgrade today; AR tap-photos use the AR video stream, no flash, no iOS depth sidecar). Clamped by `captureSources`. |
 | `defaultLens` | `CameraLens` (`'1x' \| '0.5x'`) | `'1x'` | Initial physical lens. When `captureSources='ar'` the lens is forced to `'1x'` — the ultra-wide isn't usable in AR. |
-| `captureSources` | `CaptureSourcesMode` (`'ar' \| 'non-ar' \| 'both'`) | `'both'` | Which capture sources the host allows. `'both'` shows the AR toggle; `'ar'` is AR-only (toggle **and** 0.5× chooser hidden); `'non-ar'` hides the toggle. A single source overrides a conflicting `defaultCaptureSource`. **Use `'ar'` to lock captures to AR and hide the AR pill so users can't flip modes.** |
+| `captureSources` | `CaptureSourcesMode` (`'ar' \| 'non-ar' \| 'both' \| 'ar-preferred'`) | `'both'` | Which capture sources the host allows. `'both'` shows the AR toggle; `'ar'` is AR-only (toggle **and** 0.5× chooser hidden); `'non-ar'` hides the toggle. A single source overrides a conflicting `defaultCaptureSource`. **Use `'ar'` to lock captures to AR and hide the AR pill so users can't flip modes.** `'ar-preferred'` is AR wherever the device can run it: AR at 1× on an AR-capable device, non-AR at 0.5× (the chooser stays) and on a device whose AR-support probe says no or fails; the AR toggle is hidden, `defaultCaptureSource` is ignored and `setCaptureSource('non-ar')` is refused. An AR session the probe allowed but that then fails to start (e.g. a declined ARCore install) is not downgraded. |
 | `engine` | `'batch-keyframe'` | `'batch-keyframe'` | Which stitcher engine to drive. Only `'batch-keyframe'` is supported and is the default. |
 
 See [Flash & lenses](./flash-and-lenses.md) for how lens selection, device
@@ -642,7 +642,7 @@ full workflow.
 |---|---|---|
 | `CameraLens` | `'1x'`, `'0.5x'` | Physical lens selector. `0.5x` forces non-AR (AR sessions don't expose the ultra-wide). |
 | `CaptureSource` | `'ar'`, `'non-ar'` | Effective capture source. `'ar'` = ARKit/ARCore; `'non-ar'` = vision-camera + IMU. |
-| `CaptureSourcesMode` | `'ar'`, `'non-ar'`, `'both'` | Host constraint on allowed capture sources. `'both'` shows the AR toggle; a single value hides it (and `'ar'` also hides the 0.5× chooser). |
+| `CaptureSourcesMode` | `'ar'`, `'non-ar'`, `'both'`, `'ar-preferred'` | Host constraint on allowed capture sources. `'both'` shows the AR toggle; a single value hides it (and `'ar'` also hides the 0.5× chooser); `'ar-preferred'` hides it and lets the device and the lens decide (AR at 1× where supported, non-AR at 0.5× or without AR). |
 | `StitchMode` | `'auto'`, `'panorama'`, `'scans'` | `cv::Stitcher` pipeline mode. `'auto'` resolves at finalize; `'panorama'` = rotation-only; `'scans'` = affine/plane. |
 | `Blender` | `'multiband'`, `'feather'` | Pixel blender. `'multiband'` = cleaner seams / more memory; `'feather'` = streaming / lower peak memory. |
 | `SeamFinder` | `'graphcut'`, `'skip'` | Seam-finder strategy. `'graphcut'` = optimal seams; `'skip'` = stream warp+feed. |

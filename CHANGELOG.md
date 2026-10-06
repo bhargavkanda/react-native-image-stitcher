@@ -18,6 +18,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`captureSources: 'ar-preferred'`** (`<Camera>`) — AR wherever the device
+  can run it. On an AR-capable device the source is AR at 1× and the AR pill
+  is hidden; the lens chooser stays, and 0.5× runs non-AR (ARKit/ARCore cannot
+  drive the ultra-wide); a device whose AR-support probe answers no, or fails,
+  runs non-AR. The user never picks non-AR at 1×: `defaultCaptureSource` is
+  ignored and `setCaptureSource('non-ar')` is refused. One exception keeps a
+  live control on screen — at a raw 0.5× the chip cannot move off (no
+  enumerable ultra-wide) the AR pill shows, and pressing it returns to AR at
+  1×. Not a runtime-failure recovery: an AR session the probe allowed but that
+  fails to start (a declined ARCore install) is still not downgraded. `'both'`,
+  `'ar'` and `'non-ar'` are unchanged. Proven by render tests only; no phone
+  has run it. See [Flash & lenses](website/docs/flash-and-lenses.md).
+
 - **`captureDepthData: 'lidar-only'`** (iOS, `<Camera>` and `useCapture`) —
   photo depth from the LiDAR mount only. On a LiDAR iPhone it is `true`. On a
   multi-lens iPhone without LiDAR, `true` mounts Dual Wide (ultra-wide + wide)

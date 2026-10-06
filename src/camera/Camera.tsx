@@ -296,8 +296,13 @@ export type CaptureSource = 'ar' | 'non-ar';
  *              0.5× lens chooser is hidden (ARKit/ARCore don't expose the
  *              ultra-wide).
  *   'non-ar' — non-AR only; AR toggle hidden.
+ *   'ar-preferred' — AR wherever the device can run it, non-AR only where
+ *              it cannot: AR at 1× on an AR-capable device, non-AR at 0.5×
+ *              (the lens chooser stays) and on a device without AR support.
+ *              The AR toggle is hidden, so the user never picks non-AR at
+ *              1×; `defaultCaptureSource` is ignored.
  */
-export type CaptureSourcesMode = 'ar' | 'non-ar' | 'both';
+export type CaptureSourcesMode = 'ar' | 'non-ar' | 'both' | 'ar-preferred';
 export type CameraLens = '1x' | '0.5x';
 export type StitchMode = 'auto' | 'panorama' | 'scans';
 export type Blender = 'multiband' | 'feather';
@@ -750,8 +755,20 @@ export interface CameraProps {
    *     0.5× lens chooser is also hidden (ARKit/ARCore can't use the
    *     ultra-wide), so the camera stays on the AR-capable 1× lens.
    *   - `'non-ar'`: non-AR only.  AR toggle hidden.
+   *   - `'ar-preferred'`: AR wherever the device supports it.  The AR
+   *     toggle is hidden and the source follows the device and the lens:
+   *     AR at 1× on an AR-capable device; non-AR at 0.5× (the lens
+   *     chooser stays — ARKit/ARCore can't use the ultra-wide); non-AR on
+   *     a device whose AR-support probe answers no or fails.  The user
+   *     cannot pick non-AR at 1×, and `setCaptureSource('non-ar')` is
+   *     refused.  One exception keeps a control on screen: at a raw 0.5×
+   *     the chip cannot move (no enumerable ultra-wide), the AR toggle
+   *     shows, and pressing it returns to AR at 1×.  Not a recovery from
+   *     a runtime AR failure: an AR session that the probe allowed but
+   *     that fails to start (e.g. a declined ARCore install) is not
+   *     downgraded, and only the 0.5× lens leaves it.
    * When set to a single source, that source wins regardless of
-   * `defaultCaptureSource`.
+   * `defaultCaptureSource`; `'ar-preferred'` ignores it too.
    */
   captureSources?: CaptureSourcesMode;
   style?: StyleProp<ViewStyle>;
@@ -1729,6 +1746,9 @@ export interface CameraHandle extends AROverlayMethods {
    * truth.  The EFFECTIVE source is still clamped by `captureSources`, by
    * device AR support, and by the 0.5x lens (ARKit/ARCore cannot drive the
    * ultra-wide) — so requesting `'ar'` on an unsupported device stays non-AR.
+   * Under `captureSources="ar-preferred"` a `'non-ar'` request is refused
+   * outright (the preference stays AR; non-AR comes only from the 0.5× lens
+   * or a device without AR).
    * Subscribe to `onCaptureSourceChange` for what actually took effect.
    */
   setCaptureSource(source: CaptureSource): void;
@@ -2239,6 +2259,12 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   const arAllowed = captureSources !== 'non-ar';
   const nonArAllowed = captureSources !== 'ar';
   const arOnly = captureSources === 'ar';
+  // 'ar-preferred' allows BOTH sources (non-AR is reached through the 0.5×
+  // lens and on a device without AR) but never lets the user choose between
+  // them: the preference starts AR and stays AR, and the AR toggle is hidden.
+  // `deriveEffectiveCaptureSource` then does the rest — it already answers
+  // non-AR for 0.5× and for a device whose support probe said no or failed.
+  const arPreferred = captureSources === 'ar-preferred';
 
   const insets = useSafeAreaInsets();
   // v0.12.0 — JS-layout orientation independent of device-physical.
@@ -2265,7 +2291,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
   // ── State ───────────────────────────────────────────────────────
   // v0.13.2 — initial AR preference honours `defaultCaptureSource` but
   // is clamped to the `captureSources` constraint: 'ar' forces on,
-  // 'non-ar' forces off, 'both' uses the default.
+  // 'non-ar' forces off, 'both' uses the default, 'ar-preferred' forces on.
   // ── THE SWEEP'S RESULT SCREEN ───────────────────────────────────
   //
   // ⚠ THE SURFACE DOES NOT SHOW ITS OWN RESULT, AND THAT IS ITS CONTRACT.
@@ -2359,8 +2385,13 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     }, SWEEP_CAMERA_RELEASE_SETTLE_MS);
   }, [engine]);
 
+  // 'ar-preferred' starts (and stays) AR, whatever `defaultCaptureSource`.
   const [arPreference, setArPreference] = useState(
-    !arAllowed ? false : !nonArAllowed ? true : defaultCaptureSource === 'ar',
+    !arAllowed
+      ? false
+      : !nonArAllowed || arPreferred
+        ? true
+        : defaultCaptureSource === 'ar',
   );
   // v0.13.2 — `arOnly` forces the 1× lens (the ultra-wide isn't usable
   // in AR), and the lens chooser is hidden in that mode.
@@ -4859,6 +4890,13 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
    */
   const applyArPreference = useCallback((next: boolean | 'toggle') => {
     if (sweepRunning) return;
+    // 'ar-preferred': the preference is AR and nothing turns it off. A
+    // request for non-AR (the handle's `setCaptureSource('non-ar')`) is
+    // refused whole — no lens commit either. The only pill on screen under
+    // this policy is the escape hatch below, and its toggle can only mean
+    // "back to AR at 1×", so it is read as `true`.
+    if (arPreferred && next === false) return;
+    const want: boolean | 'toggle' = arPreferred ? true : next;
     // ⚠ WHEN THE PILL IS THE ESCAPE HATCH IT MUST ALSO COMMIT THE LENS, or
     // showing it there just moves the dead control from the chip to the
     // pill. On a body with no enumerable ultra-wide the chip has no handler
@@ -4872,8 +4910,8 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       setLens('1x');
       onLensChange?.('1x');
     }
-    setArPreference((prev) => (next === 'toggle' ? !prev : next));
-  }, [sweepRunning, lens, has0_5x, onLensChange]);
+    setArPreference((prev) => (want === 'toggle' ? !prev : want));
+  }, [sweepRunning, arPreferred, lens, has0_5x, onLensChange]);
   const handleARToggle = useCallback(
     () => applyArPreference('toggle'),
     [applyArPreference],
@@ -5050,6 +5088,11 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       // chip with no handler: zero live controls on the whole sweep screen,
       // and no way back. One control is always left on screen.
       && (lens === '1x' || !has0_5x)
+      // 'ar-preferred' hides the pill: the user does not choose the source.
+      // EXCEPT as that escape hatch — a raw 0.5× the chip cannot move off —
+      // where the pill is the one live control, and pressing it returns to
+      // AR at 1× (`applyArPreference` reads its toggle as `true`).
+      && (!arPreferred || (lens !== '1x' && !has0_5x))
       && isARSupportedOnDevice
       ? (
         <ARToggle
@@ -6755,7 +6798,8 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       >
         {/* v0.13.2 — AR toggle only when BOTH sources are allowed
             (captureSources='both'); a single-source constraint has
-            nothing to toggle.  Still gated on 1× + device AR support.
+            nothing to toggle, and 'ar-preferred' leaves the choice to the
+            device and the lens.  Still gated on 1× + device AR support.
             ⚠ The AR pill itself now comes from `renderSharedPills`, which
             the SWEEP cell renders too — one pill, one state, both engines.
             Only the flash pill below is keyframe-tree-specific. */}

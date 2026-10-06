@@ -56,6 +56,24 @@ When `captureSources` is `'ar'`, both the AR toggle and the lens chooser
 are hidden (AR is 1×-only). When `'non-ar'`, the AR toggle is hidden but
 the lens chooser stays.
 
+When `'ar-preferred'`, the AR toggle is hidden and the lens chooser stays;
+the user picks the lens and the lens picks the source:
+
+| Action | Source | UI |
+|---|---|---|
+| Initial mount, AR-capable device | AR | lens chip at `1×`; no AR pill |
+| Switch to 0.5× | non-AR | lens chip at `0.5×`; no AR pill |
+| Switch back to 1× | AR | lens chip at `1×`; no AR pill |
+| Device without AR (probe says no or fails) | non-AR | lens chip; no AR pill |
+
+`defaultCaptureSource` is ignored and `setCaptureSource('non-ar')` is
+refused. One exception keeps a live control on screen: started at
+`defaultLens="0.5x"` on a phone with no usable ultra-wide (the chip has
+nothing to switch), the AR pill shows, and pressing it returns to AR at
+1×. A session the probe allowed but that fails to start (on Android, a
+declined Google Play Services for AR install) is not downgraded; only
+the 0.5× lens leaves it.
+
 ## Controlled vs uncontrolled flash
 
 ```tsx
