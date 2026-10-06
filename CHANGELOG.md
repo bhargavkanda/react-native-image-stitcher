@@ -25,8 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs non-AR. The user never picks non-AR at 1×: `defaultCaptureSource` is
   ignored and `setCaptureSource('non-ar')` is refused. One exception keeps a
   live control on screen — at a raw 0.5× the chip cannot move off (no
-  enumerable ultra-wide) the AR pill shows, and pressing it returns to AR at
-  1×. Not a runtime-failure recovery: an AR session the probe allowed but that
+  enumerable ultra-wide) the AR pill shows, reading off (the camera runs
+  non-AR there), and pressing it returns to AR at 1×. Not a runtime-failure recovery: an AR session the probe allowed but that
   fails to start (a declined ARCore install) is still not downgraded. `'both'`,
   `'ar'` and `'non-ar'` are unchanged. Proven by render tests only; no phone
   has run it. See [Flash & lenses](website/docs/flash-and-lenses.md).

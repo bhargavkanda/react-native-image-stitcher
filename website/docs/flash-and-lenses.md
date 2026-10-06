@@ -69,8 +69,8 @@ the user picks the lens and the lens picks the source:
 `defaultCaptureSource` is ignored and `setCaptureSource('non-ar')` is
 refused. One exception keeps a live control on screen: started at
 `defaultLens="0.5x"` on a phone with no usable ultra-wide (the chip has
-nothing to switch), the AR pill shows, and pressing it returns to AR at
-1×. A session the probe allowed but that fails to start (on Android, a
+nothing to switch), the AR pill shows — reading off, because the camera
+runs non-AR there — and pressing it returns to AR at 1×. A session the probe allowed but that fails to start (on Android, a
 declined Google Play Services for AR install) is not downgraded; only
 the 0.5× lens leaves it.
 

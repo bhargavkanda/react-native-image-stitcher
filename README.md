@@ -190,7 +190,7 @@ captures and you wire `onCapture`). Props fall into eight groups.
 | Prop | Type | Default | Notes |
 |---|---|---|---|
 | `defaultCaptureSource` | `'ar' \| 'non-ar'` | `'ar'` | Initial capture path. Clamped to `captureSources` (below). |
-| `captureSources` | `'ar' \| 'non-ar' \| 'both'` | `'both'` | **(v0.14)** Which sources are allowed. `'both'` shows the AR toggle. `'ar'` hides the AR toggle **and** the lens chooser (ARKit/ARCore can't use the ultra-wide). `'non-ar'` hides the AR toggle, keeps the lens chooser. A single-source value overrides a conflicting `defaultCaptureSource`. `'ar-preferred'` (Unreleased) hides the AR toggle and keeps the lens chooser: AR at 1× wherever the device supports AR, non-AR at 0.5× and on a device without AR. |
+| `captureSources` | `'ar' \| 'non-ar' \| 'both' \| 'ar-preferred'` | `'both'` | **(v0.14)** Which sources are allowed. `'both'` shows the AR toggle. `'ar'` hides the AR toggle **and** the lens chooser (ARKit/ARCore can't use the ultra-wide). `'non-ar'` hides the AR toggle, keeps the lens chooser. A single-source value overrides a conflicting `defaultCaptureSource`. `'ar-preferred'` (Unreleased) hides the AR toggle and keeps the lens chooser: AR at 1× wherever the device supports AR, non-AR at 0.5× and on a device without AR. |
 | `defaultLens` | `'1x' \| '0.5x'` | `'1x'` | Initial lens. The 0.5× chooser only appears if the device actually has a usable ultra-wide (real capability detection, v0.14). |
 
 ### Panorama / stitcher tunables (uncontrolled — internal-tester knobs)

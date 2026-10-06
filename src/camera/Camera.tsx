@@ -763,7 +763,8 @@ export interface CameraProps {
    *     cannot pick non-AR at 1×, and `setCaptureSource('non-ar')` is
    *     refused.  One exception keeps a control on screen: at a raw 0.5×
    *     the chip cannot move (no enumerable ultra-wide), the AR toggle
-   *     shows, and pressing it returns to AR at 1×.  Not a recovery from
+   *     shows (reading off — the camera runs non-AR there), and pressing
+   *     it returns to AR at 1×.  Not a recovery from
    *     a runtime AR failure: an AR session that the probe allowed but
    *     that fails to start (e.g. a declined ARCore install) is not
    *     downgraded, and only the 0.5× lens leaves it.
@@ -5096,7 +5097,12 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
       && isARSupportedOnDevice
       ? (
         <ARToggle
-          arEnabled={arPreference}
+          // Under 'ar-preferred' the pill shows only as the escape hatch,
+          // where the preference is AR but the raw 0.5× runs non-AR — so it
+          // reads what RUNS (off), and pressing it turns AR on. Showing the
+          // preference there would light an "AR on" switch over a non-AR
+          // camera whose press turns AR on, not off.
+          arEnabled={arPreferred ? isAR : arPreference}
           onToggle={handleARToggle}
           contentRotation={contentRotation}
         />

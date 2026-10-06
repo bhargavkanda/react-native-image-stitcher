@@ -188,12 +188,31 @@ describe("captureSources 'ar-preferred' — an AR-capable device", () => {
     expect(last(m.sources)).toBe('non-ar');
     expect(chips(m.t)[0].props.has0_5x).toBe(false);
     expect(pills(m.t)).toHaveLength(1);
+    // The pill reads what RUNS (non-AR), not the AR preference: a lit "AR on"
+    // switch whose press turns AR on would be a lie.
+    expect(pills(m.t)[0].props.arEnabled).toBe(false);
     act(() => { (pills(m.t)[0].props.onToggle as () => void)(); });
     await settle();
     expect(m.lenses).toEqual(['1x']);
     expect(last(m.sources)).toBe('ar');
     // At 1× the pill is the policy's again: hidden.
     expect(pills(m.t)).toHaveLength(0);
+  });
+
+  it("setCaptureSource('non-ar') in the escape hatch is refused WHOLE: no 1× commit, no source change", async () => {
+    // At 1× the lens commit cannot happen anyway, so only here does the
+    // refusal's "no lens commit" have teeth: the escape hatch's lens commit
+    // would otherwise turn a request for non-AR into AR at 1×.
+    useDevice(WIDE);
+    const m = await mount({ captureSources: 'ar-preferred', defaultLens: '0.5x' });
+    expect(last(m.sources)).toBe('non-ar');
+    const before = m.sources.length;
+    act(() => { m.ref.current.setCaptureSource('non-ar'); });
+    await settle();
+    expect(m.lenses).toEqual([]);
+    expect(m.sources.slice(before)).toEqual([]);
+    expect(chips(m.t)[0].props.lens).toBe('0.5x');
+    expect(pills(m.t)).toHaveLength(1);
   });
 });
 
