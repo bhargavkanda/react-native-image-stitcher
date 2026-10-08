@@ -799,6 +799,24 @@ export interface CameraProps {
    * are not accepted: native answers `engine-unknown`.
    */
   engine?: 'keyframe' | 'sweep' | 'batch-keyframe';
+  /**
+   * Show the built-in V1/V2 engine pill so the operator can switch
+   * {@link engine} at runtime — the same shape and placement as the AR pill,
+   * rendered by BOTH trees so a sweep can always get back to keyframe.
+   *
+   * FOR SIDE-BY-SIDE TESTING. Default `false`: with it unset nothing renders
+   * and `engine` behaves exactly as before, so this cannot change a shipped
+   * host's behaviour by existing.
+   *
+   * The pill is INERT while a capture is in flight (either engine) — swapping
+   * engines mid-hold would hand the running recorder to the other one.
+   *
+   * Pressing it sets an override that wins over the `engine` prop; the host
+   * changing `engine` clears the override, so the prop is always able to take
+   * the wheel back. Each result carries the engine that produced it
+   * (`result.engine`), which is what makes an A/B attributable after the fact.
+   */
+  showEngineToggle?: boolean;
 
   /**
    * Optional destination directory for captures.  When set, the lib
@@ -1753,6 +1771,19 @@ export interface CameraHandle extends AROverlayMethods {
    * Subscribe to `onCaptureSourceChange` for what actually took effect.
    */
   setCaptureSource(source: CaptureSource): void;
+  /**
+   * Switch the pano engine at runtime — the imperative twin of the V1/V2
+   * pill, for hosts that draw their own chrome.
+   *
+   * Independent of {@link CameraProps.showEngineToggle}: that prop governs
+   * whether `<Camera>` draws the pill, not whether the engine can be moved.
+   * Sets the same override the pill does, so the `engine` prop changing still
+   * takes the wheel back.
+   *
+   * ⚠ Ignored while a capture is in flight on either engine — swapping
+   * engines mid-hold would hand the running recorder to the other one.
+   */
+  setEngine(engine: 'keyframe' | 'sweep'): void;
 }
 
 
@@ -1981,6 +2012,71 @@ const arToggleStyles = StyleSheet.create({
   labelOn: {
     color: '#1a1a1a',
   },
+});
+
+/** Props for {@link EngineToggle}. */
+export interface EngineToggleProps {
+  /** `true` when the SWEEP engine (V2) is the one that will run. */
+  sweepEnabled: boolean;
+  onToggle: () => void;
+  /** `true` while a capture is in flight — the pill dims and stops responding. */
+  disabled?: boolean;
+  /** Counter-rotation for the label, same contract as {@link ARToggle}. */
+  contentRotation?: { transform?: ViewStyle['transform'] };
+}
+
+/**
+ * V1/V2 engine pill — the keyframe engine (V1) against the sweep engine (V2).
+ *
+ * Deliberately the same shape, padding and radius as {@link ARToggle}: it sits
+ * in the same pill stack, and a control that looks like the AR pill but
+ * behaves differently is worse than one that looks different.
+ *
+ * It names what WILL RUN, not what is preferred — there is no device
+ * capability to negotiate here, so the label and the engine never disagree.
+ */
+export function EngineToggle(
+  { sweepEnabled, onToggle, disabled, contentRotation }: EngineToggleProps,
+): React.JSX.Element {
+  return (
+    <Pressable
+      onPress={disabled ? undefined : onToggle}
+      disabled={disabled}
+      accessibilityRole="switch"
+      accessibilityLabel={`Pano engine ${sweepEnabled ? 'V2 sweep' : 'V1 keyframe'}`}
+      accessibilityState={{ checked: sweepEnabled, disabled: !!disabled }}
+      style={[
+        engineToggleStyles.container,
+        sweepEnabled && engineToggleStyles.containerOn,
+        disabled && engineToggleStyles.containerDisabled,
+      ]}
+    >
+      <Text
+        style={[
+          engineToggleStyles.label,
+          sweepEnabled && engineToggleStyles.labelOn,
+          contentRotation,
+        ]}
+      >
+        {sweepEnabled ? 'V2' : 'V1'}
+      </Text>
+    </Pressable>
+  );
+}
+
+const engineToggleStyles = StyleSheet.create({
+  container: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 16,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    minWidth: 56,
+    alignItems: 'center',
+  },
+  containerOn: { backgroundColor: '#4dd3ff' },
+  containerDisabled: { opacity: 0.4 },
+  label: { color: '#fff', fontSize: 13, fontWeight: '700' },
+  labelOn: { color: '#05202b' },
 });
 
 
@@ -2213,7 +2309,8 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     arFrameMetaInterval,
     onArPluginResult,
     overlays,
-    engine = 'keyframe',
+    engine: engineProp = 'keyframe',
+    showEngineToggle = false,
     sweep,
     // ── Panorama GUIDANCE (feature/pano-ux-guidance) ──────────────
     panMode = 'vertical',
@@ -2241,6 +2338,21 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     guidanceCopy,
   } = props;
   const rectCrop = resolveRectCrop(rectCropProp);
+
+  // ── V1/V2 engine switch ────────────────────────────────────────────
+  // `engine` below is a LOCAL that shadows the prop, and that is the whole
+  // mechanism: there are ~50 reads of `engine` in this component — the hold
+  // handlers, `engineWire` (the single place it becomes a wire value), the
+  // sweep hook's `enabled`, the result's own `engine` field — and every one
+  // of them has to see the SWITCH rather than the prop. Shadowing makes that
+  // true without editing a single one, so the override cannot be half-applied
+  // the way it would be if each site had to opt in.
+  const [engineOverride, setEngineOverride] =
+    useState<'keyframe' | 'sweep' | 'batch-keyframe' | null>(null);
+  const engine = engineOverride ?? engineProp;
+  // The HOST keeps the wheel: changing the `engine` prop drops a stale
+  // override rather than being silently outranked by it.
+  useEffect(() => { setEngineOverride(null); }, [engineProp]);
 
   // Derived guidance state.  The landscape-only gate decision itself is
   // computed inline at the call sites via `shouldGateForPanMode(panMode,
@@ -3181,6 +3293,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     // Same state the built-in AR pill flips, through the pill's own guard —
     // see the interface docs.
     setCaptureSource: (source) => setCaptureSourceRef.current?.(source === 'ar'),
+    setEngine: (next) => setEngineRef.current?.(next),
   }), []);
 
   // Effect that does the async transition work whenever the settled
@@ -4918,6 +5031,10 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
     [applyArPreference],
   );
   const setCaptureSourceRef = useRef<((ar: boolean) => void) | null>(null);
+  // Same ref indirection as `setCaptureSourceRef`: the handle is built above
+  // the state it writes, so it reaches the setter through a ref rather than
+  // forcing the imperative surface down here.
+  const setEngineRef = useRef<((next: 'keyframe' | 'sweep') => void) | null>(null);
   setCaptureSourceRef.current = applyArPreference;
 
   // ── v0.13.0 — Flash control ─────────────────────────────────────
@@ -5108,6 +5225,36 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
         />
       )
       : null
+  );
+
+  // The handle's `setEngine` lands here. Same capture guard as the pill —
+  // the imperative path must not be the one that can swap engines mid-hold.
+  setEngineRef.current = (next) => {
+    if (captureRecording) return;
+    setEngineOverride(next);
+  };
+
+  /**
+   * The V1/V2 engine pill, or null.
+   *
+   * Rendered by BOTH trees, like the AR pill — a pill that only existed on the
+   * keyframe tree would be a one-way door: switch to V2 and the control that
+   * switches back is gone with the tree that drew it.
+   */
+  const renderSharedEnginePill = (): React.JSX.Element | null => (
+    showEngineToggle ? (
+      <EngineToggle
+        sweepEnabled={engine === 'sweep'}
+        // Inert mid-capture on EITHER engine (`captureRecording` is the
+        // cross-engine flag — `statusPhase` never reaches 'recording' on a
+        // sweep, so reading it alone would leave the pill live during one).
+        disabled={captureRecording}
+        onToggle={() => setEngineOverride(
+          engine === 'sweep' ? 'keyframe' : 'sweep',
+        )}
+        contentRotation={contentRotation}
+      />
+    ) : null
   );
 
   const renderSharedLensChip = (): React.JSX.Element | null => (
@@ -6346,6 +6493,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
                 pointerEvents="box-none"
               >
                 {renderSharedArPill()}
+        {renderSharedEnginePill()}
               </View>
               {/* ⚠ THE REC BANNER AND THE COUNTDOWN, ON THE SWEEP TOO.
                   Both are `<Camera>`'s and both lived only in the keyframe
@@ -6810,6 +6958,7 @@ export const Camera = forwardRef<CameraHandle, CameraProps>(function Camera(
             the SWEEP cell renders too — one pill, one state, both engines.
             Only the flash pill below is keyframe-tree-specific. */}
         {renderSharedArPill()}
+        {renderSharedEnginePill()}
         {showFlashButton && !isAR && deviceHasTorch && (
           <Pressable
             onPress={toggleFlash}

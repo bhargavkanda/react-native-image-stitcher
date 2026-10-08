@@ -644,6 +644,12 @@ function App(): React.JSX.Element {
           // the key because they are mount-time native props.
           key={`cam-kfq-${kfQuality ? 'hi' : 'lo'}-ab${antiBlurOn ? 1 : 0}`}
           engine={engine}
+          // v0.27 — the library's OWN V1/V2 pill, beside the AR pill. The
+          // 🧭 chip below flips the PROP; this exercises the built-in control
+          // a host without its own chrome gets (pepiris, the IR app). Both on
+          // screen on purpose: the chip is the host path, the pill is the
+          // library path, and they have to agree.
+          showEngineToggle
           // ── 0.5× ON iOS NEEDS NO CALIBRATION STEP FROM THIS APP.
           //
           // ARKit publishes no ultra-wide format at all (0 of 22 on
